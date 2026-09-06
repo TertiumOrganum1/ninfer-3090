@@ -449,6 +449,7 @@ struct FakeMaterializationResult {
     std::vector<FakeMaterializationSharedVictimResult> shared_victims;
     std::vector<ContextTransferObservation> transfer_observations;
     ContextOperationCounts operations;
+    std::string failure;
 };
 
 struct FakeSharedPrefixPublication {
