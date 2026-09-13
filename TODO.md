@@ -1056,6 +1056,37 @@ roofline finally acquired a denominator; read them before the rest.
       | `--mlp-a8-decode` (#90) | **no** | 27B dense post-mixer only |
       | `--lm-head-q4` (#91) | **no** | gated in the 27B loader on a W8 head; 35B loader has no such path |
 
+      - [x] **Tensor cores for the MoE experts: retired 2026-09-13 on measurement, before any
+        kernel was written.** This entry used to point at `src/ops/sparse_moe/` containing no
+        `mma.sync` at all while its experts are Q4/Q5 at 2..46 tokens -- the exact shape #89 solved
+        for dense Q4/Q5 -- and call it the port worth scoping. It is not, and the counter that
+        decides it is the one nobody had read:
+
+        | kernel | FMA pipe | tensor pipe | DRAM (elapsed) |
+        |---|---:|---:|---:|
+        | `d3_nine_warp` (T=1) | 31.25% | **0%** | 47.4% |
+        | `d4_nine_warp` (T=1) | 25.08% | **0%** | 51.6% |
+        | `d3_path_tiled` (T~4) | 41.86% | **0%** | **71.25%** |
+        | `d4_token` (T~4) | 35.05% | **0%** | 49.18% |
+
+        **The FMA pipe never gets above ~42%, and DRAM is the high-water mark everywhere.** A
+        tensor core raises the compute ceiling; there is no compute ceiling being hit. Measured
+        arithmetic intensity is ~5.7-6.5 MAC/byte against a machine balance of ~21 on the FP32 FMA
+        pipe, so these kernels are memory-bound *by a factor of three on the pipe they already
+        use*. Moving to int8 tensor cores would push the balance to ~83 MAC/byte and make the
+        mismatch worse, while adding activation quantisation error the way `--mlp-a8-decode` does.
+
+        The structural reason, which is worth keeping because it applies to any MoE: top-8 of 256
+        experts means average tokens per routed expert is `8T/256 = T/32`, so it is **1.0 at T=32
+        and 1.4 at T=46**. Each expert's weights are read once and used once. There is no reuse
+        for a tensor core to exploit -- the MMA's N dimension would sit ~1/8 filled across the
+        whole small-T range. The one exception is the *shared* expert, which every token visits,
+        and that is a single warp of nine.
+
+        `d3_path_tiled` at 71-73% of achievable DRAM is already close to the 78-82% the contiguous
+        kernels reach. The remaining headroom on this Op is the 8-of-256 gather, and it is not a
+        kernel-math problem.
+
       **Do not "port small-T to the 35B" as stated.** The 35B's narrow-width projections already
       route to `SplitKMmaDirect` over 2..96 (W8 tables), which is the same split-K direct family
       that won width 8 on the Q4/Q5 side before small-T beat it. The real gap is that
@@ -2535,14 +2566,27 @@ ceiling, and neither has had any optimisation attempted.
          batching, block splitting. None of them attacked the barrier pattern, so "all four
          candidate fixes are measured negatives" overstates what was actually ruled out.
 
-         One caution on the reasoning above, learned on the 27B in #90. "d4's DRAM pipe is only 47%
-         utilised, so the wasted bytes are not what the kernel is waiting for" is the same argument
-         that said C8 was tensor-rate bound, and `ncu` overturned that one: a latency-bound kernel
-         has *nothing* saturated by definition, and removing redundant operand movement there was
-         still worth -20% (311.6 -> 249.9 us) with no pipe anywhere near its ceiling. Low pipe
-         utilisation is not evidence that moving fewer bytes cannot help. On d4 specifically the
-         barrier term is the larger one and should be attacked first, but the DRAM-percentage
-         argument should not be what retires the over-fetch.
+         **I raised a caution here on 2026-09-13 and then tested it, and the caution was wrong.**
+         It said that "d4's DRAM pipe is only 47% utilised, so the wasted bytes are not what the
+         kernel is waiting for" was the same argument #90 overturned on the 27B, so low pipe
+         utilisation should not be what retires the over-fetch. Fair as an argument, and false
+         here. `Rows` is already a template parameter on `sparse_moe_d4_nine_warp_kernel` and each
+         row re-reads the same activation slab, so raising it amortises exactly this over-fetch.
+         Swept it:
+
+         | Rows | d4 time | L1 load sectors |
+         |---:|---:|---:|
+         | 1 (shipped) | 19.97 us | 2,629,632 |
+         | 2 | 19.78 us | 1,431,552 |
+         | 4 | 20.38 us | 832,512 |
+
+         **A 3.2x cut in L1 traffic bought nothing.** Rows=4 is slower -- it drops the grid from
+         2,048 blocks to 512 and loses more in latency hiding than it saves in traffic. Rows=2
+         measured +0.26% end to end (paired median of 6, min -0.02%, crossing zero), which is
+         noise. Reverted. The original conclusion in this entry stands on its own evidence now,
+         not just on the DRAM percentage: the kernel waits on the scattered *weight* gather, and
+         the activation re-read is not on that dependency chain. #90's lesson does not transfer,
+         because there the redundant movement *was* the operand the kernel waited for.
 
          Denominator trap, since this bit me while re-measuring: `dram__throughput` reads **100%**
          on both kernels with `.avg.pct_of_peak_sustained_active` and 47.40 / 51.63% with
