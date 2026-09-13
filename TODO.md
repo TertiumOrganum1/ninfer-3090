@@ -2593,6 +2593,42 @@ ceiling, and neither has had any optimisation attempted.
          `.avg.pct_of_peak_sustained_elapsed`. The elapsed form is the one that matches the
          numbers in this file. Quote the wrong one and these kernels look bandwidth-saturated.
 
+         **The 8-of-256 gather is not the remaining headroom either, and d3 is now done.**
+         Measured 2026-09-13, two results.
+
+         The access pattern is already perfect. On d3, `dram__sectors_read` x 32 B equals
+         `dram__bytes_read` exactly -- 348,932 sectors, 11.17 MB -- so every sector fetched is
+         fully used. There is no coalescing loss, no wasted traffic and no weight-layout win
+         available; L2 hit is 6.51%, which is what compulsory reads of weights used once look
+         like. The entire gap to the 13.1 us bandwidth floor is latency hiding.
+
+         And the latency-hiding lever works exactly as designed while buying nothing. d3's 9-warp
+         block strands 3 of 48 warps and caps the grid at 1.25 waves, which is why its SMs sat idle
+         26% of elapsed. Folding the shared expert's K range across the eight routed warps makes
+         the block 8 warps:
+
+         | | nine_warp | eight_warp |
+         |---|---:|---:|
+         | warps per SM | 45 of 48 | 48 of 48 |
+         | blocks per SM | 5 | 6 (410 -> 492 slots) |
+         | waves per SM | 1.25 | 1.04 |
+         | achieved occupancy | 77.13% | **87.08%** |
+         | duration | 23.87 us | **21.82 us** |
+
+         End to end that is **-0.03% at C1 and +0.11% at MTP3**, both crossing zero over six paired
+         repetitions. Under replay the four MoE kernels total 57.05 -> 54.97 us, so the time is
+         real; it does not convert because these kernels overlap under PDL, and d3 finishing 0.8 us
+         earlier does not let d4 start 0.8 us earlier. Reverted.
+
+         **This is the sharpest form of the "a stall percentage is not a speedup" rule in this
+         file: a faster kernel is not a faster model, and ncu replay cannot tell you which one you
+         have -- only the end-to-end paired A/B can.** Three d3 geometries are now measured
+         negatives (3-warp split, Rows>1, 8-warp fold). Stop tuning d3.
+
+         What is left on this Op is `sparse_moe_d2_warp_kernel`: ~8.3 us of the ~57 us the four
+         kernels cost, running `<<<1, 32>>>` -- one warp of one SM, 81 idle, and d3 cannot start
+         without its ids. That is a parallel-selection problem, not a memory one.
+
 - [x] **The shared-expert warp was the straggler, and widening its consume loop is worth +6.47%
       on the 35B. Shipped 2026-09-13.** Found by taking the stall breakdown above and then asking
       what warp 8 actually runs. Both d3 and d4 give warps 0-7 the routed experts on an
