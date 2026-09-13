@@ -33,18 +33,53 @@ set -euo pipefail
 repo="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$repo"
 
+config_args() {
+  case "$1" in
+    27b-decode)      echo "qwen3_8_27b.ninfer -n 128" ;;
+    27b-decode-mtp3) echo "qwen3_8_27b.ninfer -n 128 --spec mtp --draft-tokens 3 --lm-head-draft" ;;
+    27b-prefill)     echo "qwen3_8_27b.ninfer -pg 4096,128" ;;
+    35b-decode)      echo "qwen3_6_35b_a3b.ninfer -n 128" ;;
+    35b-prefill)     echo "qwen3_6_35b_a3b.ninfer -pg 4096,128" ;;
+    *) return 1 ;;
+  esac
+}
+
+configs=("$@")
+(( ${#configs[@]} == 0 )) && configs=(27b-decode 27b-decode-mtp3)
+
+# The artifacts this run actually needs, deduplicated. The probe below matches on these rather than
+# on "any .ninfer": a directory holding one unrelated artifact would otherwise be selected and every
+# requested configuration reported MISSING, while the candidate that holds them sits unexamined.
+required=()
+for key in "${configs[@]}"; do
+  spec="$(config_args "$key")" || continue
+  read -r artifact _ <<<"$spec"
+  for seen in ${required[@]+"${required[@]}"}; do
+    [[ "$seen" == "$artifact" ]] && artifact="" && break
+  done
+  [[ -n "$artifact" ]] && required+=("$artifact")
+done
+
 if [[ -n "${NINFER_MODEL_DIR:-}" ]]; then
   model_dir="$NINFER_MODEL_DIR"
 else
   model_dir=""
-  # Probe for an artifact, not for a directory: an empty models/ left by a cleared download would
-  # otherwise shadow a populated one (the same rule as model-dir.ps1).
+  fallback=""
+  # Prefer a candidate holding every required artifact; remember the first holding any, so a
+  # partial checkout still reaches the per-configuration MISSING report rather than a bare exit.
   for candidate in "$repo/models" "$repo/scripts/models"; do
-    if compgen -G "$candidate/*.ninfer" >/dev/null; then
+    compgen -G "$candidate/*.ninfer" >/dev/null || continue
+    [[ -z "$fallback" ]] && fallback="$candidate"
+    complete=1
+    for artifact in ${required[@]+"${required[@]}"}; do
+      [[ -f "$candidate/$artifact" ]] || { complete=0; break; }
+    done
+    if (( complete )); then
       model_dir="$candidate"
       break
     fi
   done
+  [[ -z "$model_dir" ]] && model_dir="$fallback"
   if [[ -z "$model_dir" ]]; then
     echo "No .ninfer artifact under models/ or scripts/models/; set NINFER_MODEL_DIR." >&2
     exit 1
@@ -68,20 +103,6 @@ fi
 
 out="${NINFER_SWEEP_OUT:-profiles/sweeps}"
 mkdir -p "$out"
-
-config_args() {
-  case "$1" in
-    27b-decode)      echo "qwen3_8_27b.ninfer -n 128" ;;
-    27b-decode-mtp3) echo "qwen3_8_27b.ninfer -n 128 --spec mtp --draft-tokens 3 --lm-head-draft" ;;
-    27b-prefill)     echo "qwen3_8_27b.ninfer -pg 4096,128" ;;
-    35b-decode)      echo "qwen3_6_35b_a3b.ninfer -n 128" ;;
-    35b-prefill)     echo "qwen3_6_35b_a3b.ninfer -pg 4096,128" ;;
-    *) return 1 ;;
-  esac
-}
-
-configs=("$@")
-(( ${#configs[@]} == 0 )) && configs=(27b-decode 27b-decode-mtp3)
 
 for key in "${configs[@]}"; do
   if ! spec="$(config_args "$key")"; then
