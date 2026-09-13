@@ -2549,6 +2549,41 @@ ceiling, and neither has had any optimisation attempted.
          `.avg.pct_of_peak_sustained_elapsed`. The elapsed form is the one that matches the
          numbers in this file. Quote the wrong one and these kernels look bandwidth-saturated.
 
+- [x] **The shared-expert warp was the straggler, and widening its consume loop is worth +6.47%
+      on the 35B. Shipped 2026-09-13.** Found by taking the stall breakdown above and then asking
+      what warp 8 actually runs. Both d3 and d4 give warps 0-7 the routed experts on an
+      eight-values-per-lane consume loop, and warp 8 the shared expert on a much narrower one:
+      `dot_fp32_rows` sent W8 to `load_pair` (two values per lane, and `lane < kGroupK / 2` is
+      **16 of 32 lanes idle** at kGroupK=32), and `dot_two_rows` sent it to `load_one`, one value
+      per lane across 64 trips. Identical arithmetic, 4-8x the loop trips, each carrying its own
+      dependent load.
+
+      In d3 that only lengthens the block. In d4 it is worse than that: d4 reduces nine warps
+      through one `__syncthreads()`, so the eight fast warps *wait* for the slow one, which is
+      what the 10.05 barrier figure was. Giving W8 a `load_eight` and one generalised lane mapping
+      (a group needs `kGroupK/8` lanes, so a warp covers `32/(kGroupK/8)` groups per pass -- 4 for
+      Q5/Q6 at 64, 8 for W8 at 32, which compiles to the previous code for the Q5/Q6 case):
+
+      | | before | after |
+      |---|---:|---:|
+      | d4 `barrier` stall | 10.05 | **2.13** |
+      | d4 duration | 26.78 us | **21.38 us** |
+      | d3 duration | 30.94 us | **24.90 us** |
+      | d3 `long_scoreboard` | 7.54 | 8.76 |
+
+      End to end on the 35B, paired median of 6, 6/6 positive: **+6.47% at C1** (+3.93..+6.74%)
+      and **+13.43% with MTP3** (+13.21..+13.64%) -- MTP3 is larger because the small-T kernels
+      (`d3_path_tiled`, `d4_token`) call the same two helpers, so they were fixed at the same
+      time. **Do not quote the MTP3 number**: it runs on `bench/fixtures/bench_corpus.ids`. The
+      27B is untouched at 46.58 against 46.83 tok/s, inside its +-0.21 spread, because it is dense
+      and calls no `sparse_moe` kernel at all.
+
+      Note what this was *not*. The three fixes closed above as measured negatives all attacked
+      occupancy -- launch geometry, batching, block splitting -- and this attacked neither
+      occupancy nor the 8x L1 over-fetch, which is still there and still not worth chasing
+      (d3's `long_scoreboard` even rose slightly; the win is balance, not bytes). It is #88's
+      consume-loop widening, applied to the one warp in the block that never got it.
+
       Registers are *not* on that list, which is the correction: an earlier draft of this entry
       claimed `Block Limit Registers = 5` was the constraint and that 32 registers per thread would
       give 7 blocks per SM. At 288 threads it would give 7 by the register rule, but the warp rule

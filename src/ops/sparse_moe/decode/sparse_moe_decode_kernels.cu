@@ -143,19 +143,41 @@ struct Q6Codec {
 };
 
 struct W8Codec {
-    static constexpr int kGroupK                = 32;
-    static constexpr bool kD3SingleValuePerLane = true;
-    static constexpr bool kD3PackedWord8        = false;
-    static constexpr bool kPackedWord8          = false;
+    static constexpr int kGroupK         = 32;
+    // Was kD3SingleValuePerLane, which is no longer what the branch does -- it selects the W8
+    // shared plane in d3, and that plane now takes eight values per lane like everything else.
+    static constexpr bool kD3W8Plane     = true;
+    static constexpr bool kD3PackedWord8 = false;
+    // The shared expert takes the same eight-per-lane consume loop as the routed ones. It used to
+    // take `load_pair`, and in d4 that is not merely slower in isolation -- d4 reduces nine warps
+    // through one `__syncthreads()`, so warp 8 running a 4x narrower loop on half a warp
+    // (`lane < kGroupK / 2` is 16 of 32 lanes at kGroupK=32) made it the straggler the other eight
+    // waited for. See the d4 stall table in TODO section 2c.
+    static constexpr bool kPackedWord8          = true;
 
-    __device__ static __forceinline__ float load_one(const std::uint8_t* codes,
-                                                     const std::uint8_t* scales,
-                                                     std::int64_t group_index, int lane) {
+    // Eight contiguous int8 codes and the group's single FP16 scale. The codes are plain and
+    // contiguous (kCodeBytesPerGroup == kGroupK), so the eight bytes are one 64-bit load rather
+    // than the four two-byte loads `load_pair` issued for the same span.
+    __device__ static __forceinline__ void
+    load_eight(const std::uint8_t* codes, const std::uint8_t* /*high*/, const std::uint8_t* scales,
+               std::int64_t group_index, int lane_in_group, float (&weights)[8]) {
         const float scale = __half2float(
             __ushort_as_half(*reinterpret_cast<const std::uint16_t*>(scales + group_index * 2)));
-        return static_cast<float>(static_cast<std::int8_t>(codes[group_index * kGroupK + lane])) *
-               scale;
+        const std::uint8_t* packed = codes +
+                                     group_index * W8RowSplitStorage::kCodeBytesPerGroup +
+                                     static_cast<std::int64_t>(lane_in_group) * 8;
+        // kCodeBytesPerGroup is 32 and lane_in_group * 8 is a multiple of 8, so this is 8-byte
+        // aligned whenever the plane is, which the loader guarantees. One LDG.64 for eight codes.
+        const uint2 raw = *reinterpret_cast<const uint2*>(packed);
+        const std::uint32_t words[2] = {raw.x, raw.y};
+#pragma unroll
+        for (int item = 0; item < 8; ++item) {
+            const std::int8_t code =
+                static_cast<std::int8_t>((words[item >> 2] >> ((item & 3) * 8)) & 0xFFu);
+            weights[item] = static_cast<float>(code) * scale;
+        }
     }
+
 
     __device__ static __forceinline__ void
     load_pair(const std::uint8_t* codes, const std::uint8_t* high, const std::uint8_t* scales,
@@ -207,15 +229,37 @@ __device__ __forceinline__ void dot_two_rows(const std::uint8_t* codes, const st
                 acc1 = fmaf(weights1[item], values[item], acc1);
             }
         }
-    } else if constexpr (Codec::kD3SingleValuePerLane) {
-        for (int group = first_group; group < last_group; ++group) {
+    } else if constexpr (Codec::kD3W8Plane) {
+        // The shared expert's W8 plane, on the same eight-per-lane ownership as the Q4 branch
+        // above. It used to take one value per lane per group: identical arithmetic in 8x the
+        // loop trips, each carrying its own dependent load. d3's dominant stall is exactly that
+        // latency (long_scoreboard 7.54 of a ~9.3 budget), and eight values per lane is the same
+        // fix that was worth +3.90% on the 27B's q5 GEMV.
+        constexpr int kLanesPerGroup = Codec::kGroupK / 8;
+        constexpr int kGroupsPerIter = 32 / kLanesPerGroup;
+        static_assert(kGroups % kGroupsPerIter == 0, "the consume loop must not leave a tail");
+        const int lane_group    = lane / kLanesPerGroup;
+        const int lane_in_group = lane % kLanesPerGroup;
+        for (int group_base = first_group; group_base < last_group;
+             group_base += kGroupsPerIter) {
+            const int group           = group_base + lane_group;
             const std::int64_t index0 = static_cast<std::int64_t>(row0) * kGroups + group;
             const std::int64_t index1 = static_cast<std::int64_t>(row1) * kGroups + group;
-            const float w0            = Codec::load_one(codes, scales, index0, lane);
-            const float w1            = Codec::load_one(codes, scales, index1, lane);
-            const float xv            = __bfloat162float(x[group * Codec::kGroupK + lane]);
-            acc0                      = fmaf(w0, xv, acc0);
-            acc1                      = fmaf(w1, xv, acc1);
+            float weights0[8];
+            float weights1[8];
+            Codec::load_eight(codes, nullptr, scales, index0, lane_in_group, weights0);
+            Codec::load_eight(codes, nullptr, scales, index1, lane_in_group, weights1);
+            const uint4 input     = load_vec<uint4>(x + group * Codec::kGroupK + lane_in_group * 8);
+            const float2 x0       = bf16x2_bits_to_float2(input.x);
+            const float2 x1       = bf16x2_bits_to_float2(input.y);
+            const float2 x2       = bf16x2_bits_to_float2(input.z);
+            const float2 x3       = bf16x2_bits_to_float2(input.w);
+            const float values[8] = {x0.x, x0.y, x1.x, x1.y, x2.x, x2.y, x3.x, x3.y};
+#pragma unroll
+            for (int item = 0; item < 8; ++item) {
+                acc0 = fmaf(weights0[item], values[item], acc0);
+                acc1 = fmaf(weights1[item], values[item], acc1);
+            }
         }
     } else if (lane < Codec::kGroupK / 2) {
         for (int group = first_group; group < last_group; ++group) {
@@ -376,9 +420,20 @@ __device__ __forceinline__ void dot_fp32_rows(const std::uint8_t* codes, const s
     if constexpr (Codec::kPackedWord8) {
         // Q5/Q6 use the same eight-value lane ownership as D3. The high plane and FP16 scale are
         // decoded exactly from their registered row-split codec before FP32 accumulation.
-        const int lane_group    = lane >> 3;
-        const int lane_in_group = lane & 7;
-        for (int group_base = first_group; group_base < last_group; group_base += 4) {
+        //
+        // Eight values per lane fixes the lane-to-group mapping: a group of kGroupK values needs
+        // kGroupK/8 lanes, so a 32-lane warp covers 32/(kGroupK/8) groups per iteration. Q5/Q6 at
+        // kGroupK=64 give 8 lanes per group and 4 groups per pass, which is what this loop was
+        // written as literally; W8 at kGroupK=32 gives 4 and 8. Both divide kGroups exactly at
+        // kIntermediate 512, and the static_assert says so rather than leaving a silent tail.
+        constexpr int kLanesPerGroup = Codec::kGroupK / 8;
+        constexpr int kGroupsPerIter = 32 / kLanesPerGroup;
+        static_assert(Codec::kGroupK % 8 == 0, "eight values per lane needs kGroupK % 8 == 0");
+        static_assert(kGroups % kGroupsPerIter == 0, "the consume loop must not leave a tail");
+        const int lane_group    = lane / kLanesPerGroup;
+        const int lane_in_group = lane % kLanesPerGroup;
+        for (int group_base = first_group; group_base < last_group;
+             group_base += kGroupsPerIter) {
             const int group = group_base + lane_group;
             const float4 x0 = load_vec<float4>(x + group * Codec::kGroupK + lane_in_group * 8);
             const float4 x1 = load_vec<float4>(x + group * Codec::kGroupK + lane_in_group * 8 + 4);
