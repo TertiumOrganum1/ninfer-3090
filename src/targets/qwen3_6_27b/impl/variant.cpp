@@ -96,18 +96,6 @@ ops::LinearPolicy text_policy(const Weight& weight) {
 // --mlp-a8-decode widens the gate_up policy to admit the integer small-T route at decode and
 // verify widths as well as full prefill tiles. Only where the base policy already admits integer
 // activations: the flag must not conjure an integer route on a build or shape that has none.
-ops::LinearPolicy mlp_policy(const DensePostMixerPayload& weights, qwen3_6::TextPhase phase) {
-    const ops::LinearPolicy base = text_policy(weights.gate_up);
-    // Verify only. The route covers 16..32 columns, and a prefill chunk lands in that range
-    // whenever a prompt's ragged tail does -- `causal_score` sends its remainder through prefill
-    // unchanged, so a 1,041-token score is 1,024 + 16 and the tail would take a lossy route the
-    // caller asked for at decode. Without this guard the flag silently reaches scoring, which is
-    // the opposite of what its documentation promises.
-    const bool decode_phase = phase == qwen3_6::TextPhase::Verify;
-    return (weights.a8_decode && decode_phase && base == ops::LinearPolicy::AllowA8Int)
-               ? ops::LinearPolicy::AllowA8IntDecode
-               : base;
-}
 
 constexpr std::size_t kMinimumLeafWorkspaceBytes = 1;
 
@@ -166,6 +154,19 @@ std::size_t post_mixer_workspace_bytes(QType gate_up_qtype, QType down_qtype,
 }
 
 } // namespace
+
+ops::LinearPolicy mlp_policy(const DensePostMixerPayload& weights, qwen3_6::TextPhase phase) {
+    const ops::LinearPolicy base = text_policy(weights.gate_up);
+    // Verify only. The route covers 16..32 columns, and a prefill chunk lands in that range
+    // whenever a prompt's ragged tail does -- `causal_score` sends its remainder through prefill
+    // unchanged, so a 1,041-token score is 1,024 + 16 and the tail would take a lossy route the
+    // caller asked for at decode. Without this guard the flag silently reaches scoring, which is
+    // the opposite of what its documentation promises.
+    const bool decode_phase = phase == qwen3_6::TextPhase::Verify;
+    return (weights.a8_decode && decode_phase && base == ops::LinearPolicy::AllowA8Int)
+               ? ops::LinearPolicy::AllowA8IntDecode
+               : base;
+}
 
 std::vector<GraphExecutionProfile> Variant::ordinary_graph_profiles(std::uint32_t capacity) {
     // E+1 is the one-token visible window. Early ranges limit empty producer CTAs; later ranges

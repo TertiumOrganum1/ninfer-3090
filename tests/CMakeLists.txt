@@ -177,6 +177,14 @@ ninfer_add_test(ninfer_qwen3_8_27b_dflash2_real_test
   LIBRARIES ninfer_engine
   TEST_ARGS 7 1 1 2 int8 0 1)
 set_tests_properties(ninfer_qwen3_8_27b_dflash2_real_test PROPERTIES SKIP_RETURN_CODE 77)
+ninfer_add_test(ninfer_qwen3_6_27b_mlp_a8_decode_test
+  SOURCES targets/qwen3_6_27b/test_mlp_a8_decode_wiring.cpp
+  LIBRARIES ninfer_engine)
+target_include_directories(ninfer_qwen3_6_27b_mlp_a8_decode_test PRIVATE
+  ${PROJECT_SOURCE_DIR}/src/targets/qwen3_6/export
+  ${PROJECT_SOURCE_DIR}/src/targets/qwen3_6_27b/export)
+target_link_libraries(ninfer_qwen3_6_27b_mlp_a8_decode_test PRIVATE ${NINFER_CUDART_TARGET})
+
 ninfer_add_test(ninfer_qwen3_6_27b_load_plan_test
   SOURCES targets/qwen3_6_27b/test_load_plan.cpp
   NEEDS_SOURCE_DIR

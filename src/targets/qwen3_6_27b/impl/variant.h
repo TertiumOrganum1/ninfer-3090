@@ -2,6 +2,7 @@
 
 #include "core/device.h"
 #include "targets/qwen3_6_27b/impl/config.h"
+#include "ninfer/ops/linear.h"
 #include "ninfer/ops/sparse_moe.h"
 #include "targets/qwen3_6_27b/impl/load/bindings.h"
 #include <ninfer/targets/qwen3_6/runtime.h>
@@ -139,5 +140,11 @@ struct Variant {
     dflash_graph_profiles(std::uint32_t capacity, std::uint32_t draft_window,
                           std::uint32_t batch_size);
 };
+
+// The gate_up policy `post_mixer` runs under. Declared here rather than kept file-local so the
+// phase guard is testable: whether --mlp-a8-decode reaches prefill is not observable from the
+// kernel oracle, and getting it wrong quantises a scoring run that documents itself as unaffected.
+[[nodiscard]] ops::LinearPolicy mlp_policy(const DensePostMixerPayload& weights,
+                                           qwen3_6::TextPhase phase);
 
 } // namespace ninfer::targets::qwen3_6_27b::detail
