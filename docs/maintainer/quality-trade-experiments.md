@@ -1,10 +1,16 @@
-# Quality trades: int4 vocabulary head and FP16 GDN state
+# Quality trades: int4 vocabulary head, FP16 GDN state, integer-activation MLP decode
 
-Two speed-for-quality trades, both **implemented, measured, and wired to CLI flags**:
-`--lm-head-q4` and `--gdn-state-fp16` on `ninfer`, `ninfer-serve`, and `ninfer-perplexity`. Both
-default off. The [`sm_86` findings](../performance.md#small-t-tensor-core-kernels-for-verify-and-cohort-decode)
-explain why they were the next levers: a decode round is bandwidth-bound at C1 and tensor-rate bound
-at C8, and both trades buy bytes.
+Three speed-for-quality trades, all **implemented, measured, and wired to CLI flags**:
+`--lm-head-q4`, `--gdn-state-fp16` and `--mlp-a8-decode` on `ninfer`, `ninfer-serve`, and
+`ninfer-perplexity`. All default off. The [`sm_86` findings](../performance.md#small-t-tensor-core-kernels-for-verify-and-cohort-decode)
+explain why the first two were the next levers: a decode round is bandwidth-bound at C1, and both
+of them buy bytes.
+
+C8 was believed to be tensor-rate bound when `--mlp-a8-decode` was built, which is what motivated
+it. Counters since say otherwise -- tensor, L1 and DRAM all sit near 38% at 31% occupancy, so the
+round is latency-bound and operand movement, not MMA rate, is the limit. That is why the int8 route
+returned 4-6% rather than the 4.7x its instruction rate suggests; the correction and its numbers are
+in [performance.md](../performance.md#small-t-tensor-core-kernels-for-verify-and-cohort-decode).
 
 **Verdict, ahead of the detail below:** `--gdn-state-fp16` is a clean win — free within measurement
 noise on quality, a modest real C8 speedup, and it halves the host state image. Keep it enabled
@@ -134,3 +140,37 @@ clean.
 
 Freeing the W8 head's now-unused upper halves after `--lm-head-q4` requantizes it in place is a
 further ~670 MB of VRAM for KV, and is not done.
+
+## `--mlp-a8-decode` -- integer-activation MLP gate_up at decode widths
+
+Added after the other two, and measured differently because perplexity cannot see it. The kernel,
+its per-width sweep and the five variants that were measured and rejected live in the header of
+`src/ops/linear/q4/q4_small_t_mma_i8.cuh`; the README carries the user-facing table. The short
+version:
+
+- The Op is 4-6% faster than the BF16 small-T kernel from sixteen columns up, and slower at eight,
+  so the route is admitted for 16..32 columns only.
+- End to end at C8 with MTP3 it is **+1.28%** over four interleaved repetitions (431.5 -> 437.0
+  tok/s), which is what gate_up's share of a round predicts.
+- Quality evidence is the FP64 oracle bound, 0.0080-0.0371 relative L2 across 2..32 columns against
+  the 0.04 allowance, plus the fact that output demonstrably changes at C8.
+
+**Why perplexity is silent on it, and what to use instead.** The route is admitted only in the
+verify phase, and `CausalScoring` runs the prefill phase, so scoring never reaches it -- the flag is
+accepted by `ninfer-perplexity` and changes nothing there.
+
+That phase guard is load-bearing, and the first cut of this did not have it. Width alone is not
+enough: `causal_score` sends its remainder through prefill unchanged, so a 1,041-token input scores
+as 1,024 + 16 and the 16-column tail would have taken the lossy route in the middle of a
+measurement that advertises itself as unaffected. Reviewed and fixed before merge. That is a genuine gap in the evidence
+rather than a clean bill of health: the trade is only exercised by cohort decode, so the honest
+checks are the oracle bound above and a greedy-divergence comparison at C8, both of which this
+branch has. A stronger number would need a scorer that can run at cohort widths.
+
+**The finding that outlived the kernel.** `docs/performance.md` called C8 tensor-rate bound, which
+is why int8 looked like a 4.7x lever. `ncu` says otherwise: the kernel sits at 74% L1/TEX against
+42% DRAM and 47% SM, so operand movement through L1 and shared memory is the limit and the int8
+MMA's arithmetic advantage is mostly unspendable at this shape. The largest single win in the whole
+exercise was not the instruction swap but deleting a redundant copy of the staged activation slab.
+That reading applies to the other small-T kernels too -- they share the shape and the staging
+pattern -- and is the reason a cp.async ring lost at every width here.
