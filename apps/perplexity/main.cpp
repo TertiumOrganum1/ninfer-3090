@@ -67,8 +67,8 @@ std::string usage_text() {
            "       [--context N] [--stride N] [--device N]\n"
            "       [--kv-dtype bf16|int8|fp8|rk8v4|nvfp4|k8v4] [--output <directory>]\n"
            "       [--lm-head-q4] [--gdn-state-fp16] [--mlp-a8-decode]\n"
-           "       (--mlp-a8-decode is inert here: scoring runs at prefill widths and"
-           "        the route it enables covers 16..32 columns only)\n"
+           "       (--mlp-a8-decode is inert here: the route it enables is verify-phase"
+           "        only, and scoring runs the prefill phase)\n"
            "       [--log-level trace|debug|info|warning|error|critical|off]\n";
 }
 

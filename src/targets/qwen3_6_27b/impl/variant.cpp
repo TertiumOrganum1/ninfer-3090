@@ -52,11 +52,19 @@ constexpr ops::LinearPolicy kFp8TextPolicy   = ops::LinearPolicy::A16Only;
 // The integer-activation route for groupwise-int weights is an sm_86 addition: it feeds the s8
 // tensor cores, which Ampere has and which no A16 route uses.
 constexpr ops::LinearPolicy kGroupwiseIntTextPolicy = ops::LinearPolicy::AllowA8Int;
+// What the planner reserves for. --mlp-a8-decode is a runtime choice the planner cannot see, so it
+// plans the superset: AllowA8IntDecode's capacity is the max over the A16, integer-prefill and
+// integer-decode routes, which is what the leaf may actually take. A16Only under-counts -- the
+// 16..32 band routes to SmallTTiled, whose A16 capacity is zero, while the integer decode route
+// stages padded activation codes and scales out of the same arena.
+constexpr ops::LinearPolicy kGroupwiseIntPlanningPolicy = ops::LinearPolicy::AllowA8IntDecode;
 #else
 constexpr ops::LinearPolicy kNvfp4TextPolicy = ops::LinearPolicy::AllowA4;
 constexpr ops::LinearPolicy kFp8TextPolicy   = ops::LinearPolicy::AllowA8;
 // Not built for sm_120a; groupwise-int keeps its A16 route there.
 constexpr ops::LinearPolicy kGroupwiseIntTextPolicy = ops::LinearPolicy::A16Only;
+// No integer route off sm_86, so there is nothing extra to reserve.
+constexpr ops::LinearPolicy kGroupwiseIntPlanningPolicy = ops::LinearPolicy::A16Only;
 #endif
 
 ops::LinearPolicy text_policy(const Weight& weight) {
@@ -88,9 +96,15 @@ ops::LinearPolicy text_policy(const Weight& weight) {
 // --mlp-a8-decode widens the gate_up policy to admit the integer small-T route at decode and
 // verify widths as well as full prefill tiles. Only where the base policy already admits integer
 // activations: the flag must not conjure an integer route on a build or shape that has none.
-ops::LinearPolicy mlp_policy(const DensePostMixerPayload& weights) {
+ops::LinearPolicy mlp_policy(const DensePostMixerPayload& weights, qwen3_6::TextPhase phase) {
     const ops::LinearPolicy base = text_policy(weights.gate_up);
-    return (weights.a8_decode && base == ops::LinearPolicy::AllowA8Int)
+    // Verify only. The route covers 16..32 columns, and a prefill chunk lands in that range
+    // whenever a prompt's ragged tail does -- `causal_score` sends its remainder through prefill
+    // unchanged, so a 1,041-token score is 1,024 + 16 and the tail would take a lossy route the
+    // caller asked for at decode. Without this guard the flag silently reaches scoring, which is
+    // the opposite of what its documentation promises.
+    const bool decode_phase = phase == qwen3_6::TextPhase::Verify;
+    return (weights.a8_decode && decode_phase && base == ops::LinearPolicy::AllowA8Int)
                ? ops::LinearPolicy::AllowA8IntDecode
                : base;
 }
@@ -339,11 +353,12 @@ void Variant::gdn_norm_control_projection(const Tensor& residual, const Tensor& 
 }
 
 void Variant::post_mixer(const Tensor& hidden, const PostMixerWeights& weights, Tensor& residual,
-                         qwen3_6::TextPhase, const ::ninfer::ops::SparseMoeHints&,
+                         qwen3_6::TextPhase phase, const ::ninfer::ops::SparseMoeHints&,
                          WorkspaceArena& workspace, cudaStream_t stream) {
     auto scope        = workspace.scope();
     Tensor activation = workspace.alloc(DType::BF16, {TextConfig::intermediate, hidden.ne[1]});
-    ops::linear_swiglu(hidden, weights.gate_up, activation, mlp_policy(weights), workspace, stream);
+    ops::linear_swiglu(hidden, weights.gate_up, activation, mlp_policy(weights, phase), workspace,
+                       stream);
     ops::linear_add(activation, weights.down, residual, text_policy(weights.down), workspace,
                     stream);
 }
@@ -521,14 +536,19 @@ std::size_t Variant::gdn_norm_control_projection_workspace_capacity_bytes(std::i
 }
 
 std::size_t Variant::post_mixer_workspace_capacity_bytes(WeightsProfile weights_profile,
-                                                         qwen3_6::TextPhase, std::int32_t first,
-                                                         std::int32_t last) {
+                                                         qwen3_6::TextPhase phase,
+                                                         std::int32_t first, std::int32_t last) {
     validate_token_interval(first, last);
     switch (weights_profile) {
     case WeightsProfile::Qwen36GroupwiseInt:
     case WeightsProfile::Qwen38GroupwiseInt:
+        // Verify is the only phase mlp_policy lets take the integer decode route, so it is the only
+        // one that has to carry its scratch.
         return post_mixer_workspace_bytes(QType::Q4G64_F16S, QType::Q5G64_F16S,
-                                          ops::LinearPolicy::A16Only, first, last);
+                                          phase == qwen3_6::TextPhase::Verify
+                                              ? kGroupwiseIntPlanningPolicy
+                                              : ops::LinearPolicy::A16Only,
+                                          first, last);
     case WeightsProfile::Qwen36Nvfp4:
         return post_mixer_workspace_bytes(QType::NVFP4, QType::NVFP4, kNvfp4TextPolicy, first,
                                           last);
