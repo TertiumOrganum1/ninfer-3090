@@ -115,7 +115,7 @@ std::string usage_text(const char* argv0) {
            "       [--max-context N] [--kv-capacity N|auto] [--prefill-chunk N] [--max-new N]\n"
            "       [--device N] [--devices N,M]\n"
            "       [--kv-dtype bf16|int8|fp8|rk8v4|nvfp4|k8v4] [--spec mtp|dflash|dflash2 --draft-tokens N]\n"
-           "       [--lm-head-draft] [--lm-head-q4] [--gdn-state-fp16]\n"
+           "       [--lm-head-draft] [--lm-head-q4] [--gdn-state-fp16] [--mlp-a8-decode]\n"
            "       [--temperature F] [--top-p F] [--top-k N] [--min-p F]\n"
            "       [--presence-penalty F] [--frequency-penalty F] [--seed N] [--greedy]\n"
            "       [--stop-token-id N]... [--stop <text>]... [--reasoning-stop <text>]...\n"
