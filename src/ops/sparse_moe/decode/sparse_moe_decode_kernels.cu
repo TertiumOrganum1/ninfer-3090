@@ -311,6 +311,36 @@ __device__ __forceinline__ void dot_two_rows(const std::uint8_t* codes, const st
 // 6.1% between the two arms (DRAM 46.9% -> 52.4%), which is larger than the d3 effect. A downstream
 // kernel in the same fused pipeline is NOT a clean control -- d3's different access pattern leaves
 // different L2 state behind for d4. The occupancy counters above are what carry this result.
+
+// EIGHT WARPS WAS ALSO TRIED, IN THE OPPOSITE DIRECTION, AND IT WINS THE KERNEL AND LOSES THE
+// MODEL. Measured 2026-09-13. The split above failed by making *more, smaller* blocks and paying a
+// worse wave tail, so this went the other way: fold the shared expert's K range across the eight
+// routed warps (kHidden/8 = 256 each, one trip of the widened W8 loop) and reduce it once, so the
+// block is 8 warps instead of 9. That is a strictly better launch on every counter --
+//
+//                          nine_warp          eight_warp
+//   warps per SM             45 of 48          48 of 48
+//   blocks per SM                   5                 6   (410 -> 492 slots)
+//   waves per SM                 1.25              1.04
+//   ACHIEVED occupancy         77.13%            87.08%
+//   eligible warps               1.58              1.85
+//   duration                  23.87 us          21.82 us   (-8.6%)
+//
+// -- and it is worth **nothing** end to end: -0.03% at C1 (paired median of 6, 3/6 positive) and
+// +0.11% with MTP3 (4/6), both crossing zero. Under ncu replay the four MoE kernels total 57.05 ->
+// 54.97 us, so the kernel time is genuinely there; it just does not convert. These kernels run in
+// a PDL pipeline and overlap, so d3 finishing 0.8 us earlier does not let d4 start 0.8 us earlier.
+//
+// The lesson is the sharper version of the one above: **a faster kernel in isolation is not a
+// faster model, and ncu replay cannot tell you which you have.** Only the end-to-end paired A/B
+// can. Reverted -- it also reordered the shared expert's FP32 accumulation, which is a real
+// numerical change to carry for zero gain. The occupancy lever on d3 is now spent: it works
+// exactly as designed and the design does not matter.
+//
+// What is left on this Op is not d3. `sparse_moe_d2_warp_kernel` is ~8.3 us of the ~57 us the four
+// kernels cost, on <<<1, 32>>> -- one warp of one SM, with the other 81 idle and d3 unable to start
+// because it needs the ids. See TODO's d2 entry; that is the next real target, and it is a
+// parallel-selection problem, not a memory one.
 template <class RoutedCodec>
 __global__ void sparse_moe_d3_nine_warp_kernel(
     const __nv_bfloat16* __restrict__ x, const int* __restrict__ ids,
