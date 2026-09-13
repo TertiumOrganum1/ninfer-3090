@@ -1042,6 +1042,29 @@ roofline finally acquired a denominator; read them before the rest.
       The 27B is a different shape: 86% of its busy time is four GEMV kernels that *are* the weight
       streaming, so its remaining thirty points are inside those.
 
+      **Which 2026-09 speedups reach the 35B, checked 2026-09-13 rather than assumed.** The two
+      models share a runtime but almost no kernels, and the difference is codec: the 35B's
+      attention input, GDN input and linear_add are all `W8G32_F16S`, its output head is Q6, and
+      only its MoE experts are Q4/Q5. So:
+
+      | change | 35B? | why |
+      |---|---|---|
+      | `sparse_moe` branch-free top-8 network (#88) | **yes** | +3.15% measured on the 35B itself |
+      | `--gdn-state-fp16` (#91) | **yes** | shared `layouts_impl.h`; ~+2.8% median, 3 of 4 pairs |
+      | small-T Q4/Q5 MMA kernels (#89) | **no** | 35B projections are W8; a different plan table |
+      | q5 GEMV / q4 SwiGLU GEMV widenings (#88) | **no** | 27B dense-path kernels; 35B head is Q6 |
+      | `--mlp-a8-decode` (#90) | **no** | 27B dense post-mixer only |
+      | `--lm-head-q4` (#91) | **no** | gated in the 27B loader on a W8 head; 35B loader has no such path |
+
+      **Do not "port small-T to the 35B" as stated.** The 35B's narrow-width projections already
+      route to `SplitKMmaDirect` over 2..96 (W8 tables), which is the same split-K direct family
+      that won width 8 on the Q4/Q5 side before small-T beat it. The real gap is that
+      `src/ops/sparse_moe/` contains **no tensor-core code at all** -- `mma.sync` appears zero
+      times in the whole directory -- while its experts are Q4G64/Q5G64 at 2..46 tokens, which is
+      the exact shape #89 solved for dense Q4/Q5. That is the port worth scoping, and it is a new
+      kernel family, not a routing change. Read the d3/d4 stall table in §2c first: d3 is memory
+      latency and d4 is barrier-bound, so one kernel family will not fix both.
+
       *Two instrument bugs on the way, both of which produced confident nonsense.* `-pg 4096,128`
       captures prefill and decode together and prefill dominates — the 27B's top kernel came back
       as 256 launches of `q4a8_swiglu`, which is 4 prefill chunks x 64 layers. Then decode reported
@@ -2490,6 +2513,41 @@ ceiling, and neither has had any optimisation attempted.
          — so this is not a fix to make today. It is worth knowing before anyone reads d4's 87.6% L1
          hit rate as evidence of good locality: it is evidence of a re-read that L1 happens to
          forgive.
+
+         **Re-profiled 2026-09-13 on merged master, and the stall breakdown changes the target.**
+         The numbers above all reproduce exactly -- d4 still issues 2,560,000 load sectors (81.9 MB)
+         to move 10.27 MB, still 8x -- but nobody had looked at *why* the warps are stalled, only
+         that they are. Per issue-active cycle, average warps stalled:
+
+         | stall reason | d3 | d4 |
+         |---|---:|---:|
+         | `barrier` | 0.57 | **10.05** |
+         | `long_scoreboard` (global latency) | **7.54** | 5.47 |
+         | `wait` | 0.75 | 1.41 |
+         | `lg_throttle` | 0.14 | 1.54 |
+
+         **d3 and d4 are not the same problem and should stop being treated as one.** d3 is global
+         memory latency, 7.54 of its ~9.3 stall budget -- the activation-reuse and prefetch family
+         of fixes is aimed correctly there. d4 spends **over half its stall budget waiting at
+         `__syncthreads()`**, which is a synchronisation-pattern problem inside the 9-warp block,
+         not a memory problem. That is worth stating plainly because items 1-3 above were all
+         closed as measured negatives and all three attacked *occupancy* -- launch geometry,
+         batching, block splitting. None of them attacked the barrier pattern, so "all four
+         candidate fixes are measured negatives" overstates what was actually ruled out.
+
+         One caution on the reasoning above, learned on the 27B in #90. "d4's DRAM pipe is only 47%
+         utilised, so the wasted bytes are not what the kernel is waiting for" is the same argument
+         that said C8 was tensor-rate bound, and `ncu` overturned that one: a latency-bound kernel
+         has *nothing* saturated by definition, and removing redundant operand movement there was
+         still worth -20% (311.6 -> 249.9 us) with no pipe anywhere near its ceiling. Low pipe
+         utilisation is not evidence that moving fewer bytes cannot help. On d4 specifically the
+         barrier term is the larger one and should be attacked first, but the DRAM-percentage
+         argument should not be what retires the over-fetch.
+
+         Denominator trap, since this bit me while re-measuring: `dram__throughput` reads **100%**
+         on both kernels with `.avg.pct_of_peak_sustained_active` and 47.40 / 51.63% with
+         `.avg.pct_of_peak_sustained_elapsed`. The elapsed form is the one that matches the
+         numbers in this file. Quote the wrong one and these kernels look bandwidth-saturated.
 
       Registers are *not* on that list, which is the correction: an earlier draft of this entry
       claimed `Block Limit Registers = 5` was the constraint and that 32 registers per thread would
