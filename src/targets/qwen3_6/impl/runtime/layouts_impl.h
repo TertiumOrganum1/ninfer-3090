@@ -146,6 +146,10 @@ PersistentLayout persistent_layout(const SequencePlanImpl& plan) {
                 .key_head_dim   = TextConfig::gdn_key_head_dim,
                 .slot_count     = state_image_slots,
                 .conv_dtype     = DType::BF16,
+                // --gdn-state-fp16 stores the recurrent state in FP16; the recurrence still
+                // computes in FP32. Free within measurement noise for a ~2% C8 decode gain and a
+                // halved per-slot host state image (docs/maintainer/quality-trade-experiments.md).
+                .recurrent_dtype = plan.features.gdn_state_fp16 ? DType::FP16 : DType::FP32,
             },
         .hidden = TextConfig::hidden,
     };

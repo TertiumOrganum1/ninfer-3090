@@ -126,6 +126,7 @@ add_library(ninfer_ops STATIC
   ops/linear_attention/gated_delta_net/gated_delta_net.cpp
   ops/linear_attention/gated_delta_net/replay.cpp
   ops/linear_attention/gated_delta_net/recurrent.cu
+  ops/linear_attention/gated_delta_net/state_convert.cu
   ops/linear_attention/gated_delta_net/chunked/launch.cu
   ops/linear_attention/gated_delta_net/chunked/prepare_wy_wu.cu
   ops/linear_attention/gated_delta_net/chunked/state_passing.cu
@@ -203,6 +204,7 @@ add_library(ninfer_ops STATIC
   ops/linear/nvfp4/nvfp4_w4a4.cu
   ops/linear/nvfp4/nvfp4_dispatch.cpp
   ops/linear/q4/q4_small_t_mma.cu
+  ops/linear/q4/q4_requantize.cu
   ops/linear/q4/q4_rowsplit_gemm_mma.cu
   ops/linear/q4/q4_rowsplit_gemm_simt.cu
   ops/linear/q4/q4_rowsplit_gemv.cu
