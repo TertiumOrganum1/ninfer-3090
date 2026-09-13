@@ -1168,8 +1168,33 @@ What is left, in order of size:
 
       **What the counters point at instead:** operand movement and occupancy. The largest single win
       in that whole exercise was deleting a redundant copy of the staged activation slab, and the
-      second was dropping a runtime column count so the staging loop could fold (below). A wider
-      tile that puts more work in flight is the untried lever.
+      second was dropping a runtime column count so the staging loop could fold (below).
+
+      **Three things are already checked, so do not spend the time again.**
+
+      1. **Occupancy cannot be bought by raising the launch-bound ceiling.** 31% occupancy at two
+         blocks per SM reads as an invitation; it is not one. The ceiling is a template parameter
+         (`Q4SwiGluSmallTTile::kMinBlocks`) and was swept. Capping registers spills, cold medians in
+         us with the count of instantiations ptxas reports spilling:
+
+         | min blocks | T=16 | T=24 | T=32 | spilling |
+         |---|---:|---:|---:|---:|
+         | 2 (shipping) | 161.8 | 175.1 | 205.8 | 0 |
+         | 3 | 162.8 | **321.5** | 227.3 | 4 |
+         | 4 | 161.8 | **543.7** | 281.6 | 4 |
+
+         At 96 registers this kernel needs them. More warps in flight has to come from a kernel that
+         *needs* fewer registers -- that redesign is the genuinely untried lever, not this knob.
+
+      2. **The shipped small-T kernels have no redundant activation staging.** `q4_small_t_mma.cuh`
+         and `q5_small_t_mma.cuh` both stage CTA-wide (`item = tid; item += kThreads`), so each
+         element is staged once and shared across row tiles exactly as `small_t_layout.cuh` intends.
+         The redundancy worth deleting was in the int8 kernel's own first draft, which staged
+         per-warp. There is nothing to find here.
+
+      3. **cp.async ring depth loses at every width** on this shape, which the L1 and latency
+         readings above explain: there is no DRAM latency to hide. Numbers in
+         `q4_small_t_mma_i8.cuh`.
 
 - [x] **A width that fills its tile does not need a runtime column count.** Every small-T call site
       passed `MaskedColumns=true`, so the staging loop's trip count and the inner loop's bounds test
