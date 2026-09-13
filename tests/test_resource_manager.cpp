@@ -1508,8 +1508,12 @@ FakePressurePlanningSession::guidance_for(const Target& target) {
 FakeAssessedPressureTarget FakePressurePlanningSession::assess(FakePressureTargetHandle handle) {
     require(valid(handle) && !scratch_live_, "fake pressure assessment is stale");
     if (program_->pressure_assessment_delay_us != 0) {
-        std::this_thread::sleep_for(
-            std::chrono::microseconds(program_->pressure_assessment_delay_us));
+        // Spin rather than sleep: the delay models assessment cost against the planner's wall
+        // budget, and sleep_for rounds up to the OS timer tick (~15.6 ms on Windows), which turns
+        // a 1 ms assessment into one that exhausts the 50 ms admission allowance in three steps.
+        const auto until = std::chrono::steady_clock::now() +
+                           std::chrono::microseconds(program_->pressure_assessment_delay_us);
+        while (std::chrono::steady_clock::now() < until) {}
     }
     ++program_->pressure_target_assessments;
     const Target& target = targets_[handle.index];
