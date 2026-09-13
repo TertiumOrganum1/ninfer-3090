@@ -789,13 +789,11 @@ they do not infer request behavior from process-global counter deltas.
 the template has no tiered default. A preparation rejection always leaves the resolved field
 `null`.
 
-`request_done.materialization` is the immutable decision committed for that request. It reports predicted immediate,
-future-loss and total nanoseconds; evaluated targets and projection work; planning/search nanoseconds; stop reason;
-model-optimal and budget-exhausted flags; the best remaining lower bound and absolute/relative gap; selected degradation
-units; and whether the selected target was the maximal root fallback. Stop reasons are `no_pressure`, `model_optimal`,
-`queue_exhausted`, `target_budget`, `expansion_capacity`, `time_budget`, and `value_of_next_expansion`.
-`model_optimal` is relative to the configured machine/cache-value model, semantic target graph, and canonical stage
-contract—not a claim that observed TTFT is globally optimal. Aborted planning attempts are not published.
+`request_done.result.tool_call_parse` records whether a complete marker was seen, the structured
+call count, empty non-string arguments omitted during normalization, schema-mismatched arguments
+preserved for consumer validation, and a stable text-fallback reason. Fallback reasons are `none`,
+`malformed_structure`, `duplicate_parameter`, `invalid_tool_name`, `undeclared_tool`, and
+`trailing_content`. These counters contain no tool arguments or generated text.
 
 `request_done.timings_seconds` contains `prepare`, `ttft`, `vision`, `prefill`, `decode`, and `total`
 as full-precision JSON numbers. Its `speculative` object contains `backend`, `draft_window`, `rounds`,
