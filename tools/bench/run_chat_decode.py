@@ -33,6 +33,25 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 
+# Dropping a flag has to take its value with it. Filtering tokens one at a time leaves the value
+# behind -- dropping --spec would strip the flag and leave a bare "mtp" in argv, which either fails
+# to parse or, worse, parses as something else and the arm silently measures a configuration nobody
+# asked for. The server's options are either a bare switch or exactly one value, so a flag is
+# removed together with a following token that does not itself begin with "--".
+def drop_flags(command, drop):
+    kept, index = [], 0
+    while index < len(command):
+        token = command[index]
+        if token in drop:
+            index += 1
+            if index < len(command) and not command[index].startswith("--"):
+                index += 1
+            continue
+        kept.append(token)
+        index += 1
+    return kept
+
+
 def parse_arm(raw):
     parts = raw.split(";")
     name, server = parts[0].split("=", 1)
@@ -93,7 +112,7 @@ def run_arm(name, server, drop, add, prompts, args, rep):
                "--request-log-jsonl", str(log)]
     if args.temperature == 0:
         command.append("--greedy")
-    command = [a for a in command if a not in drop] + add
+    command = drop_flags(command, drop) + add
 
     with open(out / "stdout.log", "w") as so, open(out / "stderr.log", "w") as se:
         proc = subprocess.Popen(command, stdout=so, stderr=se)
