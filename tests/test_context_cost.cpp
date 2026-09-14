@@ -305,6 +305,17 @@ void test_resolution_and_atomic_upserts() {
                 compiled.summary.prefill_source == ninfer::ContextCostPresetSource::CompiledDefault,
             "compiled transfer and prefill defaults did not resolve independently");
 
+        const ninfer::runtime::ContextCostIdentity rtx3090_identity{
+            .hardware_class = "nvidia-geforce-rtx-3090-sm86",
+            .model_id       = "qwen3.8-27b",
+            .weights_id     = "groupwise-int",
+        };
+        const auto rtx3090 = ninfer::runtime::resolve_context_machine_cost(rtx3090_identity);
+        expect(rtx3090.summary.transfer_source == ninfer::ContextCostPresetSource::CompiledDefault &&
+                   rtx3090.summary.prefill_source ==
+                       ninfer::ContextCostPresetSource::CompiledDefault,
+               "RTX 3090 compiled defaults did not resolve for the fork's default artifact");
+
         const ninfer::runtime::ContextCostIdentity unknown{
             .hardware_class = "unmeasured-machine",
             .model_id       = "unmeasured-model",
