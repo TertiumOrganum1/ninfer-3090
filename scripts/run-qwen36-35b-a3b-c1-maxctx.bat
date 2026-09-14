@@ -19,6 +19,19 @@ rem   --------------------------------------------------------------------------
 rem   A  MTP3 + draft head        81,920      193 MiB          131,072   ~240 tok/s
 rem   B  no speculation          196,608      375 MiB          262,144   ~183 tok/s
 rem
+rem MEMORY FLAGS on profile A (2026-09-14, docs/maintainer/quality-trade-experiments.md). The MTP draft
+rem layer's routed experts ship as W8 (816 MiB) while the text layers' are Q4/Q6; --mtp-experts-q4
+rem stores them the same way at load, and --gdn-state-fp16 halves the recurrent state. Drafts are
+rem verified by the target, so neither changes what the model scores: decode 296.3 -> 294.9 tok/s,
+rem acceptance 61.2%% -> 60.6%%. Same profile, arms alternated per rung, desktop at ~505 MiB:
+rem
+rem   context    without flags     with both flags
+rem   ------------------------------------------------
+rem   114,688    535 MiB free      947 MiB free
+rem   147,456    254 MiB free      666 MiB free   <- default now; more margin than 114,688 had
+rem   163,840    107 MiB free      526 MiB free
+rem   196,608    refused           246 MiB free
+rem
 rem WHAT SPECULATION COSTS IN MEMORY, exact, read from the artifact directory:
 rem
 rem   MTP head            856 MiB   (--spec mtp)
@@ -129,10 +142,10 @@ rem The default model path matches what download-qwen36-35b-a3b.bat writes and h
 rem archive is laid out: this launcher sits beside models\.
 set "MODEL=%~dp0models\qwen3_6_35b_a3b.ninfer"
 
-rem Profile A (active): speculation on. Rungs: 81920 / 90112 / 98304 / 114688 / 131072.
+rem Profile A (active): speculation on. Rungs: 114688 / 131072 / 147456 / 163840 / 196608.
 rem Profile B: set NINFER_CONTEXT to a 196608+ rung and swap the commands at the bottom.
 rem Rungs: 196608 / 212992 / 229376 / 245760 / 262144.
-set "CONTEXT=114688"
+set "CONTEXT=147456"
 
 rem Loopback by default. 0.0.0.0 publishes an unauthenticated OpenAI-compatible endpoint to every
 rem network this machine is on, so it is opt-in per run rather than the shipped default:
@@ -196,6 +209,7 @@ rem back to device pages when the pin is zero. Do not read "8192" as a descripti
   --kv-capacity %CONTEXT% ^
   --kv-dtype %KV_DTYPE% ^
   --spec mtp --draft-tokens 3 --lm-head-draft ^
+  --mtp-experts-q4 --gdn-state-fp16 ^
   --prefill-chunk 512 ^
   --max-pending-requests 16 --pending-timeout-ms 600000 ^
   --vision --vision-residency overlay ^
