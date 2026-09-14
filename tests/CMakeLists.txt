@@ -210,7 +210,9 @@ target_include_directories(ninfer_qwen3_6_35b_a3b_mtp_graph_profiles_test PRIVAT
   ${PROJECT_SOURCE_DIR}/src
   ${PROJECT_SOURCE_DIR}/src/targets/qwen3_6/export
   ${PROJECT_SOURCE_DIR}/src/targets/qwen3_6_35b_a3b/export)
-target_link_libraries(ninfer_qwen3_6_35b_a3b_mtp_graph_profiles_test PRIVATE CUDA::cudart)
+# The runtime ninfer_core already links: CUDA::cudart beside it collides with cudart_static on MSVC.
+target_link_libraries(ninfer_qwen3_6_35b_a3b_mtp_graph_profiles_test PRIVATE
+  ${NINFER_CUDART_TARGET})
 ninfer_add_test(ninfer_qwen3_6_35b_a3b_dflash_load_plan_test
   SOURCES targets/qwen3_6_35b_a3b/test_dflash_load_plan.cpp
   NEEDS_SOURCE_DIR
