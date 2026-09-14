@@ -1,8 +1,8 @@
 # Quality trades: narrower vocabulary matrices, FP16 GDN state, integer-activation MLP decode
 
-Six speed- or memory-for-quality trades, all **implemented, measured, and wired to CLI flags**:
-`--lm-head-q4`, `--lm-head-q6`, `--embedding-q4`, `--mtp-experts-q4`, `--gdn-state-fp16` and
-`--mlp-a8-decode` on
+Seven speed- or memory-for-quality trades, all **implemented, measured, and wired to CLI flags**:
+`--lm-head-q4`, `--lm-head-q6`, `--embedding-q4`, `--embedding-q6`, `--mtp-experts-q4`,
+`--gdn-state-fp16` and `--mlp-a8-decode` on
 `ninfer`, `ninfer-serve`, and `ninfer-perplexity`. All default off. The two new vocabulary trades
 are memory trades first: see [Vocabulary transcoding](#vocabulary-transcoding---lm-head-q6-and---embedding-q4)
 for why `--embedding-q4 --lm-head-q6` is worth about 37K tokens of context for no measurable
@@ -158,8 +158,11 @@ a few seconds to load.
 | `--lm-head-q4` | output head | Q4G64 | -644 MiB | Q4 linear (existing) |
 | `--lm-head-q6` | output head | Q6G64 | -341 MiB | Q6 linear (existing, same routes as the 35B head) |
 | `--embedding-q4` | token embedding | Q4G64 | -644 MiB (27B), -258 MiB (35B-A3B) | Q4 embedding gather (new) |
+| `--embedding-q6` | token embedding | Q6G64 | -341 MiB (27B), -143 MiB (35B-A3B) | Q6 embedding gather (existing; `[248320,2048]` now qualified) |
 
-`--lm-head-q4` and `--lm-head-q6` are mutually exclusive.
+`--lm-head-q4` and `--lm-head-q6` are mutually exclusive, as are `--embedding-q4` and `--embedding-q6`. Where
+the artifact already stores the requested Q6 format (Qwen3.6-27B groupwise ships a Q6 embedding and
+head), the Q6 flag is a no-op.
 
 **Measured 2026-09-14**, same box and corpus protocol as above (`--quick`, 4096/2048), but **rk8v4 KV**,
 Qwen3.8-27B:
@@ -204,8 +207,10 @@ for 12.9K tokens, and `--lm-head-q4` remains the faster (and larger, and lossier
 
 **The 35B-A3B is different.** Its 2048-wide embedding does not quantize for free: `--embedding-q4`
 measured 4.373904 -> 4.389698 (**+0.36%**, same protocol), about the cost of NVFP4 KV, for 258 MiB.
-It is supported there as a trade rather than recommended. Its head is already Q6G64 in the artifact,
-so `--lm-head-q4`/`--lm-head-q6` are rejected at startup on that model.
+It is supported there as a trade rather than recommended. `--embedding-q6` is the option for that
+model: Q6G64 through the existing Q6 gather, **4.373904 -> 4.375419 (+0.035%)** for 143 MiB (about
+18K tokens of its rk8v4 KV). The two are mutually exclusive. Its head is already Q6G64 in the
+artifact, so `--lm-head-q4`/`--lm-head-q6` are rejected at startup on that model.
 
 **Overlay vision has a floor on how far these tensors may shrink.** Its exclusive fallback borrows
 the encode window from the evict-ranked weights (head, embedding, draft head, MTP), so they must

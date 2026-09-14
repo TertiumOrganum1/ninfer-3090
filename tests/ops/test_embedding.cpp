@@ -317,14 +317,17 @@ struct Q6Row {
 
 class Q6Table {
 public:
-    Q6Table()
-        : groups_(kQ6D / kQ6Group),
+    explicit Q6Table(std::int32_t d = kQ6D)
+        : d_(d),
+          groups_(d / kQ6Group),
           low_plane_bytes_(static_cast<std::size_t>(kVocab) * groups_ * 32),
           high_offset_(align_up(low_plane_bytes_, 256)),
           high_plane_bytes_(static_cast<std::size_t>(kVocab) * groups_ * 16),
           scale_offset_(high_offset_ + align_up(high_plane_bytes_, 256)),
           payload_(scale_offset_ + static_cast<std::size_t>(kVocab) * groups_ * 2) {
-        for (const std::int32_t row : repeated_ids(8)) {
+        std::vector<std::int32_t> ids = repeated_ids(8);
+        ids.push_back(kDFlash2MaskToken);
+        for (const std::int32_t row : ids) {
             if (find(row) == nullptr) add_row(row);
         }
     }
@@ -345,20 +348,20 @@ public:
         result.group            = kQ6Group;
         result.ndim             = 2;
         result.shape[0]         = kVocab;
-        result.shape[1]         = kQ6D;
+        result.shape[1]         = d_;
         result.padded_shape[0]  = kVocab;
-        result.padded_shape[1]  = kQ6D;
+        result.padded_shape[1]  = d_;
         result.n                = kVocab;
-        result.k                = kQ6D;
+        result.k                = d_;
         return result;
     }
 
     std::vector<double> oracle(const std::vector<std::int32_t>& ids) const {
-        std::vector<double> result(static_cast<std::size_t>(kQ6D) * ids.size());
+        std::vector<double> result(static_cast<std::size_t>(d_) * ids.size());
         for (std::size_t t = 0; t < ids.size(); ++t) {
             const Q6Row* row = find(ids[t]);
             if (row == nullptr) throw std::out_of_range("Q6 oracle row was not materialized");
-            for (std::int32_t d = 0; d < kQ6D; ++d) {
+            for (std::int32_t d = 0; d < d_; ++d) {
                 const std::int32_t group = d / kQ6Group;
                 const std::int32_t lane  = d % kQ6Group;
                 const std::uint32_t low =
@@ -374,7 +377,7 @@ public:
                                                         : static_cast<int>(encoded);
                 const double scale =
                     static_cast<double>(f16_to_f32(load_u16_le(row->scales, group * 2)));
-                result[t * static_cast<std::size_t>(kQ6D) + d] = static_cast<double>(code) * scale;
+                result[t * static_cast<std::size_t>(d_) + d] = static_cast<double>(code) * scale;
             }
         }
         return result;
@@ -437,6 +440,7 @@ private:
         rows_.push_back(std::move(row));
     }
 
+    std::int32_t d_;
     std::int32_t groups_;
     std::size_t low_plane_bytes_;
     std::size_t high_offset_;
@@ -753,12 +757,30 @@ int test_q4() {
 }
 
 int test_q6() {
-    Q6Table table;
     int failures = 0;
-    failures += run_quantized_case("embedding Q6 [248320,5120] T=1", table, repeated_ids(1), kQ6D);
-    failures += run_quantized_case("embedding Q6 [248320,5120] T=7", table, repeated_ids(7), kQ6D);
-    failures +=
-        run_quantized_case("embedding Q6 [248320,5120] T=128", table, repeated_ids(128), kQ6D);
+    {
+        Q6Table table;
+        failures +=
+            run_quantized_case("embedding Q6 [248320,5120] T=1", table, repeated_ids(1), kQ6D);
+        failures +=
+            run_quantized_case("embedding Q6 [248320,5120] T=7", table, repeated_ids(7), kQ6D);
+        failures +=
+            run_quantized_case("embedding Q6 [248320,5120] T=128", table, repeated_ids(128), kQ6D);
+    }
+    {
+        // The 35B-A3B's table after --embedding-q6.
+        Q6Table table(kW8VisionD);
+        for (const std::size_t t : {1u, 4u, 16u, 1024u}) {
+            const std::string label = "embedding Q6 [248320,2048] T=" +
+                                      std::to_string(static_cast<unsigned long long>(t));
+            failures += run_quantized_case(label.c_str(), table, repeated_ids(t), kW8VisionD);
+        }
+        for (const std::size_t t : {1u, 4u}) {
+            const std::string label = "embedding Q6 [248320,2048] Graph T=" +
+                                      std::to_string(static_cast<unsigned long long>(t));
+            failures += run_quantized_case(label.c_str(), table, repeated_ids(t), kW8VisionD, true);
+        }
+    }
     return failures;
 }
 

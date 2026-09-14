@@ -91,6 +91,43 @@ int check_mtp_experts_q4(const ninfer::artifact::Reader& reader) {
     return 0;
 }
 
+// --embedding-q4/--embedding-q6 must reach the binding: the token embedding is planned in the
+// transcoded encoding and the plan records the format the loaded Weight is built with.
+int check_embedding_transcodes(const ninfer::artifact::Reader& reader) {
+    using ninfer::artifact::DeviceTranscode;
+    using ninfer::artifact::NumericFormat;
+    namespace bindings = ninfer::targets::qwen3_6_35b_a3b::detail;
+
+    constexpr std::array<std::uint64_t, 2> shape = {248320, 2048};
+    struct Case {
+        bool q4;
+        bool q6;
+        DeviceTranscode transcode;
+        NumericFormat format;
+        const char* name;
+    };
+    constexpr std::array<Case, 3> cases{{
+        {false, false, DeviceTranscode::None, NumericFormat::W8G32_F16S, "native"},
+        {true, false, DeviceTranscode::W8G32ToQ4G64, NumericFormat::Q4G64_F16S, "--embedding-q4"},
+        {false, true, DeviceTranscode::W8G32ToQ6G64, NumericFormat::Q6G64_F16S, "--embedding-q6"},
+    }};
+    for (const Case& test : cases) {
+        auto features         = load_features(false, ninfer::SpeculativeBackend::Mtp);
+        features.embedding_q4 = test.q4;
+        features.embedding_q6 = test.q6;
+        ninfer::artifact::Binder binder(reader);
+        const auto plan    = bindings::bind_artifact(binder, features);
+        const auto* object = device_object(plan.materialization, plan.bindings.token_embedding);
+        const auto bytes   = ninfer::artifact::row_split_geometry(test.format, shape).encoded_bytes;
+        if (object == nullptr || object->transcode != test.transcode || object->bytes != bytes ||
+            plan.bindings.token_embedding_format != test.format) {
+            std::cerr << test.name << " did not plan the token embedding as expected\n";
+            return 1;
+        }
+    }
+    return 0;
+}
+
 } // namespace
 
 int run_dflash_load_plan_checks() {
@@ -102,6 +139,7 @@ int run_dflash_load_plan_checks() {
 
     ninfer::artifact::Reader reader(path);
     if (const int result = check_mtp_experts_q4(reader); result != 0) { return result; }
+    if (const int result = check_embedding_transcodes(reader); result != 0) { return result; }
     {
         ninfer::artifact::Binder binder(reader);
         // These counts pin a DFlash-carrying artifact. A compact artifact without the DFlash bundle

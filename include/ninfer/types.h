@@ -204,6 +204,9 @@ struct EngineOptions {
     // change. lm_head_q4 and lm_head_q6 are mutually exclusive.
     bool lm_head_q6                        = false;
     bool embedding_q4                      = false;
+    // Q6G64 token embedding: the narrower-model option where Q4 costs measurable perplexity
+    // (the 35B-A3B's 2048-wide table). Mutually exclusive with embedding_q4.
+    bool embedding_q6                      = false;
     // Qwen3.6-35B-A3B only: the MTP draft layer's routed experts are stored W8 in the artifact;
     // transcode them to the text layers' formats (Q4 gate_up, Q6 down) at load. Drafts are
     // verified exactly, so this can change acceptance but never the output distribution.

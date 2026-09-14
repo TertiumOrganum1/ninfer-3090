@@ -16,6 +16,7 @@ struct StartupFeatures {
     bool lm_head_q4                 = false;
     bool lm_head_q6                 = false;
     bool embedding_q4               = false;
+    bool embedding_q6               = false;
     bool mtp_experts_q4             = false;
     bool gdn_state_fp16             = false;
     bool mlp_a8_decode              = false;
@@ -56,6 +57,7 @@ struct StartupFeatures {
         .lm_head_q4       = options.lm_head_q4,
         .lm_head_q6       = options.lm_head_q6,
         .embedding_q4     = options.embedding_q4,
+        .embedding_q6     = options.embedding_q6,
         .mtp_experts_q4   = options.mtp_experts_q4,
         .gdn_state_fp16   = options.gdn_state_fp16,
         .mlp_a8_decode    = options.mlp_a8_decode,
