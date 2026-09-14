@@ -59,6 +59,7 @@ struct ServeOptions {
     bool lm_head_q4         = false;
     bool lm_head_q6         = false;
     bool embedding_q4       = false;
+    bool mtp_experts_q4     = false;
     bool gdn_state_fp16     = false;
     bool mlp_a8_decode      = false;
     bool allow_prefix_reuse = true;

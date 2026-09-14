@@ -101,6 +101,13 @@ artifact::DeviceTranscode head_transcode(const qwen3_6::StartupFeatures& feature
                                : artifact::DeviceTranscode::W8G32ToQ6G64;
 }
 
+void reject_mtp_experts_q4(const qwen3_6::StartupFeatures& features) {
+    if (features.mtp_experts_q4) {
+        throw std::invalid_argument(
+            "--mtp-experts-q4 applies to a mixture-of-experts MTP layer (qwen3.6-35b-a3b)");
+    }
+}
+
 artifact::DeviceTranscode embedding_transcode(const qwen3_6::StartupFeatures& features,
                                               NumericFormat vocabulary_format) {
     if (!features.embedding_q4) { return artifact::DeviceTranscode::None; }
@@ -534,6 +541,7 @@ ArtifactLoadPlan bind_artifact(artifact::Binder& binder, WeightsProfile weights_
 
     const NumericFormat vocabulary_format = endpoint_format(weights_profile);
     const bool overlay  = features.overlay_vision();
+    reject_mtp_experts_q4(features);
     out.token_embedding =
         bind_weight(binder, "text/token_embedding", vocabulary_format, {248320, 5120},
                     overlay ? kEvictRankEmbedding : 0, core_placement,

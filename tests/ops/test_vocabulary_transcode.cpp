@@ -1,5 +1,5 @@
-// Load-time W8G32 -> Q4G64 / Q6G64 transcoding of vocabulary matrices (artifact/transcode.h), used by
-// --lm-head-q4, --lm-head-q6 and --embedding-q4.
+// Load-time W8G32 -> Q4G64 / Q6G64 transcoding (artifact/transcode.h), used by --lm-head-q4,
+// --lm-head-q6, --embedding-q4 and --mtp-experts-q4 (whose routed down projection is 512 columns).
 //
 // 1. The encoding is the target format's row-split-k128-v1 geometry, byte for byte, and an
 //    independent decoder reads it: every 64-column group's squared error against the W8 values is no
@@ -169,7 +169,7 @@ std::vector<float> random_matrix(std::int32_t rows, std::int32_t columns, std::u
 int test_codec_layout() {
     int failures = 0;
     for (const auto& [rows, columns] :
-         std::array<std::pair<std::int32_t, std::int32_t>, 3>{{{257, 5120}, {64, 2048}, {33, 100}}}) {
+         std::array<std::pair<std::int32_t, std::int32_t>, 4>{{{257, 5120}, {64, 2048}, {96, 512}, {33, 100}}}) {
         const qw::PackedWeight source =
             qw::pack_w8g32_row_split(random_matrix(rows, columns, 0x51ULL + columns), rows, columns);
         for (const Codec& codec : kCodecs) {
