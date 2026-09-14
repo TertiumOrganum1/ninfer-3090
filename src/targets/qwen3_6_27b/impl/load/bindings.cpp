@@ -118,6 +118,10 @@ artifact::DeviceTranscode embedding_transcode(const qwen3_6::StartupFeatures& fe
         throw std::invalid_argument("--embedding-q4 and --embedding-q6 are mutually exclusive");
     }
     if (!features.embedding_q4 && !features.embedding_q6) { return artifact::DeviceTranscode::None; }
+    // Qwen3.6-27B groupwise already ships a Q6 embedding: nothing to transcode.
+    if (features.embedding_q6 && vocabulary_format == NumericFormat::Q6G64_F16S) {
+        return artifact::DeviceTranscode::None;
+    }
     if (vocabulary_format != NumericFormat::W8G32_F16S) {
         throw std::invalid_argument("--embedding-q4/--embedding-q6 require a W8G32 token embedding");
     }
