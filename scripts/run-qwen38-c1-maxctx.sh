@@ -10,15 +10,26 @@
 #
 # CONTEXT CACHE. A checkpoint is a KV prefix plus a StateImage, and on this model the StateImage
 # is 147 MiB flat regardless of prefix length - 48 GDN layers of 128x128x48 FP32 recurrent state
-# plus conv. That is 2.4x the 35B-A3B's 61.4 MiB, so the slots are correspondingly expensive:
-# --host-state-slots 32 pins 4.59 GiB of host memory. It is host memory, not device, and it is
+# plus conv - or 74.5 MiB with --gdn-state-fp16, which this profile uses, so --host-state-slots 32
+# pins 2.34 GiB of host memory rather than 4.59 GiB. It is host memory, not device, and it is
 # what takes prefix reuse from 8.4% to 98.3% on a multi-preamble workload.
+#
+# MEMORY FLAGS, both free on quality (docs/maintainer/quality-trade-experiments.md):
+#   --embedding-q4    token embedding stored as Q4 at load: -644 MiB of weights, perplexity
+#                     4.346413 -> 4.343738 (noise), decode unchanged.
+#   --gdn-state-fp16  recurrent state stored as FP16: -72 MiB per device state slot (four at two
+#                     lanes), perplexity unchanged, greedy output bit-identical.
+# They add about 0.91 GiB to the two-lane headroom estimated below, taking the 212,992 default from
+# +0.63 GiB to about +1.54 GiB. Measured on the Windows box, they buy one full rung at one lane
+# (see the .bat). --lm-head-q6 frees another 341 MiB for +0.01% perplexity but costs 2-5% of
+# single-lane decode until a Q6 small-T kernel exists, so it is left off.
 #
 # --auto-prefix-grid lets two callers whose prompts merely start alike share a cached prefix with
 # no client hint. A grid point is only materialised once two independent callers have both asked
 # for it, so it cannot waste a slot speculatively.
 #
-# MEASURED, with a Windows desktop running (a headless box has roughly 1.5 GiB more to spend):
+# MEASURED, with a Windows desktop running (a headless box has roughly 1.5 GiB more to spend), and
+# BEFORE the two memory flags this profile now passes -- the earlier profile's figures:
 #
 #   lanes  KV      context   vision   runtime    free after startup
 #   ------------------------------------------------------------------
@@ -30,6 +41,14 @@
 #   2      rk8v4   131,072   overlay  4.32 GiB   1.26 GiB
 #   1      rk8v4   163,840   overlay  4.78 GiB   763.2 MiB
 #
+# With --embedding-q4 --gdn-state-fp16, measured 2026-09-14 on the same card and profile shape:
+#
+#   lanes  KV      context   vision   runtime    free after startup
+#   ------------------------------------------------------------------
+#   1      rk8v4   131,072   overlay  3.80 GiB   2.47 GiB
+#   1      rk8v4   163,840   overlay  4.65 GiB   1.63 GiB
+#   1      rk8v4   196,608   overlay  5.49 GiB   798.1 MiB
+#
 # Vision is on: overlay residency costs about 10 MiB of runtime reservation, so there is no reason
 # to trade it away. run-qwen38-vision.sh remains for the plain 32K image profile.
 #
@@ -38,18 +57,23 @@
 #
 #     runtime_bytes = 0.553 GiB + 27,719 x context        (worst residual 3.9 MiB)
 #
-# at 27.07 KiB/token, and a second lane adds a flat 0.38 GiB. A headless 3090 has about 7.06 GiB
-# for the reservation, so 262,144 needs 7.32 GiB at one lane and 7.70 GiB at two - it does not fit
-# either way. The zero-margin ceilings are roughly 252,000 tokens at C1 and 237,000 at C2.
+# at 27.07 KiB/token, and a second lane adds a flat 0.38 GiB. Without the memory flags a headless
+# 3090 has about 7.06 GiB for the reservation, so 262,144 needs 7.32 GiB at one lane and 7.70 GiB at
+# two - it does not fit either way; the zero-margin ceilings are roughly 252,000 tokens at C1 and
+# 237,000 at C2. With --embedding-q4 --gdn-state-fp16 the budget grows to about 7.69 GiB (644 MiB of
+# weights freed) and the line becomes 0.41 GiB + 27,719 x context, +0.24 GiB per extra lane (71.7 MiB
+# per FP16 state slot); the measured 196,608 rung at 5.49 GiB lies on it. On that estimate 262,144
+# fits with about +0.51 GiB at one lane and +0.27 GiB at two.
 #
 # That is not a tuning failure, it is the model: the 27B spends 16 full-attention layers x 4
 # kv_heads x 256 head_dim per token against the 35B-A3B's 10 x 2 x 256, which is 3.2x the KV per
 # token - 27.07 KiB against roughly 7.8. The 35B-A3B reaches 262,144 because its KV is cheap.
 #
-# The default below is 212,992: 6.43 GiB predicted at two lanes, leaving +0.63 GiB. 196,608 is the
-# more cautious rung at +1.05 GiB. Both are extrapolated rather than measured - this machine cannot
-# start either - so treat the first headless start as the confirmation and drop a rung if it
-# refuses. Rungs: 229376 / 212992 / 196608 / 163840 / 131072 / 114688 / 98304 / 65536.
+# The default below is 212,992: 6.15 GiB predicted at two lanes with the flags, leaving about
+# +1.54 GiB (6.43 GiB and +0.63 GiB before them). 196,608 is the more cautious rung at about
+# +1.96 GiB and 262,144 the aggressive one at about +0.27 GiB. All are extrapolated rather than
+# measured - this machine cannot start them - so treat the first headless start as the confirmation
+# and drop a rung if it refuses. Rungs: 229376 / 212992 / 196608 / 163840 / 131072 / 114688 / 98304 / 65536.
 # ------------------------------------------------------------------------------------------------
 set -euo pipefail
 
@@ -134,6 +158,7 @@ exec "$server" "$MODEL" \
   --kv-capacity "$KV_CAPACITY" \
   --kv-dtype "$KV_DTYPE" \
   "${spec_args[@]}" \
+  --embedding-q4 --gdn-state-fp16 \
   --prefill-chunk 1024 \
   --max-pending-requests 16 --pending-timeout-ms 600000 \
   "${vision_args[@]}" \

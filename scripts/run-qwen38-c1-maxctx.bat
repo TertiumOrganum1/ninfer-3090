@@ -11,29 +11,50 @@ rem context for +0.082%% perplexity. It is opt-in precisely because INT8 is the 
 rem
 rem CONTEXT CACHE. A checkpoint is a KV prefix plus a StateImage, and on this model the StateImage
 rem is 147 MiB flat regardless of prefix length -- 48 GDN layers of 128x128x48 FP32 recurrent state
-rem plus conv. That is 2.4x the 35B-A3B's 61.4 MiB, so the slots are correspondingly expensive:
-rem --host-state-slots 32 pins 4.59 GiB of HOST memory, not device. It is what takes prefix reuse
-rem from 8.4%% to 98.3%% on a multi-preamble workload.
+rem plus conv -- or 74.5 MiB with --gdn-state-fp16, which this profile uses. --host-state-slots 32
+rem therefore pins 2.34 GiB of HOST memory rather than 4.59 GiB. It is what takes prefix reuse from
+rem 8.4%% to 98.3%% on a multi-preamble workload.
+rem
+rem MEMORY FLAGS, both free on quality (docs/maintainer/quality-trade-experiments.md):
+rem   --embedding-q4    token embedding stored as Q4 at load: -644 MiB of weights, perplexity
+rem                     4.346413 -> 4.343738 (noise), decode unchanged.
+rem   --gdn-state-fp16  recurrent state stored as FP16: -72 MiB per device state slot, perplexity
+rem                     unchanged, greedy output bit-identical.
+rem Together they buy one full rung: 163,840 now starts with the free memory 131,072 used to leave.
+rem Adding --lm-head-q6 frees another 341 MiB (+12.9K tokens, +0.01%% perplexity) but costs 2-5%%
+rem of single-user decode until a Q6 small-T kernel exists, so it is not on by default here.
 rem
 rem --auto-prefix-grid lets two callers whose prompts merely start alike share a cached prefix with
 rem no client hint. A grid point is only materialised once two independent callers have both asked
 rem for it, so it cannot waste a slot speculatively.
 rem
-rem MEASURED on this machine with the desktop running, which is the pessimistic case:
+rem MEASURED on this machine with the desktop running, which is the pessimistic case. Without the
+rem two memory flags (the earlier profile):
 rem
 rem   lanes  KV      context   vision   runtime    free after startup
 rem   ------------------------------------------------------------------
 rem   1      int8     65,536   off      2.73 GiB   2.85 GiB   <- what run-qwen38-c1.bat does
 rem   1      rk8v4   131,072   off      3.93 GiB   1.68 GiB
-rem   1      rk8v4   131,072   overlay  3.94 GiB   1.59 GiB   <- default here
+rem   1      rk8v4   131,072   overlay  3.94 GiB   1.59 GiB
 rem   2      rk8v4   131,072   overlay  4.32 GiB   1.26 GiB
 rem   1      rk8v4   163,840   overlay  4.78 GiB   763.2 MiB
+rem
+rem With --embedding-q4 --gdn-state-fp16 (2026-09-14, arms alternated at each rung, desktop holding
+rem 1.25 GiB until 212,992, then 0.44 GiB):
+rem
+rem   context    without flags               with flags                  + --lm-head-q6
+rem   ---------------------------------------------------------------------------------------
+rem   131,072    3.94 GiB / 1.70 GiB free    3.80 GiB / 2.47 GiB free    2.79 GiB free
+rem   163,840    4.79 GiB /  873 MiB free    4.65 GiB / 1.63 GiB free    1.96 GiB free  <- default
+rem   196,608    5.63 GiB /    0 free        5.49 GiB /  798 MiB free    1.11 GiB free
+rem   229,376    refused                     6.34 GiB /    0 free        276 MiB free
+rem   245,760    refused                     refused                     starts, 0 free
 rem
 rem Windows keeps one lane by default: a desktop holds roughly 1.5 GiB of the card, so the
 rem headroom above is what you actually have. Vision is on -- overlay residency costs about 10 MiB
 rem of runtime reservation, so there is no reason to trade it away. run-qwen38-vision.bat remains
 rem for the plain 32K image profile.
-rem Rungs if startup refuses: 163840 / 131072 / 114688 / 98304 / 65536.
+rem Rungs if startup refuses: 196608 / 163840 / 131072 / 114688 / 98304 / 65536.
 rem ---------------------------------------------------------------------------------------------
 
 rem Every setting below can be overridden from the environment without editing this file:
@@ -43,7 +64,7 @@ rem
 rem The default model path matches what download-qwen38-27b.bat writes and how the release archive
 rem is laid out: this launcher sits beside models\.
 set "MODEL=%~dp0models\qwen3_8_27b.ninfer"
-set "CONTEXT=131072"
+set "CONTEXT=163840"
 set "CONCURRENCY=1"
 rem Loopback by default. 0.0.0.0 publishes an unauthenticated OpenAI-compatible endpoint to every
 rem network this machine is on, so it is opt-in per run rather than the shipped default.
@@ -75,6 +96,7 @@ if not exist "%MODEL%" (
 )
 
 echo Qwen3.8-27B  ^|  C%CONCURRENCY%  ^|  context %CONTEXT%  ^|  rk8v4 KV  ^|  MTP3 + draft head  ^|  Vision (overlay)
+echo Memory: Q4 token embedding, FP16 GDN state
 echo Cache: 8 shared / 8 private / 32 host states  ^|  automatic prefix grid on
 echo API: http://%HOST%:%PORT%/v1
 echo.
@@ -102,6 +124,7 @@ rem back to device pages when the pin is zero. Do not read "8192" as a descripti
   --kv-capacity %CONTEXT% ^
   --kv-dtype %KV_DTYPE% ^
   --spec mtp --draft-tokens 3 --lm-head-draft ^
+  --embedding-q4 --gdn-state-fp16 ^
   --prefill-chunk 1024 ^
   --max-pending-requests 16 --pending-timeout-ms 600000 ^
   --vision --vision-residency overlay ^

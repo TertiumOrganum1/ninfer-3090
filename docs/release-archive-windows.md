@@ -36,7 +36,7 @@ plus the draft head, and vision in overlay residency. For the dense 27B instead:
 
 ```powershell
 .\download-qwen38-27b.bat              # ~17 GB
-.\run-qwen38-c1-maxctx.bat             # one user, 131,072 tokens
+.\run-qwen38-c1-maxctx.bat             # one user, 163,840 tokens
 ```
 
 `run-qwen38-c1.bat` and `run-qwen38-c8.bat` are the older INT8 profiles — one user at 65,536 tokens,
@@ -83,9 +83,11 @@ requested Engine runtime reservation requires 2864526592 bytes,
 but only 2375691264 bytes are available for runtime capacity
 ```
 
-Drop a context rung first — `NINFER_CONTEXT=98304`, then 81920, then 65536. Speculation is the next
-lever (`NINFER_SPEC=none`), worth about 992 MiB at the cost of decode speed. Drop vision last: in
-overlay residency it costs almost nothing resident.
+Drop a context rung first: set `NINFER_CONTEXT` to the next rung below the launcher's default. Each
+`-maxctx` launcher lists its rungs in its header, measured on this card — for
+`run-qwen38-c1-maxctx.bat` (default 163,840) that is 131072, then 114688, then 98304. Speculation is
+the next lever (`NINFER_SPEC=none`), worth about 992 MiB on the 35B-A3B at the cost of decode speed.
+Drop vision last: in overlay residency it costs almost nothing resident.
 
 To size a profile before running it, open
 [docs/config-calculator.html](https://github.com/ashalliants/ninfer-3090/blob/master/docs/config-calculator.html)
