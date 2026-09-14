@@ -140,9 +140,15 @@ and accept the same `NINFER_HOST`/`NINFER_PORT` overrides.
 | Profile | lanes | context | KV | vision | runtime | free (desktop) |
 |---|---|---|---|---|---|---|
 | `run-qwen38-c1` (unchanged) | 1 | 65,536 | int8 | off | 2.73 GiB | 2.85 GiB |
-| **`run-qwen38-c1-maxctx`, Windows** | 1 | 131,072 | rk8v4 | overlay | 3.94 GiB | 1.59 GiB |
-| **`run-qwen38-c1-maxctx`, Linux** | 2 | 212,992 | rk8v4 | overlay | 6.43 GiB (est.) | headless only |
-| `NINFER_CONTEXT=163840` | 1 | 163,840 | rk8v4 | overlay | 4.78 GiB | 763 MiB |
+| **`run-qwen38-c1-maxctx`, Windows** | 1 | 163,840 | rk8v4 | overlay | 4.65 GiB | 1.63 GiB |
+| **`run-qwen38-c1-maxctx`, Linux** | 2 | 212,992 | rk8v4 | overlay | 6.15 GiB (est.) | headless only |
+| `NINFER_CONTEXT=196608` | 1 | 196,608 | rk8v4 | overlay | 5.49 GiB | 798 MiB |
+
+Both `-maxctx` rows run with `--embedding-q4 --gdn-state-fp16`, which the launchers pass: the token
+embedding is stored as Q4 (-644 MiB of weights) and the GDN state as FP16 (-72 MiB per device state
+slot), both measured free on quality. The Windows figures were measured on the launcher's exact
+profile; before those flags the same card started 131,072 with 1.59 GiB free and 163,840 with
+763 MiB. The Linux runtime estimate is the earlier 6.43 GiB less four FP16 state slots.
 
 Vision is on in both. Overlay residency keeps the tower host-pinned and streams each image through
 a borrowed device window, so it costs about **10 MiB** of runtime reservation — measured 3.93 GiB
@@ -214,7 +220,7 @@ The Linux guide covers the GPU check, the native Ubuntu build, model mounts and 
 | Launcher | Best for |
 |---|---|
 | `run-qwen36-35b-a3b-c1-maxctx.bat` | **Recommended.** Qwen3.6-35B-A3B, one user, 114K context, rk8v4, vision, tuned cache |
-| `run-qwen38-c1-maxctx.bat` | **Recommended for 27B.** Qwen3.8-27B, one user, 131K context, rk8v4, tuned cache |
+| `run-qwen38-c1-maxctx.bat` | **Recommended for 27B.** Qwen3.8-27B, one user, 164K context, rk8v4, tuned cache |
 | `run-qwen38-c1.bat` | Qwen3.8-27B, one interactive user, INT8 quality default, 64K context |
 | `run-qwen38-c8.bat` | Qwen3.8-27B, multiple users or agents, highest aggregate throughput, 8K context |
 | `run-qwen38-vision.bat` | Qwen3.8 image understanding, one user, 32K context, MTP3 |

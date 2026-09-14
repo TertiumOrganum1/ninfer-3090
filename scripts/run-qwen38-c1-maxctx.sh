@@ -28,7 +28,8 @@
 # no client hint. A grid point is only materialised once two independent callers have both asked
 # for it, so it cannot waste a slot speculatively.
 #
-# MEASURED, with a Windows desktop running (a headless box has roughly 1.5 GiB more to spend):
+# MEASURED, with a Windows desktop running (a headless box has roughly 1.5 GiB more to spend), and
+# BEFORE the two memory flags this profile now passes -- the earlier profile's figures:
 #
 #   lanes  KV      context   vision   runtime    free after startup
 #   ------------------------------------------------------------------
@@ -39,6 +40,14 @@
 #   1      rk8v4   131,072   overlay  3.94 GiB   1.59 GiB
 #   2      rk8v4   131,072   overlay  4.32 GiB   1.26 GiB
 #   1      rk8v4   163,840   overlay  4.78 GiB   763.2 MiB
+#
+# With --embedding-q4 --gdn-state-fp16, measured 2026-09-14 on the same card and profile shape:
+#
+#   lanes  KV      context   vision   runtime    free after startup
+#   ------------------------------------------------------------------
+#   1      rk8v4   131,072   overlay  3.80 GiB   2.47 GiB
+#   1      rk8v4   163,840   overlay  4.65 GiB   1.63 GiB
+#   1      rk8v4   196,608   overlay  5.49 GiB   798.1 MiB
 #
 # Vision is on: overlay residency costs about 10 MiB of runtime reservation, so there is no reason
 # to trade it away. run-qwen38-vision.sh remains for the plain 32K image profile.
