@@ -593,6 +593,21 @@ int test_stops_and_ranges() {
     failures += check(translated.stop.strings[0].channel == ninfer::OutputChannel::Content &&
                           translated.stop.strings[1].channel == ninfer::OutputChannel::Reasoning,
                       "stop channel ordering is explicit");
+    failures += check(translated.stop.include_model_defaults,
+                      "checkpoint stop tokens apply when ignore_eos is absent");
+
+    body["ignore_eos"]                       = true;
+    const ninfer::RequestOptions ignore_eos = options(parse(body).generation);
+    failures += check(!ignore_eos.stop.include_model_defaults,
+                      "ignore_eos suppresses the checkpoint's stop tokens");
+    failures += check(ignore_eos.stop.strings.size() == 4,
+                      "ignore_eos keeps caller-supplied stop strings");
+    body.erase("stop");
+    failures += check(parse(body).generation.ignore_eos, "ignore_eos parses without a stop field");
+    body["ignore_eos"] = "true";
+    failures += check(api_error([&] { (void)parse(body); }).param == "ignore_eos",
+                      "non-boolean ignore_eos rejected");
+    body.erase("ignore_eos");
 
     body["stop"] = Json::array({"1", "2", "3", "4", "5"});
     failures += check(api_error([&] { (void)parse(body); }).param == "stop",
