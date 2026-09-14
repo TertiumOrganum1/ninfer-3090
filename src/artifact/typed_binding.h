@@ -13,9 +13,11 @@ class MaterializedArtifact;
 
 // evict_rank applies to Device placement only: a nonzero rank moves the tensor into the arena's
 // evictable tail (higher rank == evicted earlier).
+// A non-None transcode (Device placement only) materializes `format` as the transcode target.
 [[nodiscard]] ObjectHandle bind_tensor(Binder& binder, std::string_view name, NumericFormat format,
                                        std::initializer_list<std::uint64_t> shape,
-                                       TensorPlacement placement, std::uint32_t evict_rank = 0);
+                                       TensorPlacement placement, std::uint32_t evict_rank = 0,
+                                       DeviceTranscode transcode = DeviceTranscode::None);
 
 [[nodiscard]] ObjectHandle bind_device_tensor(Binder& binder, std::string_view name,
                                               NumericFormat format,

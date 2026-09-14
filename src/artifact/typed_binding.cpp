@@ -149,13 +149,16 @@ Weight row_scale_weight(const MaterializedArtifact& materialized, ObjectHandle h
 
 ObjectHandle bind_tensor(Binder& binder, std::string_view name, NumericFormat format,
                          std::initializer_list<std::uint64_t> shape, TensorPlacement placement,
-                         std::uint32_t evict_rank) {
+                         std::uint32_t evict_rank, DeviceTranscode transcode) {
     const ObjectHandle handle =
         binder.require_tensor(name, format, storage_layout_for(format),
                               std::span<const std::uint64_t>(shape.begin(), shape.size()));
+    if (transcode != DeviceTranscode::None && placement == TensorPlacement::HostPinned) {
+        throw ArtifactError("a pinned host tensor cannot be transcoded: " + std::string(name));
+    }
     switch (placement) {
     case TensorPlacement::Device:
-        binder.materialize_on_device(handle, evict_rank);
+        binder.materialize_on_device(handle, evict_rank, transcode);
         break;
     case TensorPlacement::HostPinned:
         binder.materialize_on_host_pinned(handle);

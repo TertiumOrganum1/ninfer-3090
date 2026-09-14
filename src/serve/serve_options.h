@@ -57,6 +57,8 @@ struct ServeOptions {
     std::uint32_t vision_max_merged_tokens = 16384;
     bool use_cuda_graph     = true;
     bool lm_head_q4         = false;
+    bool lm_head_q6         = false;
+    bool embedding_q4       = false;
     bool gdn_state_fp16     = false;
     bool mlp_a8_decode      = false;
     bool allow_prefix_reuse = true;

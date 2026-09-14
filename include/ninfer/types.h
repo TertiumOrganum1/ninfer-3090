@@ -198,6 +198,12 @@ struct EngineOptions {
     // per-slot host state image.
     bool lm_head_q4                        = false;
     bool gdn_state_fp16                    = false;
+    // Device-memory trades that store a W8 vocabulary matrix at a narrower group-64 width while
+    // the weights load (the artifact is unchanged). lm_head_q6 saves ~26% of the output head for
+    // +0.01% perplexity; embedding_q4 halves the token embedding with no measurable perplexity
+    // change. lm_head_q4 and lm_head_q6 are mutually exclusive.
+    bool lm_head_q6                        = false;
+    bool embedding_q4                      = false;
     // Integer-activation MLP gate_up at decode and verify widths. Measured 4-6% off that Op from
     // sixteen columns up; see docs/maintainer/quality-trade-experiments.md.
     bool mlp_a8_decode                     = false;

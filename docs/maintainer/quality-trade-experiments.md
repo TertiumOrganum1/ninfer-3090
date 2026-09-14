@@ -1,8 +1,11 @@
-# Quality trades: int4 vocabulary head, FP16 GDN state, integer-activation MLP decode
+# Quality trades: narrower vocabulary matrices, FP16 GDN state, integer-activation MLP decode
 
-Three speed-for-quality trades, all **implemented, measured, and wired to CLI flags**:
-`--lm-head-q4`, `--gdn-state-fp16` and `--mlp-a8-decode` on `ninfer`, `ninfer-serve`, and
-`ninfer-perplexity`. All default off. The [`sm_86` findings](../performance.md#small-t-tensor-core-kernels-for-verify-and-cohort-decode)
+Five speed- or memory-for-quality trades, all **implemented, measured, and wired to CLI flags**:
+`--lm-head-q4`, `--lm-head-q6`, `--embedding-q4`, `--gdn-state-fp16` and `--mlp-a8-decode` on
+`ninfer`, `ninfer-serve`, and `ninfer-perplexity`. All default off. The two new vocabulary trades
+are memory trades first: see [Vocabulary transcoding](#vocabulary-transcoding---lm-head-q6-and---embedding-q4)
+for why `--embedding-q4 --lm-head-q6` is worth about 37K tokens of context for no measurable
+perplexity change. The [`sm_86` findings](../performance.md#small-t-tensor-core-kernels-for-verify-and-cohort-decode)
 explain why the first two were the next levers: a decode round is bandwidth-bound at C1, and both
 of them buy bytes.
 
@@ -30,21 +33,22 @@ The reference stack this fork is chased against (syv-ai/qwen38-27b-rtx3090) runs
 
 The 27B's output head is `W8G32_F16S`, 248320 x 5120: **1.27 GB read for every decode step and
 every verify round**, about 1.5 ms of a 25.7 ms C1 round and 2.7 ms of a 58 ms C8 round.
-`ops::requantize_w8g32_to_q4g64_in_place` (`src/ops/linear/q4/q4_requantize.{h,cu}`) rewrites it to
-`Q4G64_F16S` during weight binding, halving that read.
+The artifact stays W8; the weights arena reserves the `Q4G64_F16S` encoding and the materializer
+writes it (`DeviceTranscode::W8G32ToQ4G64`, see [Vocabulary transcoding](#vocabulary-transcoding---lm-head-q6-and---embedding-q4)),
+halving that read **and freeing 644 MiB of VRAM for KV**.
 
 - Each 64-k group takes the fp16 scale, out of 25 clipping ratios of `absmax / 7` in [0.70, 1.18],
   that minimises the group's squared reconstruction error. Plain `absmax / 7` is one candidate, so
   the result is never worse than round-to-nearest.
-- The conversion is in place: the Q4 code and scale planes are each exactly half their W8
-  counterparts, written over the start of the W8 planes in ascending row chunks staged through a
-  temporary. No extra VRAM, and the freed upper halves are simply left unused.
 - `q4_dispatch` gained `n = 248320` routes, and `launch_q4_small_t_rows` serves any K = 5120 matrix
   whose rows are a whole number of CTAs (rows travel in the store, not the geometry).
 
-**Refused** with overlay vision (an evicted head is restored from the artifact as W8 bytes, which
-would then be read as Q4) and with DFlash/DFlash2 (its `linear_topk` reads the W8 head directly).
-Both are checked at the call site in `src/targets/qwen3_6_27b/impl/load/bindings.cpp`.
+Until 2026-09-14 this flag requantized the head in place on the GPU after upload and left the W8
+planes' upper halves allocated, so it freed nothing, and it was silently skipped with overlay
+vision because the eviction mirror held W8 bytes. Transcoding in the materializer fixes both: the
+mirror is captured from the final bytes. It is **rejected** with DFlash/DFlash2, whose
+`linear_topk` reads the W8 head directly, and on the 35B-A3B, whose artifact already stores a Q6
+head.
 
 ### `--gdn-state-fp16` — FP16 recurrent state
 
@@ -136,10 +140,83 @@ so the state is only rounded at three chunk boundaries per 4096-token window, wh
 every round. The drift test and the divergence check exist because of this gap, and both came back
 clean.
 
-## Remaining loose end
+## Vocabulary transcoding -- `--lm-head-q6` and `--embedding-q4`
 
-Freeing the W8 head's now-unused upper halves after `--lm-head-q4` requantizes it in place is a
-further ~670 MB of VRAM for KV, and is not done.
+The 27B stores both vocabulary matrices as `W8G32_F16S`, 248320 x 5120: **1,288 MiB each**,
+together 2.5 GiB of a 17.9 GB resident model. Neither needs eight bits.
+
+`src/artifact/transcode.{h,cpp}` requantizes a row-split W8G32 payload into a narrower group-64
+row-split encoding on the host, while the weights load. The binder plans the target encoding's size,
+so the arena genuinely shrinks; the materializer writes the target bytes after the direct-I/O
+upload, before anything else (bindings, the overlay eviction mirror) can observe the tensor. Scale
+selection is the `--lm-head-q4` search above with `qmax` of 7 or 31. It is multi-threaded and adds
+a few seconds to load.
+
+| flag | tensor | stored as | device memory | kernel |
+|---|---|---|---:|---|
+| `--lm-head-q4` | output head | Q4G64 | -644 MiB | Q4 linear (existing) |
+| `--lm-head-q6` | output head | Q6G64 | -341 MiB | Q6 linear (existing, same routes as the 35B head) |
+| `--embedding-q4` | token embedding | Q4G64 | -644 MiB (27B), -258 MiB (35B-A3B) | Q4 embedding gather (new) |
+
+`--lm-head-q4` and `--lm-head-q6` are mutually exclusive.
+
+**Measured 2026-09-14**, same box and corpus protocol as above (`--quick`, 4096/2048), but **rk8v4 KV**,
+Qwen3.8-27B:
+
+| flags | overall PPL | vs base | free after weights | context gained |
+|---|---:|---:|---:|---:|
+| base | 4.346413 | -- | 6,563,576,832 B | -- |
+| `--embedding-q4` | 4.343738 | -0.062% | 7,239,007,232 B | +24.3K tokens |
+| `--lm-head-q6` | 4.346931 | +0.012% | 6,921,157,632 B | +12.9K tokens |
+| `--embedding-q4 --lm-head-q6` | 4.344221 | **-0.050%** | 7,596,588,032 B | **+37.2K tokens** |
+| `--lm-head-q4` | 4.376552 | +0.693% | 7,239,007,232 B | +24.3K tokens |
+
+Context gained is the freed bytes over this configuration's 27,744 B per token of rk8v4 KV with
+MTP (MTP3, draft head, one lane); on this box that moves the largest single-lane context from about
+182K to 220K tokens. Free-after-weights is the engine's own startup arithmetic, and the three
+rows that should agree do so to the byte (both transcodes together free exactly the sum of each).
+
+Both perplexity differences on the embedding are inside run-to-run noise for this protocol; the
+embedding quantization simply costs nothing measurable, and six bits on the head costs +0.01%.
+Before building the transcoder these were measured by **fake quantization** -- writing Q4/Q6 codes
+and scales into the W8 layout, which represents them exactly, and scoring through the unchanged W8
+kernels -- and the real transcoded runs reproduce those numbers to every printed digit, which is also
+the end-to-end check that the codec and the new Q4 gather are exact.
+
+**Decode speed** (`tools/bench/run_chat_decode.py`, eight chat prompts, thinking off, greedy, 512 output
+tokens, MTP3 with the draft head, rk8v4, arms interleaved in one sitting, three repetitions, median):
+
+| C | arm | decode tok/s | vs base |
+|---|---|---:|---:|
+| 1 | base | 102.01 | -- |
+| 1 | `--embedding-q4` | 105.55 | +3.5% (noise; never slower in a pair) |
+| 1 | `--lm-head-q6` | 99.78 | **-2.2%** (-5.4%, -5.1%, -2.0% paired) |
+| 1 | `--lm-head-q4` | 109.36 | +7.2% |
+| 1 | `--embedding-q4 --lm-head-q6` (separate sitting) | 96.78 vs 101.95 | -5.1% |
+| 4 | `--embedding-q4 --lm-head-q6` (separate sitting) | 300.44 vs 307.03 | -1.0% (mixed signs) |
+
+The embedding costs nothing: its gather touches a handful of rows per step. The Q6 head is slower
+at one lane because this shape has no Q6 small-T kernel -- T <= 7 routes to the generic
+`q6_simt_r8_c4`, where W8 has `launch_w8_small_t` and Q4 has `launch_q4_small_t_rows`. A Q6 small-T
+kernel would remove that cost; until then `--lm-head-q6` is a trade of a few percent of C1 decode
+for 12.9K tokens, and `--lm-head-q4` remains the faster (and larger, and lossier) head option.
+
+**The 35B-A3B is different.** Its 2048-wide embedding does not quantize for free: `--embedding-q4`
+measured 4.373904 -> 4.389698 (**+0.36%**, same protocol), about the cost of NVFP4 KV, for 258 MiB.
+It is supported there as a trade rather than recommended. Its head is already Q6G64 in the artifact,
+so `--lm-head-q4`/`--lm-head-q6` are rejected at startup on that model.
+
+**Overlay vision** works with transcoded tensors, because the eviction mirror is captured after
+the materializer writes them: with `--vision --vision-residency overlay --embedding-q4 --lm-head-q6`
+and KV too small to fund the encode window, the image request opened an exclusive window that evicted
+144 MiB of the Q6 head and restored it from the mirror, and a greedy text completion before and
+after the image was byte-identical.
+
+Qualification: `ninfer_vocabulary_transcode_test` checks the codec against an independent decoder
+(every group no worse than round-to-nearest, padded and all-zero groups included) and routes
+transcoded 248320x5120 heads through `ops::linear` at T = 1..32 under the A16 linear criterion;
+`ninfer_embedding_test` qualifies the Q4 gather at [248320,5120] and [248320,2048] against an FP64
+oracle, including CUDA Graph replay.
 
 ## `--mlp-a8-decode` -- integer-activation MLP gate_up at decode widths
 

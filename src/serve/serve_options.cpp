@@ -85,7 +85,8 @@ std::string serve_usage_text(const char* argv0) {
            "[--default-max-tokens N] [--default-thinking-budget N] "
            "[--vision] [--vision-residency resident|overlay] [--vision-max-merged N] "
            "[--no-cuda-graph] [--no-prefix-reuse] [--auto-prefix-grid] [--devices N,M] "
-           "[--lm-head-draft] [--lm-head-q4] [--gdn-state-fp16] [--mlp-a8-decode] "
+           "[--lm-head-draft] [--lm-head-q4|--lm-head-q6] [--embedding-q4] [--gdn-state-fp16] "
+           "[--mlp-a8-decode] "
            "[--no-thinking] [--preserve-thinking] [--cors] "
            "[--temperature F] [--top-p F] [--top-k N] [--min-p F] [--presence-penalty F] "
            "[--frequency-penalty F] [--seed N] [--greedy]\n"
@@ -355,6 +356,10 @@ ServeOptions parse_serve_options(int argc, char** argv) {
             options.speculative.proposal_head = ProposalHead::Optimized;
         } else if (arg == "--lm-head-q4") {
             options.lm_head_q4 = true;
+        } else if (arg == "--lm-head-q6") {
+            options.lm_head_q6 = true;
+        } else if (arg == "--embedding-q4") {
+            options.embedding_q4 = true;
         } else if (arg == "--gdn-state-fp16") {
             options.gdn_state_fp16 = true;
         } else if (arg == "--mlp-a8-decode") {

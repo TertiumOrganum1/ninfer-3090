@@ -1,4 +1,5 @@
 #include "artifact/materializer.h"
+#include "artifact/transcode.h"
 
 #include "core/startup.h"
 
@@ -222,16 +223,30 @@ MaterializedArtifact materialize(const Reader& reader, const MaterializationPlan
     // Objects sit at the offsets the plan assigned; the plan owns the whole arena.
     auto* const arena_base     = static_cast<std::byte*>(out.device_arena_->base());
     std::uint64_t previous_end = 0;
+    std::vector<const DeviceMaterialization*> transcoded;
+    std::uint64_t direct_total = 0;
     for (const DeviceMaterialization& placement : plan.device_objects) {
-        const PayloadSpan payload = reader.payload(reader.objects().at(placement.object.index));
+        const ObjectDescriptor& object = reader.objects().at(placement.object.index);
+        const PayloadSpan payload      = reader.payload(object);
+        const auto* tensor             = std::get_if<TensorDescriptor>(&object);
+        const std::uint64_t expected_bytes =
+            placement.transcode == DeviceTranscode::None
+                ? payload.data.size()
+                : row_split_geometry(transcode_target_format(placement.transcode), tensor->shape)
+                      .encoded_bytes;
         if (placement.offset < previous_end || placement.bytes > capacity ||
-            placement.offset > capacity - placement.bytes ||
-            payload.data.size() != placement.bytes) {
+            placement.offset > capacity - placement.bytes || expected_bytes != placement.bytes) {
             throw ArtifactError("materialization plan does not match artifact payload");
         }
         previous_end         = placement.offset + placement.bytes;
         std::byte* const dst = arena_base + placement.offset;
         out.objects_.at(placement.object.index).device = dst;
+        if (placement.transcode != DeviceTranscode::None) {
+            transcoded.push_back(&placement);
+            continue;
+        }
+        direct_total = checked_add(direct_total, placement.bytes,
+                                   "artifact tensor byte count overflows u64");
         ranges.push_back(CopyRange{
             .source_begin = payload.absolute_offset,
             .source_end   = checked_add(payload.absolute_offset, placement.bytes,
@@ -344,8 +359,21 @@ MaterializedArtifact materialize(const Reader& reader, const MaterializationPlan
     }
     for (const auto& slot : slots) { slot->wait(); }
     CUDA_CHECK(cudaStreamSynchronize(device.transfer_stream));
-    if (copied != total || next_range != ranges.size()) {
+    if (copied != direct_total || next_range != ranges.size()) {
         throw ArtifactError("direct materialization did not cover every tensor byte");
+    }
+    for (const DeviceMaterialization* placement : transcoded) {
+        const ObjectDescriptor& object = reader.objects().at(placement->object.index);
+        const PayloadSpan payload      = reader.payload(object);
+        const auto& tensor             = std::get<TensorDescriptor>(object);
+        std::vector<std::byte> encoded(static_cast<std::size_t>(placement->bytes));
+        transcode_row_split(placement->transcode, tensor.shape, payload.data, encoded);
+        CUDA_CHECK(cudaMemcpy(arena_base + placement->offset, encoded.data(), encoded.size(),
+                              cudaMemcpyHostToDevice));
+        out.stats_.file_bytes = checked_add(out.stats_.file_bytes, payload.data.size(),
+                                            "artifact read bytes overflow u64");
+        copied = checked_add(copied, placement->bytes, "artifact copied byte count overflows u64");
+        materialize_phase.progress(copied, total);
     }
     out.stats_.h2d_bytes = copied;
     out.stats_.upload_seconds =

@@ -13,6 +13,7 @@ namespace {
 
 constexpr int kBlock          = 128;
 constexpr int kQ6GroupedBlock = kEmbedGatherQ6Group * kEmbedGatherQ6GroupsPerBlock;
+constexpr int kQ4GroupedBlock = kEmbedGatherQ4Group * kEmbedGatherQ4GroupsPerBlock;
 constexpr int kW8GroupedBlock = 32;
 constexpr int kW8RowBlock     = 256;
 
@@ -93,6 +94,28 @@ void embed_gather_dense_launch(const Tensor& ids, const Tensor& table, Tensor& o
     embed_gather_dense_kernel<<<grid_for(n), kBlock, 0, stream>>>(
         static_cast<const std::int32_t*>(ids.data), static_cast<const __nv_bfloat16*>(table.data),
         static_cast<__nv_bfloat16*>(out.data), d, T);
+    CUDA_CHECK(cudaGetLastError());
+}
+
+void embed_gather_q4_launch(const Tensor& ids, const Weight& table, Tensor& out,
+                            cudaStream_t stream) {
+    const std::int32_t d = out.ne[0];
+    const std::int32_t T = ids.ne[0];
+    const std::int64_t n = static_cast<std::int64_t>(d) * T;
+    const auto* codes    = static_cast<const std::uint8_t*>(table.qdata);
+    const auto* scales   = static_cast<const std::uint8_t*>(table.scales);
+    if (d == table.padded_shape[1] && d % kEmbedGatherQ4Group == 0) {
+        const std::int32_t group_blocks = div_up(d / kEmbedGatherQ4Group, kEmbedGatherQ4GroupsPerBlock);
+        embed_gather_q4_grouped_kernel<<<T * group_blocks, kQ4GroupedBlock, 0, stream>>>(
+            static_cast<const std::int32_t*>(ids.data), codes, scales,
+            static_cast<__nv_bfloat16*>(out.data), d, T);
+        CUDA_CHECK(cudaGetLastError());
+        return;
+    }
+
+    embed_gather_q4_kernel<<<grid_for(n), kBlock, 0, stream>>>(
+        static_cast<const std::int32_t*>(ids.data), codes, scales,
+        static_cast<__nv_bfloat16*>(out.data), d, T, table.padded_shape[1]);
     CUDA_CHECK(cudaGetLastError());
 }
 

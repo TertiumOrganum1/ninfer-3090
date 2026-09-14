@@ -282,6 +282,8 @@ int main(int argc, char** argv) {
         engine_options.vision_max_merged_tokens = cli.vision_max_merged_tokens;
         engine_options.use_cuda_graph = cli.use_cuda_graph;
         engine_options.lm_head_q4     = cli.lm_head_q4;
+        engine_options.lm_head_q6     = cli.lm_head_q6;
+        engine_options.embedding_q4   = cli.embedding_q4;
         engine_options.gdn_state_fp16 = cli.gdn_state_fp16;
         engine_options.mlp_a8_decode  = cli.mlp_a8_decode;
         // One CLI invocation owns exactly one request, so retained cross-request context has no
