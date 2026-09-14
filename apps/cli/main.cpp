@@ -284,6 +284,7 @@ int main(int argc, char** argv) {
         engine_options.lm_head_q4     = cli.lm_head_q4;
         engine_options.lm_head_q6     = cli.lm_head_q6;
         engine_options.embedding_q4   = cli.embedding_q4;
+        engine_options.embedding_q6   = cli.embedding_q6;
         engine_options.mtp_experts_q4 = cli.mtp_experts_q4;
         engine_options.gdn_state_fp16 = cli.gdn_state_fp16;
         engine_options.mlp_a8_decode  = cli.mlp_a8_decode;

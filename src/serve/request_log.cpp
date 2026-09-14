@@ -703,6 +703,7 @@ std::string format_server_start_json(
              {"lm_head_q4", engine_options.lm_head_q4},
              {"lm_head_q6", engine_options.lm_head_q6},
              {"embedding_q4", engine_options.embedding_q4},
+             {"embedding_q6", engine_options.embedding_q6},
              {"mtp_experts_q4", engine_options.mtp_experts_q4},
              {"gdn_state_fp16", engine_options.gdn_state_fp16},
              {"mlp_a8_decode", engine_options.mlp_a8_decode},

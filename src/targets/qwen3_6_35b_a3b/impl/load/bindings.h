@@ -94,7 +94,7 @@ struct BindingPlan {
     qwen3_6::FrontendResourcePlan frontend;
     qwen3_6::StartupFeatures features;
     artifact::ObjectHandle token_embedding;
-    // Q4G64_F16S when --embedding-q4 transcodes the W8 table at load.
+    // Q4G64_F16S or Q6G64_F16S when --embedding-q4/--embedding-q6 transcode the W8 table at load.
     artifact::NumericFormat token_embedding_format = artifact::NumericFormat::W8G32_F16S;
     std::array<TextLayerPlan, kTextLayers> text_layers;
     artifact::ObjectHandle final_norm;

@@ -204,8 +204,10 @@ for 12.9K tokens, and `--lm-head-q4` remains the faster (and larger, and lossier
 
 **The 35B-A3B is different.** Its 2048-wide embedding does not quantize for free: `--embedding-q4`
 measured 4.373904 -> 4.389698 (**+0.36%**, same protocol), about the cost of NVFP4 KV, for 258 MiB.
-It is supported there as a trade rather than recommended. Its head is already Q6G64 in the artifact,
-so `--lm-head-q4`/`--lm-head-q6` are rejected at startup on that model.
+It is supported there as a trade rather than recommended. `--embedding-q6` is the option for that
+model: Q6G64 through the existing Q6 gather, **4.373904 -> 4.375419 (+0.035%)** for 143 MiB (about
+18K tokens of its rk8v4 KV). The two are mutually exclusive. Its head is already Q6G64 in the
+artifact, so `--lm-head-q4`/`--lm-head-q6` are rejected at startup on that model.
 
 **Overlay vision** works with transcoded tensors, because the eviction mirror is captured after
 the materializer writes them: with `--vision --vision-residency overlay --embedding-q4 --lm-head-q6`

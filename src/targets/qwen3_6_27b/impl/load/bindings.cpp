@@ -110,11 +110,15 @@ void reject_mtp_experts_q4(const qwen3_6::StartupFeatures& features) {
 
 artifact::DeviceTranscode embedding_transcode(const qwen3_6::StartupFeatures& features,
                                               NumericFormat vocabulary_format) {
-    if (!features.embedding_q4) { return artifact::DeviceTranscode::None; }
-    if (vocabulary_format != NumericFormat::W8G32_F16S) {
-        throw std::invalid_argument("--embedding-q4 requires a W8G32 token embedding");
+    if (features.embedding_q4 && features.embedding_q6) {
+        throw std::invalid_argument("--embedding-q4 and --embedding-q6 are mutually exclusive");
     }
-    return artifact::DeviceTranscode::W8G32ToQ4G64;
+    if (!features.embedding_q4 && !features.embedding_q6) { return artifact::DeviceTranscode::None; }
+    if (vocabulary_format != NumericFormat::W8G32_F16S) {
+        throw std::invalid_argument("--embedding-q4/--embedding-q6 require a W8G32 token embedding");
+    }
+    return features.embedding_q4 ? artifact::DeviceTranscode::W8G32ToQ4G64
+                                 : artifact::DeviceTranscode::W8G32ToQ6G64;
 }
 
 // Overlay eviction ladder: higher ranks sit at the arena end and are borrowed first. The four
