@@ -151,7 +151,7 @@ ConstructedTarget construct_registered(const EngineOptions& options, DeviceConte
                     " of evict-ranked weights for one encode window, but the loaded head, embedding, "
                     "draft and MTP weights provide " + mib(usable_tail) +
                     "; lower --vision-max-merged, use --vision-residency resident, or drop a flag that "
-                    "shrinks those weights (--embedding-q4, --lm-head-q4, --lm-head-q6)");
+                    "shrinks those weights (--embedding-q4, --lm-head-q4, --lm-head-q6, --mtp-experts-q4)");
             }
         }
         pool                 = std::make_unique<EvictableWeightPool>(
