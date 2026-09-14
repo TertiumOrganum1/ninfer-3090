@@ -135,7 +135,7 @@ ConstructedTarget construct_registered(const EngineOptions& options, DeviceConte
         {
             // The exclusive fallback borrows the encode window from the evict-ranked weights, so
             // they must cover it -- with the pool's own chunk alignment. Load-time transcoding
-            // (--embedding-q4/q6, --lm-head-q4/q6, --mtp-experts-q4) shrinks exactly those tensors,
+            // shrinks exactly those tensors,
             // so say which knobs trade against each other instead of failing inside the pool.
             constexpr std::size_t chunk = EvictableWeightPool::kChunkBytes;
             const auto align = [](std::size_t value) { return (value + chunk - 1) / chunk * chunk; };
