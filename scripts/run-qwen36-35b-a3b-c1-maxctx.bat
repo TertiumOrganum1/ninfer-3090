@@ -16,8 +16,13 @@ rem quiet one (~22.6 GiB free). If a value fails to start, drop one rung.
 rem
 rem   profile                    default   free @busy   reached @quiet   decode
 rem   ----------------------------------------------------------------------------
-rem   A  MTP3 + draft head        81,920      193 MiB          131,072   ~240 tok/s
+rem   A  MTP3 + draft head       147,456      666 MiB          196,608   ~240 tok/s
 rem   B  no speculation          196,608      375 MiB          262,144   ~183 tok/s
+rem
+rem Profile A's row is with --mtp-experts-q4 --gdn-state-fp16 (below), measured 2026-09-14 with the
+rem desktop at ~505 MiB; 196,608 is the largest rung that started, with 246 MiB free. Before those
+rem flags it was 81,920 by default, 193 MiB free at busy, and 131,072 at quiet. Profile B predates
+rem them and does not use MTP, so only --gdn-state-fp16 would apply there.
 rem
 rem MEMORY FLAGS on profile A (2026-09-14, docs/maintainer/quality-trade-experiments.md). The MTP draft
 rem layer's routed experts ship as W8 (816 MiB) while the text layers' are Q4/Q6; --mtp-experts-q4

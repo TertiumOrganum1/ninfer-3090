@@ -93,7 +93,7 @@ through the real Op): width 1 (decode) worst relative error **0.339%**, quarterl
 ~0.31-0.32%; width 4 (MTP3) worst **0.219%**, quarterly means flat at ~0.19-0.21%. Both comfortably
 under the 2% fail threshold and not trending upward — this is the evidence perplexity can't give.
 
-**Q4 head requantization** (`ninfer_q4_requantize_test`): per-group error never worse than plain
+**Q4 head requantization** (then `ninfer_q4_requantize_test`, now `ninfer_vocabulary_transcode_test`): per-group error never worse than plain
 `absmax/7` rounding, and the routed Q4 head matches an fp64 oracle at T=1..32. **OK.**
 
 **Greedy output divergence** (one real prompt, 300 tokens, greedy, int8 KV, through `ninfer`):
@@ -143,7 +143,7 @@ clean.
 
 ## Vocabulary transcoding -- `--lm-head-q6` and `--embedding-q4`
 
-The 27B stores both vocabulary matrices as `W8G32_F16S`, 248320 x 5120: **1,288 MiB each**,
+Qwen3.8-27B stores both vocabulary matrices as `W8G32_F16S`, 248320 x 5120: **1,288 MiB each**,
 together 2.5 GiB of a 17.9 GB resident model. Neither needs eight bits.
 
 `src/artifact/transcode.{h,cpp}` requantizes a row-split W8G32 payload into a narrower group-64
