@@ -714,6 +714,8 @@ std::string format_server_start_json(
              {"vision", engine_options.enable_vision},
              {"cuda_graph", engine_options.use_cuda_graph},
              {"lm_head_q4", engine_options.lm_head_q4},
+             {"lm_head_q6", engine_options.lm_head_q6},
+             {"embedding_q4", engine_options.embedding_q4},
              {"gdn_state_fp16", engine_options.gdn_state_fp16},
              {"mlp_a8_decode", engine_options.mlp_a8_decode},
              {"prefix_reuse", options.allow_prefix_reuse},

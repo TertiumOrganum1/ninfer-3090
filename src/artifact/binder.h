@@ -1,6 +1,7 @@
 #pragma once
 
 #include "artifact/reader.h"
+#include "artifact/transcode.h"
 
 #include <cstddef>
 #include <cstdint>
@@ -28,6 +29,9 @@ struct DeviceMaterialization {
     std::uint64_t offset    = 0;
     std::uint64_t bytes     = 0;
     std::uint64_t alignment = 0;
+    // Non-None: `bytes` is the target encoding's size and the materializer writes transcoded bytes
+    // instead of copying the artifact payload.
+    DeviceTranscode transcode = DeviceTranscode::None;
 };
 
 struct HostMaterialization {
@@ -71,7 +75,9 @@ public:
     // evict_rank 0 keeps the tensor resident for the process lifetime. A nonzero rank moves it
     // into the arena's evictable tail; higher ranks land closer to the arena end and are evicted
     // first.
-    void materialize_on_device(ObjectHandle handle, std::uint32_t evict_rank = 0);
+    // A non-None transcode reserves and receives the target format's encoding of the tensor.
+    void materialize_on_device(ObjectHandle handle, std::uint32_t evict_rank = 0,
+                               DeviceTranscode transcode = DeviceTranscode::None);
     void materialize_on_host_pinned(ObjectHandle handle);
     void retain_on_host(ObjectHandle handle);
     void validate_only(ObjectHandle handle);
@@ -81,9 +87,10 @@ public:
 private:
     struct PendingEvictable {
         ObjectHandle handle;
-        std::uint64_t bytes     = 0;
-        std::uint64_t alignment = 0;
-        std::uint32_t rank      = 0;
+        std::uint64_t bytes       = 0;
+        std::uint64_t alignment   = 0;
+        std::uint32_t rank        = 0;
+        DeviceTranscode transcode = DeviceTranscode::None;
     };
 
     ObjectHandle find_unconsumed(std::string_view name);

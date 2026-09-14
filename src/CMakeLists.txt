@@ -47,6 +47,7 @@ add_library(ninfer_artifact STATIC
   artifact/storage_layouts.cpp
   artifact/binder.cpp
   artifact/materializer.cpp
+  artifact/transcode.cpp
   artifact/typed_binding.cpp)
 ninfer_internal_includes(ninfer_artifact)
 target_link_libraries(ninfer_artifact PUBLIC ninfer_core)
@@ -204,7 +205,6 @@ add_library(ninfer_ops STATIC
   ops/linear/nvfp4/nvfp4_w4a4.cu
   ops/linear/nvfp4/nvfp4_dispatch.cpp
   ops/linear/q4/q4_small_t_mma.cu
-  ops/linear/q4/q4_requantize.cu
   ops/linear/q4/q4_rowsplit_gemm_mma.cu
   ops/linear/q4/q4_rowsplit_gemm_simt.cu
   ops/linear/q4/q4_rowsplit_gemv.cu

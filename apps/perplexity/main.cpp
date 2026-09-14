@@ -56,6 +56,8 @@ struct Options {
 #endif
     bool quick                          = false;
     bool lm_head_q4                     = false;
+    bool lm_head_q6                     = false;
+    bool embedding_q4                   = false;
     bool gdn_state_fp16                 = false;
     bool mlp_a8_decode                  = false;
     ninfer::product::LogLevel log_level = ninfer::product::LogLevel::Info;
@@ -66,7 +68,8 @@ std::string usage_text() {
            "(--corpus <manifest.json> [--quick] | --text <utf8-file>)\n"
            "       [--context N] [--stride N] [--device N]\n"
            "       [--kv-dtype bf16|int8|fp8|rk8v4|nvfp4|k8v4] [--output <directory>]\n"
-           "       [--lm-head-q4] [--gdn-state-fp16] [--mlp-a8-decode]\n"
+           "       [--lm-head-q4|--lm-head-q6] [--embedding-q4] [--gdn-state-fp16]\n"
+           "       [--mlp-a8-decode]\n"
            "       (--mlp-a8-decode is inert here: the route it enables is verify-phase"
            "        only, and scoring runs the prefill phase)\n"
            "       [--log-level trace|debug|info|warning|error|critical|off]\n";
@@ -134,6 +137,10 @@ Options parse_options(int argc, char** argv) {
             out.output = std::filesystem::path(value("--output"));
         } else if (option == "--lm-head-q4") {
             out.lm_head_q4 = true;
+        } else if (option == "--lm-head-q6") {
+            out.lm_head_q6 = true;
+        } else if (option == "--embedding-q4") {
+            out.embedding_q4 = true;
         } else if (option == "--gdn-state-fp16") {
             out.gdn_state_fp16 = true;
         } else if (option == "--mlp-a8-decode") {
@@ -248,6 +255,8 @@ int run(const Options& options, const std::shared_ptr<spdlog::logger>& logger,
     engine_options.max_context      = options.context;
     engine_options.kv_cache         = options.kv;
     engine_options.lm_head_q4       = options.lm_head_q4;
+    engine_options.lm_head_q6       = options.lm_head_q6;
+    engine_options.embedding_q4     = options.embedding_q4;
     engine_options.gdn_state_fp16   = options.gdn_state_fp16;
     engine_options.mlp_a8_decode    = options.mlp_a8_decode;
     engine_options.startup_observer = startup_log.observer();

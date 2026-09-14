@@ -1,9 +1,6 @@
 #include "targets/qwen3_6_27b/impl/load/bindings.h"
 
 #include "core/device.h"
-#include "ops/linear/q4/q4_requantize.h"
-
-#include <cstdio>
 
 #include "artifact/typed_binding.h"
 #include "core/evictable_weight_pool.h"
@@ -73,13 +70,48 @@ void require_positive_finite(std::uint32_t bits, std::string_view label) {
 WeightPlan bind_weight(artifact::Binder& binder, std::string_view name, NumericFormat format,
                        std::initializer_list<std::uint64_t> shape,
                        std::uint32_t evict_rank                = 0,
-                       artifact::TensorPlacement placement     = artifact::TensorPlacement::Device) {
+                       artifact::TensorPlacement placement     = artifact::TensorPlacement::Device,
+                       artifact::DeviceTranscode transcode     = artifact::DeviceTranscode::None) {
     if (format == NumericFormat::NVFP4) {
         throw std::logic_error("NVFP4 weight requires a paired input divisor");
     }
-    return WeightPlan{
-        .object = artifact::bind_tensor(binder, name, format, shape, placement, evict_rank),
-        .format = format};
+    const bool transcoded = transcode != artifact::DeviceTranscode::None &&
+                            placement == artifact::TensorPlacement::Device;
+    return WeightPlan{.object = artifact::bind_tensor(binder, name, format, shape, placement,
+                                                      evict_rank, transcode),
+                      .format = transcoded ? artifact::transcode_target_format(transcode) : format};
+}
+
+// --lm-head-q4/--lm-head-q6/--embedding-q4 store a W8 vocabulary matrix at a narrower group-64
+// width. The artifact is unchanged; the weights arena reserves and receives the narrower encoding.
+artifact::DeviceTranscode head_transcode(const qwen3_6::StartupFeatures& features,
+                                         NumericFormat vocabulary_format) {
+    if (features.lm_head_q4 && features.lm_head_q6) {
+        throw std::invalid_argument("--lm-head-q4 and --lm-head-q6 are mutually exclusive");
+    }
+    if (!features.lm_head_q4 && !features.lm_head_q6) { return artifact::DeviceTranscode::None; }
+    // Qwen3.6-27B groupwise already ships a Q6 head: nothing to transcode.
+    if (features.lm_head_q6 && vocabulary_format == NumericFormat::Q6G64_F16S) {
+        return artifact::DeviceTranscode::None;
+    }
+    if (vocabulary_format != NumericFormat::W8G32_F16S) {
+        throw std::invalid_argument("--lm-head-q4/--lm-head-q6 require a W8G32 output head");
+    }
+    if (features.masked_draft()) {
+        // DFlash's candidate top-k reads the W8 head through its own kernel.
+        throw std::invalid_argument("--lm-head-q4/--lm-head-q6 are not supported with DFlash");
+    }
+    return features.lm_head_q4 ? artifact::DeviceTranscode::W8G32ToQ4G64
+                               : artifact::DeviceTranscode::W8G32ToQ6G64;
+}
+
+artifact::DeviceTranscode embedding_transcode(const qwen3_6::StartupFeatures& features,
+                                              NumericFormat vocabulary_format) {
+    if (!features.embedding_q4) { return artifact::DeviceTranscode::None; }
+    if (vocabulary_format != NumericFormat::W8G32_F16S) {
+        throw std::invalid_argument("--embedding-q4 requires a W8G32 token embedding");
+    }
+    return artifact::DeviceTranscode::W8G32ToQ4G64;
 }
 
 // Overlay eviction ladder: higher ranks sit at the arena end and are borrowed first. The four
@@ -508,7 +540,8 @@ ArtifactLoadPlan bind_artifact(artifact::Binder& binder, WeightsProfile weights_
     const bool overlay  = features.overlay_vision();
     out.token_embedding =
         bind_weight(binder, "text/token_embedding", vocabulary_format, {248320, 5120},
-                    overlay ? kEvictRankEmbedding : 0, core_placement);
+                    overlay ? kEvictRankEmbedding : 0, core_placement,
+                    embedding_transcode(features, vocabulary_format));
     switch (weights_profile) {
     case WeightsProfile::Qwen36GroupwiseInt:
     case WeightsProfile::Qwen38GroupwiseInt:
@@ -526,7 +559,8 @@ ArtifactLoadPlan bind_artifact(artifact::Binder& binder, WeightsProfile weights_
     out.final_norm = artifact::bind_tensor(binder, "text/final_norm", NumericFormat::BF16, {5120},
                                            core_placement);
     out.output_head = bind_weight(binder, "text/output_head", vocabulary_format, {248320, 5120},
-                                  overlay ? kEvictRankLmHead : 0, core_placement);
+                                  overlay ? kEvictRankLmHead : 0, core_placement,
+                                  head_transcode(features, vocabulary_format));
     const artifact::TensorPlacement proposal_placement =
         (features.optimized_proposal() && ownership.owns_core())
             ? artifact::TensorPlacement::Device
@@ -699,15 +733,6 @@ LoadedModelData::LoadedModelData(std::vector<BindingPlan> plans,
     final_norm =
         artifact::materialized_tensor(backing, plan.final_norm, NumericFormat::BF16, {5120});
     output_head = materialized_weight(backing, plan.output_head, 248320, 5120);
-    // --lm-head-q4 requantizes the W8 vocabulary head to Q4G64 in place: +0.69% perplexity for a
-    // ~3% C8 decode gain (docs/maintainer/quality-trade-experiments.md). Not with overlay vision
-    // (an evicted head is restored as W8 bytes) or DFlash (its linear_topk reads the W8 head).
-    if (plan.features.lm_head_q4 && output_head.qtype == QType::W8G32_F16S &&
-        !plan.features.overlay_vision() && !plan.features.masked_draft()) {
-        CUDA_CHECK(cudaDeviceSynchronize());
-        ops::requantize_w8g32_to_q4g64_in_place(output_head, nullptr);
-        std::fprintf(stderr, "lm_head: requantized W8G32 -> Q4G64 in place (--lm-head-q4)\n");
-    }
     if (plan.features.optimized_proposal()) {
         auto& proposal     = runtime.optimized_proposal.emplace();
         proposal.head      = artifact::materialized_weight(backing, plan.draft_head,

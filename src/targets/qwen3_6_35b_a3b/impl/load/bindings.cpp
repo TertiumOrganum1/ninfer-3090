@@ -109,6 +109,10 @@ ArtifactLoadPlan bind_artifact(artifact::Binder& binder, qwen3_6::StartupFeature
     out.frontend       = qwen3_6::bind_frontend_resources(binder);
     out.features       = features;
     const bool overlay = features.overlay_vision();
+    if (features.lm_head_q4 || features.lm_head_q6) {
+        throw std::invalid_argument("--lm-head-q4/--lm-head-q6 transcode a W8 output head; the "
+                                    "qwen3.6-35b-a3b artifact already stores a Q6G64 head");
+    }
 
     // Everything this rank does not own is still bound, but ValidateOnly: the artifact is checked
     // in full against the file while only this rank's bytes are uploaded to this device.
@@ -121,10 +125,15 @@ ArtifactLoadPlan bind_artifact(artifact::Binder& binder, qwen3_6::StartupFeature
     const auto head_placement      = core_placement;
     const auto embedding_placement = core_placement;
 
+    const auto embedding_transcode = features.embedding_q4
+                                         ? artifact::DeviceTranscode::W8G32ToQ4G64
+                                         : artifact::DeviceTranscode::None;
     out.token_embedding =
         artifact::bind_tensor(binder, "text/token_embedding", NumericFormat::W8G32_F16S,
                               {248320, 2048}, embedding_placement,
-                              overlay ? kEvictRankEmbedding : 0);
+                              overlay ? kEvictRankEmbedding : 0, embedding_transcode);
+    out.token_embedding_format = features.embedding_q4 ? NumericFormat::Q4G64_F16S
+                                                       : NumericFormat::W8G32_F16S;
 
     for (std::size_t layer = 0; layer < kTextLayers; ++layer) {
         TextLayerPlan& target    = out.text_layers[layer];
@@ -338,7 +347,8 @@ LoadedModelData::LoadedModelData(std::vector<BindingPlan> plans,
     auto& output_head     = runtime.output_head;
 
     token_embedding = artifact::materialized_weight(embed_backing, embed_plan.token_embedding,
-                                                    NumericFormat::W8G32_F16S, 248320, 2048);
+                                                    embed_plan.token_embedding_format, 248320,
+                                                    2048);
 
     std::size_t full_index = 0;
     std::size_t gdn_index  = 0;

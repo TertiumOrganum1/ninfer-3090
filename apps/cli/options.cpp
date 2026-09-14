@@ -115,7 +115,8 @@ std::string usage_text(const char* argv0) {
            "       [--max-context N] [--kv-capacity N|auto] [--prefill-chunk N] [--max-new N]\n"
            "       [--device N] [--devices N,M]\n"
            "       [--kv-dtype bf16|int8|fp8|rk8v4|nvfp4|k8v4] [--spec mtp|dflash|dflash2 --draft-tokens N]\n"
-           "       [--lm-head-draft] [--lm-head-q4] [--gdn-state-fp16] [--mlp-a8-decode]\n"
+           "       [--lm-head-draft] [--lm-head-q4|--lm-head-q6] [--embedding-q4]\n"
+           "       [--gdn-state-fp16] [--mlp-a8-decode]\n"
            "       [--temperature F] [--top-p F] [--top-k N] [--min-p F]\n"
            "       [--presence-penalty F] [--frequency-penalty F] [--seed N] [--greedy]\n"
            "       [--stop-token-id N]... [--stop <text>]... [--reasoning-stop <text>]...\n"
@@ -135,7 +136,8 @@ std::string usage_text(const char* argv0) {
            "toward --max-new.\n"
            "--devices N,M offloads the expert/MLP blocks to the second GPU; rank 0 keeps attention, "
            "the KV cache and the head, so nearly all of its memory becomes KV.\n"
-           "--lm-head-q4, --gdn-state-fp16 and --mlp-a8-decode are speed-for-quality trades, off by "
+           "--lm-head-q4, --lm-head-q6, --embedding-q4, --gdn-state-fp16 and --mlp-a8-decode are "
+           "speed- or memory-for-quality trades, off by "
            "default; see "
            "docs/maintainer/quality-trade-experiments.md for the measured cost of each.\n"
            "--kv-capacity auto leaves " +
@@ -191,6 +193,10 @@ Options parse_options(int argc, char** argv) {
             options.speculative.proposal_head = ProposalHead::Optimized;
         } else if (arg == "--lm-head-q4") {
             options.lm_head_q4 = true;
+        } else if (arg == "--lm-head-q6") {
+            options.lm_head_q6 = true;
+        } else if (arg == "--embedding-q4") {
+            options.embedding_q4 = true;
         } else if (arg == "--gdn-state-fp16") {
             options.gdn_state_fp16 = true;
         } else if (arg == "--mlp-a8-decode") {
