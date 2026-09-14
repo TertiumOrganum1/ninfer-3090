@@ -337,10 +337,12 @@ __device__ __forceinline__ void dot_two_rows(const std::uint8_t* codes, const st
 // numerical change to carry for zero gain. The occupancy lever on d3 is now spent: it works
 // exactly as designed and the design does not matter.
 //
-// What is left on this Op is not d3. `sparse_moe_d2_warp_kernel` is ~8.3 us of the ~57 us the four
-// kernels cost, on <<<1, 32>>> -- one warp of one SM, with the other 81 idle and d3 unable to start
-// because it needs the ids. See TODO's d2 entry; that is the next real target, and it is a
-// parallel-selection problem, not a memory one.
+// What was left on this Op was not d3 but `sparse_moe_d2_warp_kernel`, on <<<1, 32>>> with d3 unable
+// to start until it has the ids. This comment used to call it "a parallel-selection problem, not a
+// memory one". Half right: not memory, but not parallelism either. It was branch resolution on a
+// single warp -- the merge's bitonic restores and the comparator were branches -- and making them
+// selects took d2 from 11.04 to 5.73 us for +2.39% end to end, with no extra warps. See the d2
+// entry in TODO and `sparse_moe_merge_ranked_runs` in sparse_moe_route.cuh.
 template <class RoutedCodec>
 __global__ void sparse_moe_d3_nine_warp_kernel(
     const __nv_bfloat16* __restrict__ x, const int* __restrict__ ids,
