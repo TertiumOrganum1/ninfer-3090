@@ -44,17 +44,28 @@ Weight row_view(const Weight& block, std::int32_t row_begin, std::int32_t row_co
 }
 
 MoePlan bind_moe(artifact::Binder& binder, const std::string& prefix, NumericFormat routed_gate_up,
-                 NumericFormat routed_down, artifact::TensorPlacement placement) {
+                 NumericFormat routed_down, artifact::TensorPlacement placement,
+                 artifact::DeviceTranscode gate_up_transcode = artifact::DeviceTranscode::None,
+                 artifact::DeviceTranscode down_transcode    = artifact::DeviceTranscode::None) {
     const auto bind = [&](std::string_view name, NumericFormat format,
-                          std::initializer_list<std::uint64_t> shape) {
-        return artifact::bind_tensor(binder, name, format, shape, placement);
+                          std::initializer_list<std::uint64_t> shape,
+                          artifact::DeviceTranscode transcode = artifact::DeviceTranscode::None) {
+        return artifact::bind_tensor(binder, name, format, shape, placement, 0, transcode);
+    };
+    const auto materialized = [](NumericFormat format, artifact::DeviceTranscode transcode) {
+        return transcode == artifact::DeviceTranscode::None
+                   ? format
+                   : artifact::transcode_target_format(transcode);
     };
     return MoePlan{
         .router_shared_gate = bind(prefix + "router_shared_gate", NumericFormat::BF16, {257, 2048}),
-        .routed_gate_up     = bind(prefix + "routed_gate_up", routed_gate_up, {262144, 2048}),
-        .routed_down        = bind(prefix + "routed_down", routed_down, {524288, 512}),
+        .routed_gate_up =
+            bind(prefix + "routed_gate_up", routed_gate_up, {262144, 2048}, gate_up_transcode),
+        .routed_down = bind(prefix + "routed_down", routed_down, {524288, 512}, down_transcode),
         .shared_gate_up = bind(prefix + "shared_gate_up", NumericFormat::W8G32_F16S, {1024, 2048}),
         .shared_down    = bind(prefix + "shared_down", NumericFormat::W8G32_F16S, {2048, 512}),
+        .routed_gate_up_format = materialized(routed_gate_up, gate_up_transcode),
+        .routed_down_format    = materialized(routed_down, down_transcode),
     };
 }
 
@@ -225,8 +236,15 @@ ArtifactLoadPlan bind_artifact(artifact::Binder& binder, qwen3_6::StartupFeature
         bind_mtp("mtp/layer/attention/output", NumericFormat::W8G32_F16S, {2048, 4096});
     out.mtp.post_attention_norm =
         bind_mtp("mtp/layer/post_attention_norm", NumericFormat::BF16, {2048});
-    out.mtp.moe        = bind_moe(binder, "mtp/layer/moe/", NumericFormat::W8G32_F16S,
-                                  NumericFormat::W8G32_F16S, mtp_placement);
+    // --mtp-experts-q4 stores the draft layer's routed experts as the text layers store theirs:
+    // Q4 gate_up with a Q6 down, a pair every sparse_moe route already serves.
+    out.mtp.moe = bind_moe(
+        binder, "mtp/layer/moe/", NumericFormat::W8G32_F16S, NumericFormat::W8G32_F16S,
+        mtp_placement,
+        features.mtp_experts_q4 ? artifact::DeviceTranscode::W8G32ToQ4G64
+                                : artifact::DeviceTranscode::None,
+        features.mtp_experts_q4 ? artifact::DeviceTranscode::W8G32ToQ6G64
+                                : artifact::DeviceTranscode::None);
     out.mtp.final_norm = bind_mtp("mtp/final_norm", NumericFormat::BF16, {2048});
 
     // Vision produces the embeddings that enter at layer 0, so the backbone belongs with the rank
@@ -448,7 +466,8 @@ LoadedModelData::LoadedModelData(std::vector<BindingPlan> plans,
         mtp.post_attention_norm = artifact::materialized_tensor(
             backing, plan.mtp.post_attention_norm, NumericFormat::BF16, {2048});
         mtp.post_mixer =
-            load_moe(plan.mtp.moe, backing, NumericFormat::W8G32_F16S, NumericFormat::W8G32_F16S);
+            load_moe(plan.mtp.moe, backing, plan.mtp.moe.routed_gate_up_format,
+                     plan.mtp.moe.routed_down_format);
         mtp.final_norm = artifact::materialized_tensor(backing, plan.mtp.final_norm,
                                                        NumericFormat::BF16, {2048});
     }

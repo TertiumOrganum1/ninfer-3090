@@ -57,7 +57,7 @@ Download `ninfer-rtx3090-windows-x64-*.zip`, unzip it, and from that folder:
 
 ```powershell
 .\download-qwen36-35b-a3b.bat            # downloads qwen3_6_35b_a3b.ninfer (~21 GB, resumable)
-.\run-qwen36-35b-a3b-c1-maxctx.bat        # serves on 127.0.0.1:8080, 114,688-token context
+.\run-qwen36-35b-a3b-c1-maxctx.bat        # serves on 127.0.0.1:8080, 147,456-token context
 ```
 
 `NINFER_HOST`, `NINFER_PORT`, `NINFER_MODEL` and `NINFER_SERVER` override it without editing the
@@ -97,7 +97,7 @@ but only 2375691264 bytes are available for runtime capacity
 |---|---|---|---|---|---|---|
 | **Headless Linux — default** | 2 | 262,144 | MTP3 + draft | overlay | ~240-280 tok/s | 2.67 GiB |
 | Headless Linux, one user | 1 | 262,144 | MTP3 + draft | overlay | ~240-280 tok/s | 2.46 GiB |
-| **Windows, one user** | 1 | 114,688 | MTP3 + draft | overlay | ~240-280 tok/s | 1.22 GiB |
+| **Windows, one user** | 1 | 147,456 | MTP3 + draft | overlay | ~240-280 tok/s | 1.44 GiB |
 | Windows, two users | 2 | 65,536 | MTP3 + draft | overlay | ~240-280 tok/s | 1.57 GiB |
 
 `--kv-capacity` is the shared pool and `--max-context` is the per-request cap, so a second lane
@@ -228,7 +228,7 @@ The Linux guide covers the GPU check, the native Ubuntu build, model mounts and 
 
 | Launcher | Best for |
 |---|---|
-| `run-qwen36-35b-a3b-c1-maxctx.bat` | **Recommended.** Qwen3.6-35B-A3B, one user, 114K context, rk8v4, vision, tuned cache |
+| `run-qwen36-35b-a3b-c1-maxctx.bat` | **Recommended.** Qwen3.6-35B-A3B, one user, 147K context, rk8v4, vision, tuned cache |
 | `run-qwen38-c1-maxctx.bat` | **Recommended for 27B.** Qwen3.8-27B, one user, 164K context, rk8v4, tuned cache |
 | `run-qwen38-c1.bat` | Qwen3.8-27B, one interactive user, INT8 quality default, 64K context |
 | `run-qwen38-c8.bat` | Qwen3.8-27B, multiple users or agents, highest aggregate throughput, 8K context |

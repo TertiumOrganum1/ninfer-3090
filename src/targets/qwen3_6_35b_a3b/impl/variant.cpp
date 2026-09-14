@@ -319,8 +319,12 @@ std::size_t Variant::post_mixer_workspace_capacity_bytes(WeightsProfile, qwen3_6
 
 std::size_t Variant::mtp_post_mixer_workspace_capacity_bytes(std::int32_t first,
                                                              std::int32_t last) {
-    return ops::sparse_moe_workspace_capacity_bytes(QType::W8G32_F16S, QType::W8G32_F16S, first,
-                                                    last);
+    // The artifact's W8 experts, or the Q4/Q6 pair --mtp-experts-q4 transcodes them to.
+    return std::max(
+        ops::sparse_moe_workspace_capacity_bytes(QType::W8G32_F16S, QType::W8G32_F16S, first,
+                                                 last),
+        ops::sparse_moe_workspace_capacity_bytes(QType::Q4G64_F16S, QType::Q6G64_F16S, first,
+                                                 last));
 }
 
 } // namespace ninfer::targets::qwen3_6_35b_a3b::detail

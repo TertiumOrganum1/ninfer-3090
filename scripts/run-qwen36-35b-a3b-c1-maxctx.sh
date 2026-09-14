@@ -88,6 +88,12 @@ MODEL="${NINFER_MODEL:-$model_dir/$artifact}"
 # --kv-capacity is the shared pool and --max-context is the per-request cap, so a second lane does
 # not cost twice the memory unless you also want twice the per-request context.
 #
+# Since 2026-09-14 the MTP profile also passes --mtp-experts-q4 (the draft layer's W8 routed experts
+# stored as Q4/Q6 like the text layers', ~350 MiB) and --gdn-state-fp16 (~60 MiB of device state at
+# one lane, half the pinned host state). Drafts are verified by the target, so neither changes what
+# the model scores; decode measured 296.3 -> 294.9 tok/s. The rows above predate them: on the Windows
+# box one lane now starts at 196,608 with the MTP profile, where 163,840 was the ceiling.
+#
 # Rungs if startup refuses: 262144 / 196608 / 131072 / 114688 / 98304 / 81920.
 CONTEXT="${NINFER_CONTEXT:-262144}"
 CONCURRENCY="${NINFER_CONCURRENCY:-2}"
@@ -102,7 +108,7 @@ KV_CAPACITY="${NINFER_KV_CAPACITY:-$CONTEXT}"
 #   NINFER_SPEC=none             no speculation,    ~183 tok/s,     context reaches 262,144
 SPEC="${NINFER_SPEC:-mtp}"
 case "$SPEC" in
-  mtp)  spec_args=(--spec mtp --draft-tokens "${NINFER_DRAFT_TOKENS:-3}" --lm-head-draft) ;;
+  mtp)  spec_args=(--spec mtp --draft-tokens "${NINFER_DRAFT_TOKENS:-3}" --lm-head-draft --mtp-experts-q4) ;;
   none) spec_args=() ;;
   *) printf 'NINFER_SPEC must be mtp or none, got %s\n' "$SPEC" >&2; exit 2 ;;
 esac
@@ -161,6 +167,7 @@ exec "$server" "$MODEL" \
   --kv-capacity "$KV_CAPACITY" \
   --kv-dtype rk8v4 \
   "${spec_args[@]}" \
+  --gdn-state-fp16 \
   --prefill-chunk 512 \
   --max-pending-requests 16 --pending-timeout-ms 600000 \
   "${vision_args[@]}" \

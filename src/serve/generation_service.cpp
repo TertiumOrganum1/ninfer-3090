@@ -285,6 +285,7 @@ GenerationService::GenerationService(ServeOptions options, StartupObserver start
     engine_options.lm_head_q4               = options_.lm_head_q4;
     engine_options.lm_head_q6               = options_.lm_head_q6;
     engine_options.embedding_q4             = options_.embedding_q4;
+    engine_options.mtp_experts_q4           = options_.mtp_experts_q4;
     engine_options.gdn_state_fp16           = options_.gdn_state_fp16;
     engine_options.mlp_a8_decode            = options_.mlp_a8_decode;
     engine_options.speculative              = options_.speculative;

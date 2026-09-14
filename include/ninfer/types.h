@@ -204,6 +204,10 @@ struct EngineOptions {
     // change. lm_head_q4 and lm_head_q6 are mutually exclusive.
     bool lm_head_q6                        = false;
     bool embedding_q4                      = false;
+    // Qwen3.6-35B-A3B only: the MTP draft layer's routed experts are stored W8 in the artifact;
+    // transcode them to the text layers' formats (Q4 gate_up, Q6 down) at load. Drafts are
+    // verified exactly, so this can change acceptance but never the output distribution.
+    bool mtp_experts_q4                    = false;
     // Integer-activation MLP gate_up at decode and verify widths. Measured 4-6% off that Op from
     // sixteen columns up; see docs/maintainer/quality-trade-experiments.md.
     bool mlp_a8_decode                     = false;

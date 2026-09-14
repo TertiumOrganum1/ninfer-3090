@@ -30,6 +30,9 @@ struct MoePlan {
     artifact::ObjectHandle routed_down;
     artifact::ObjectHandle shared_gate_up;
     artifact::ObjectHandle shared_down;
+    // Materialized formats of the routed blocks; they differ from the artifact's when transcoded.
+    artifact::NumericFormat routed_gate_up_format = artifact::NumericFormat::W8G32_F16S;
+    artifact::NumericFormat routed_down_format    = artifact::NumericFormat::W8G32_F16S;
 };
 
 struct FullAttentionPlan {

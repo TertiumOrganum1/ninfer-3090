@@ -1,8 +1,11 @@
 #include "targets/guarded_main.h"
 #include "artifact/binder.h"
 #include "artifact/reader.h"
+#include "artifact/transcode.h"
 #include "targets/qwen3_6_35b_a3b/impl/load/bindings.h"
 
+#include <array>
+#include <cstdint>
 #include <cstdlib>
 #include <filesystem>
 #include <iostream>
@@ -26,6 +29,68 @@ ninfer::targets::qwen3_6::StartupFeatures load_features(bool vision,
     };
 }
 
+const ninfer::artifact::DeviceMaterialization*
+device_object(const ninfer::artifact::MaterializationPlan& plan,
+              ninfer::artifact::ObjectHandle handle) {
+    for (const auto& object : plan.device_objects) {
+        if (object.object.index == handle.index) { return &object; }
+    }
+    return nullptr;
+}
+
+// --mtp-experts-q4 must reach the binding: the two routed MTP expert blocks are planned in their
+// transcoded encodings, the plan records the formats load_moe will build weights with, and the
+// arena shrinks by exactly the bytes those encodings save.
+int check_mtp_experts_q4(const ninfer::artifact::Reader& reader) {
+    using ninfer::artifact::DeviceTranscode;
+    using ninfer::artifact::NumericFormat;
+    namespace bindings = ninfer::targets::qwen3_6_35b_a3b::detail;
+
+    auto features = load_features(false, ninfer::SpeculativeBackend::Mtp);
+    ninfer::artifact::Binder native_binder(reader);
+    const auto native = bindings::bind_artifact(native_binder, features);
+    features.mtp_experts_q4 = true;
+    ninfer::artifact::Binder transcoded_binder(reader);
+    const auto transcoded = bindings::bind_artifact(transcoded_binder, features);
+
+    constexpr std::array<std::uint64_t, 2> gate_up_shape = {262144, 2048};
+    constexpr std::array<std::uint64_t, 2> down_shape    = {524288, 512};
+    const auto w8_gate_up = ninfer::artifact::row_split_geometry(NumericFormat::W8G32_F16S, gate_up_shape);
+    const auto w8_down    = ninfer::artifact::row_split_geometry(NumericFormat::W8G32_F16S, down_shape);
+    const auto q4_gate_up = ninfer::artifact::row_split_geometry(NumericFormat::Q4G64_F16S, gate_up_shape);
+    const auto q6_down    = ninfer::artifact::row_split_geometry(NumericFormat::Q6G64_F16S, down_shape);
+
+    const auto& native_moe      = native.bindings.mtp.moe;
+    const auto& transcoded_moe  = transcoded.bindings.mtp.moe;
+    const auto* native_gate_up  = device_object(native.materialization, native_moe.routed_gate_up);
+    const auto* native_down     = device_object(native.materialization, native_moe.routed_down);
+    const auto* gate_up         = device_object(transcoded.materialization, transcoded_moe.routed_gate_up);
+    const auto* down            = device_object(transcoded.materialization, transcoded_moe.routed_down);
+    const std::uint64_t saved   = (w8_gate_up.encoded_bytes - q4_gate_up.encoded_bytes) +
+                                (w8_down.encoded_bytes - q6_down.encoded_bytes);
+    const std::uint64_t shrink  = native.materialization.device_capacity_bytes -
+                                 transcoded.materialization.device_capacity_bytes;
+    const bool ok =
+        native_gate_up != nullptr && native_down != nullptr && gate_up != nullptr && down != nullptr &&
+        native_gate_up->transcode == DeviceTranscode::None &&
+        native_down->transcode == DeviceTranscode::None &&
+        native_moe.routed_gate_up_format == NumericFormat::W8G32_F16S &&
+        native_moe.routed_down_format == NumericFormat::W8G32_F16S &&
+        gate_up->transcode == DeviceTranscode::W8G32ToQ4G64 &&
+        gate_up->bytes == q4_gate_up.encoded_bytes &&
+        down->transcode == DeviceTranscode::W8G32ToQ6G64 && down->bytes == q6_down.encoded_bytes &&
+        transcoded_moe.routed_gate_up_format == NumericFormat::Q4G64_F16S &&
+        transcoded_moe.routed_down_format == NumericFormat::Q6G64_F16S &&
+        // Alignment padding between objects can move by less than one tensor alignment each.
+        shrink + 512 >= saved && shrink <= saved + 512;
+    if (!ok) {
+        std::cerr << "--mtp-experts-q4 did not plan the MTP experts as Q4G64/Q6G64: shrink=" << shrink
+                  << " expected~" << saved << '\n';
+        return 1;
+    }
+    return 0;
+}
+
 } // namespace
 
 int run_dflash_load_plan_checks() {
@@ -36,6 +101,7 @@ int run_dflash_load_plan_checks() {
     }
 
     ninfer::artifact::Reader reader(path);
+    if (const int result = check_mtp_experts_q4(reader); result != 0) { return result; }
     {
         ninfer::artifact::Binder binder(reader);
         // These counts pin a DFlash-carrying artifact. A compact artifact without the DFlash bundle

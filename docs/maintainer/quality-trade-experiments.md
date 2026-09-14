@@ -1,7 +1,8 @@
 # Quality trades: narrower vocabulary matrices, FP16 GDN state, integer-activation MLP decode
 
-Five speed- or memory-for-quality trades, all **implemented, measured, and wired to CLI flags**:
-`--lm-head-q4`, `--lm-head-q6`, `--embedding-q4`, `--gdn-state-fp16` and `--mlp-a8-decode` on
+Six speed- or memory-for-quality trades, all **implemented, measured, and wired to CLI flags**:
+`--lm-head-q4`, `--lm-head-q6`, `--embedding-q4`, `--mtp-experts-q4`, `--gdn-state-fp16` and
+`--mlp-a8-decode` on
 `ninfer`, `ninfer-serve`, and `ninfer-perplexity`. All default off. The two new vocabulary trades
 are memory trades first: see [Vocabulary transcoding](#vocabulary-transcoding---lm-head-q6-and---embedding-q4)
 for why `--embedding-q4 --lm-head-q6` is worth about 37K tokens of context for no measurable
@@ -225,6 +226,42 @@ Qualification: `ninfer_vocabulary_transcode_test` checks the codec against an in
 transcoded 248320x5120 heads through `ops::linear` at T = 1..32 under the A16 linear criterion;
 `ninfer_embedding_test` qualifies the Q4 gather at [248320,5120] and [248320,2048] against an FP64
 oracle, including CUDA Graph replay.
+
+## `--mtp-experts-q4` -- the 35B-A3B's MTP experts in the text layers' formats
+
+The Qwen3.6-35B-A3B artifact stores its MTP draft layer's routed experts as W8G32 -- `routed_gate_up`
+262144x2048 and `routed_down` 524288x512, about 816 MiB of the 856 MiB MTP head -- while every text
+layer stores its routed experts as Q4G64 gate_up with a Q5 or Q6 down. `--mtp-experts-q4` transcodes
+the draft layer's pair at load (the same `artifact/transcode` path as the vocabulary flags) to Q4G64
+gate_up and Q6G64 down, a combination every `sparse_moe` route already serves for text layers 34, 38
+and 39. The MTP workspace is sized for both pairs. The 27B's MTP layer is dense, so the flag is
+rejected there.
+
+The draft layer only proposes tokens, and the target model verifies every one, so this cannot change
+what the model scores or which distribution it samples from; perplexity does not run MTP at all. What
+it can change is acceptance, and -- as with any change in acceptance pattern -- which verify widths
+run, so greedy text can differ at the reduction-order level this file's speculative-decoding entry
+already describes.
+
+**Measured 2026-09-14**, `run-qwen36-35b-a3b-c1-maxctx`'s exact server profile (C1, rk8v4, MTP3 +
+draft head, overlay vision, 32 host state slots), arms alternated at each rung, desktop holding a
+steady ~505 MiB:
+
+| context | launcher | `--mtp-experts-q4` | `--mtp-experts-q4 --gdn-state-fp16` |
+|---:|---|---|---|
+| 114,688 | 1.23 GiB runtime / 535 MiB free | 877 MiB free | 1.17 GiB / 947 MiB free |
+| 131,072 | 393 MiB free | 745 MiB free | 790 MiB free |
+| 147,456 | 254 MiB free | 606 MiB free | 666 MiB free |
+| 163,840 | 107 MiB free | 466 MiB free | 526 MiB free |
+| 180,224 | refused | 326 MiB free | 386 MiB free |
+| 196,608 | refused | 186 MiB free | 246 MiB free |
+
+About 350 MiB is freed, two full rungs of rk8v4 context at 7,969 B per token. Decode (`run_chat_decode.py`,
+eight chat prompts, 512 tokens, three interleaved repetitions): **296.29 -> 294.93 tok/s median
+(-0.5%)**, acceptance 61.17% -> 60.55%.
+
+`--gdn-state-fp16` on this model saves a further ~60 MiB of device state and halves the pinned host
+state image (1.92 GiB -> 1005 MiB at 32 slots).
 
 ## `--mlp-a8-decode` -- integer-activation MLP gate_up at decode widths
 
