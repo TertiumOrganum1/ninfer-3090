@@ -160,6 +160,12 @@ The endpoint supports:
 - `temperature`, `top_p`, presence/frequency penalties, and signed integer `seed`;
 - the compatible `top_k` (`0..20`) and `min_p` (`0..1`) sampler extensions;
 - up to four non-empty stop strings, applied to both reasoning and answer output;
+- the `ignore_eos` benchmarking extension shared with vLLM, SGLang and llama.cpp: a boolean,
+  default `false`, that drops the checkpoint's own stop tokens so generation runs to the output
+  budget (`finish_reason:"length"`) unless a caller-supplied stop string or context capacity ends
+  it first. Caller stop strings still apply; any other value type is rejected with 400. Output past
+  the model's natural end is not meaningful text. `/v1/responses` and `/v1/messages` do not
+  honor it;
 - `n:1`, text-only `modalities`, and `response_format: {"type":"text"}`;
 - non-streaming responses and server-sent event streams;
 - `stream_options.include_usage`;

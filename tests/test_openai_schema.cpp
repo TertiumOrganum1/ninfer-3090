@@ -604,6 +604,9 @@ int test_stops_and_ranges() {
                       "ignore_eos keeps caller-supplied stop strings");
     body.erase("stop");
     failures += check(parse(body).generation.ignore_eos, "ignore_eos parses without a stop field");
+    body["ignore_eos"] = "true";
+    failures += check(api_error([&] { (void)parse(body); }).param == "ignore_eos",
+                      "non-boolean ignore_eos rejected");
     body.erase("ignore_eos");
 
     body["stop"] = Json::array({"1", "2", "3", "4", "5"});
