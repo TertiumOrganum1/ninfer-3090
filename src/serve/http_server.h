@@ -1,6 +1,7 @@
 #pragma once
 
 #include "serve/generation_service.h"
+#include "serve/load_report.h"
 #include "serve/operational_log.h"
 #include "serve/openai_responses_store.h"
 #include "serve/request_log.h"
@@ -112,6 +113,7 @@ private:
     void handle_response_input_items(const httplib::Request& req, httplib::Response& res);
     void handle_response_cancel(const httplib::Request& req, httplib::Response& res);
     void handle_response_compact(const httplib::Request& req, httplib::Response& res);
+    void handle_load(const httplib::Request& req, httplib::Response& res) const;
     void handle_models(const httplib::Request& req, httplib::Response& res) const;
     void handle_model(const httplib::Request& req, httplib::Response& res) const;
 
@@ -133,6 +135,9 @@ private:
     std::atomic<bool> startup_listener_result_{false};
     ServeOptions options_;
     std::string public_model_id_;
+    // Written by attach() together with service_, before ready_ is published.
+    LoadCapacity load_capacity_;
+    std::chrono::steady_clock::time_point attached_at_;
     OpenAIResponsesStore openai_responses_store_;
     OperationalLog operational_log_;
     JsonlRequestLog request_jsonl_;

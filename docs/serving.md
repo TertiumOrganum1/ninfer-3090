@@ -81,6 +81,7 @@ staged <MiB>)` and the JSON record carries `vision_overlay`, including `exclusiv
 | Method and path | Behavior |
 |---|---|
 | `GET /health` | process health |
+| `GET /v1/load` | serving capacity, current load, and monotonic token counters (see [Load](#load)) |
 | `GET /v1/models` | configured OpenAI model alias and effective `max_model_len` |
 | `GET /v1/models/{id}` | lookup of the configured alias and effective `max_model_len` |
 | `POST /v1/chat/completions` | OpenAI-style chat generation |
@@ -132,6 +133,59 @@ endpoints:
 
 A readiness probe should poll `GET /health` (or any endpoint) and expect `503` until the model is
 ready rather than treating an accepted TCP connection as a signal of readiness.
+
+### Load
+
+`GET /v1/load` is a cheap, pollable snapshot for load balancers and gateways that schedule across
+several servers. It requires the API key when one is configured, answers `503 model_loading` until
+warmup completes like every other route, and reads only the Engine's already-published runtime
+counters and the ingress count, so polling it does not wait on or delay the GPU executor.
+
+```bash
+curl http://127.0.0.1:8080/v1/load -H 'Authorization: Bearer local-secret'
+```
+
+```json
+{
+  "object": "ninfer.load",
+  "model": "qwen3.8-27b",
+  "uptime_seconds": 812.4,
+  "capacity": {"max_concurrency": 4, "max_pending_requests": 32, "max_admitted_requests": 36,
+               "max_context": 65536, "kv_capacity_tokens": 131072, "kv_capacity_pages": 2048,
+               "kv_page_tokens": 64, "device_state_slots": 8, "host_state_slots": 24,
+               "host_kv_bytes": 17179869184},
+  "requests": {"admitted": 6, "running": 4, "prefilling": 1, "decode_ready": 3, "waiting": 2,
+               "materializing": 0},
+  "occupancy": {"device_main_kv_pages": 1500, "device_main_kv_tokens": 96000,
+                "device_state_slots": 5, "host_state_slots": 7, "host_kv_bytes": 2147483648},
+  "counters": {"computed_prefill_tokens": 48200113, "committed_decode_tokens": 6120452,
+               "reused_prompt_tokens": 30911840, "decode_rounds": 861307,
+               "decode_row_rounds": 2448180}
+}
+```
+
+- `uptime_seconds` counts from the moment the server became ready, not from process start.
+- `capacity` is fixed once the Engine is ready. `max_admitted_requests` is
+  `max_concurrency + max_pending_requests`, the ingress bound described in
+  [Execution behavior](#execution-behavior); `kv_capacity_tokens` is the resolved page-aligned Main
+  KV pool and `kv_page_tokens` its page size.
+- `requests.admitted` counts requests holding ingress capacity, from preparation until the response
+  is released; a new generation request is rejected with `server_overloaded` (HTTP 429, or 529 on
+  Anthropic endpoints) when it would exceed `max_admitted_requests`. `running` counts occupied execution lanes (at most
+  `max_concurrency`), of which `prefilling` is the lane that owns the staged prefill and
+  `decode_ready` the lanes in the decode batch. `waiting` counts requests submitted to the Engine
+  FIFO that have not been admitted to a lane, including those held back until their KV entitlement
+  fits.
+- `occupancy` reports current Main KV pages (and tokens), Device and Host StateImage slots, and Host
+  KV bytes in use. Main KV occupancy includes retained reusable prefixes, which the resource planner
+  may evict under pressure, so a full pool does not by itself mean new requests will wait.
+- `counters` are monotonic since startup; derive rates by differencing two polls.
+  `computed_prefill_tokens` excludes prefix-reused prompt tokens (reported separately in
+  `reused_prompt_tokens`). `committed_decode_tokens` counts tokens committed by decode rounds and
+  excludes each request's first token, which prefill emits; with speculative decoding a round commits
+  several tokens per row. `decode_row_rounds` is the sum of decode batch sizes over `decode_rounds`.
+- Gauges and counters come from the snapshot the Engine publishes at execution boundaries, so they
+  can trail the instant of the poll by up to one boundary.
 
 ## OpenAI Chat Completions
 
@@ -680,7 +734,8 @@ curl http://127.0.0.1:8080/v1/messages/count_tokens \
 ## Authentication and CORS
 
 Pass `--api-key VALUE` to require the same value as an OpenAI bearer token or Anthropic
-`x-api-key` header. `GET /health` and CORS preflight requests remain unauthenticated.
+`x-api-key` header. `GET /health` and CORS preflight requests remain unauthenticated; `GET /v1/load`
+requires the key.
 
 ```bash
 curl http://127.0.0.1:8080/v1/models \

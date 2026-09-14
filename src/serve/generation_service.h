@@ -119,6 +119,9 @@ public:
 
     [[nodiscard]] bool is_available() const { return engine_->is_available(); }
 
+    // Requests currently holding ingress capacity (max_concurrency + max_pending_requests).
+    [[nodiscard]] std::size_t admitted_requests() const;
+
     [[nodiscard]] ninfer::MediaCacheSummary media_cache_summary() const {
         return engine_->media_cache_summary();
     }

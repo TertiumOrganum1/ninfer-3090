@@ -130,6 +130,7 @@ const char* endpoint_name(std::string_view path) noexcept {
     if (path == "/v1/responses/input_tokens") { return "openai_responses_input_tokens"; }
     if (path == "/v1/messages") { return "anthropic_messages"; }
     if (path == "/v1/messages/count_tokens") { return "anthropic_count_tokens"; }
+    if (path == "/v1/load") { return "load"; }
     return "http_route";
 }
 
@@ -457,6 +458,9 @@ void HttpServer::register_routes() {
         res.set_content(nlohmann::json{{"status", available ? "ok" : "unavailable"}}.dump(),
                         "application/json");
     });
+    server_.Get("/v1/load", [this](const httplib::Request& req, httplib::Response& res) {
+        handle_load(req, res);
+    });
     server_.Get("/v1/models", [this](const httplib::Request& req, httplib::Response& res) {
         handle_models(req, res);
     });
@@ -501,6 +505,16 @@ void HttpServer::register_routes() {
     server_.Post("/v1/messages", [this](const httplib::Request& req, httplib::Response& res) {
         handle_messages(req, res);
     });
+}
+
+void HttpServer::handle_load(const httplib::Request&, httplib::Response& res) const {
+    LoadSample sample;
+    sample.uptime_seconds =
+        std::chrono::duration<double>(std::chrono::steady_clock::now() - attached_at_).count();
+    sample.admitted_requests = service_->admitted_requests();
+    sample.stats             = service_->runtime_stats();
+    res.set_header("Cache-Control", "no-store");
+    res.set_content(make_load_report(load_capacity_, sample), "application/json");
 }
 
 void HttpServer::handle_models(const httplib::Request&, httplib::Response& res) const {
@@ -561,9 +575,12 @@ void HttpServer::attach(GenerationService& service) {
     const ninfer::LoadSummary load = service.load_summary();
     public_model_id_               = resolve_public_model_id(options_, load.model_id);
     service_                       = &service;
+    // memory_summary() takes the Engine execution lock; read it once here, never per /v1/load poll.
+    const ninfer::MemorySummary memory = service.memory_summary();
     request_jsonl_.write_server_start(options_, service.engine_options(),
-                                      service.sampling_defaults(), public_model_id_, load,
-                                      service.memory_summary());
+                                      service.sampling_defaults(), public_model_id_, load, memory);
+    load_capacity_ = make_load_capacity(public_model_id_, service.engine_options(), memory);
+    attached_at_   = std::chrono::steady_clock::now();
     // Release: everything above must be visible to a handler that observes ready_ as true. This is
     // the only write, and handlers acquire it in the pre-routing guard before touching service_.
     ready_.store(true, std::memory_order_release);
