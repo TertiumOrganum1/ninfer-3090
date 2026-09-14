@@ -189,30 +189,35 @@ PressurePlanningSession<Variant>::root_maximal_target(runtime::PlanningCandidate
 template <>
 PressureTargetHandle
 PressurePlanningSession<Variant>::maximal_target(runtime::PlanningCandidateId candidate) {
+    if (impl_ == nullptr) { throw std::logic_error("pressure planning session is empty"); }
     return impl_->maximal_target(candidate);
 }
 
 template <>
 PressureConstructionCursor
 PressurePlanningSession<Variant>::begin_construction(PressureTargetHandle target, bool restore) {
+    if (impl_ == nullptr) { throw std::logic_error("pressure planning session is empty"); }
     return impl_->begin_construction(target, restore);
 }
 
 template <>
 runtime::PressureConstructionStep
 PressurePlanningSession<Variant>::next_construction_option(PressureConstructionCursor& cursor) {
+    if (impl_ == nullptr) { throw std::logic_error("pressure planning session is empty"); }
     return impl_->next_construction_option(cursor);
 }
 
 template <>
 void PressurePlanningSession<Variant>::choose_construction(
     PressureConstructionCursor& cursor, runtime::PressureConstructionOptionId option) {
+    if (impl_ == nullptr) { throw std::logic_error("pressure planning session is empty"); }
     impl_->choose_construction(cursor, option);
 }
 
 template <>
 std::optional<PressureTargetHandle>
 PressurePlanningSession<Variant>::construction_target(const PressureConstructionCursor& cursor) {
+    if (impl_ == nullptr) { throw std::logic_error("pressure planning session is empty"); }
     return impl_->construction_target(cursor);
 }
 

@@ -164,10 +164,12 @@ public:
             const bool needs_optional_search =
                 std::any_of(roots.begin(), roots.end(),
                             [](const IdentityRoot& root) { return root.expandable; });
-            const bool no_allowance =
-                allowance.remaining(planning_now_ns<Clock>()) == 0 ||
+            // Two different reasons to skip optional search: no wall/control time left, or a
+            // request so cheap that the economic cap on search time rounds to zero.
+            const bool time_exhausted = allowance.remaining(planning_now_ns<Clock>()) == 0;
+            const bool no_economic_allowance =
                 identity_best->cost.total_ns / 20U / std::max(1U, allowance.affected_requests) == 0;
-            if (!needs_optional_search || no_allowance) {
+            if (!needs_optional_search || time_exhausted || no_economic_allowance) {
                 const CandidateInput& selected = candidates[identity_best->candidate_index];
                 const auto price_split         = [&](std::span<const std::uint32_t> frontiers) {
                     const std::uint64_t baseline =
@@ -187,15 +189,15 @@ public:
                 MaterializationDiagnostics diagnostics = complete_diagnostics(
                     identity_best->cost, static_cast<std::uint32_t>(candidates.size()),
                     projection_work, planning_started,
-                    needs_optional_search ? MaterializationStopReason::TimeBudget
-                                          : MaterializationStopReason::NoPressure,
+                    !needs_optional_search ? MaterializationStopReason::NoPressure
+                    : time_exhausted       ? MaterializationStopReason::TimeBudget
+                                           : MaterializationStopReason::InsufficientExpectedGain,
                     false);
-                diagnostics.budget_exhausted  = needs_optional_search;
+                diagnostics.budget_exhausted  = needs_optional_search && time_exhausted;
                 diagnostics.search_stop_phase = needs_optional_search
                                                     ? MaterializationSearchPhase::Setup
                                                     : MaterializationSearchPhase::None;
-                diagnostics.search_boundary_limited =
-                    needs_optional_search && allowance.remaining(planning_now_ns<Clock>()) == 0;
+                diagnostics.search_boundary_limited = needs_optional_search && time_exhausted;
                 Result result;
                 result.plan             = std::move(*sealed);
                 result.candidate        = candidates[identity_best->candidate_index].id;
@@ -387,12 +389,22 @@ public:
         const auto expand_target = [&](const QueueEntry& parent) {
             if (target_marked(parent.stable_target_ordinal, kTargetExpanded)) { return true; }
             if (optional_targets >= kTargetBudget) { return false; }
-            auto prepared = session.prepare_expansion(parent.target, 8);
-            if (prepared.new_canonical_count() > kTargetBudget - optional_targets) {
-                session.discard_expansion(std::move(prepared));
-                return false;
+            // Near the target budget a full eight-owner batch can overflow while a smaller one
+            // still fits; discarding leaves the parent's expansion cursor unchanged, so halve and
+            // retry before declaring the expansion capacity spent.
+            using Committed = decltype(
+                session.commit_expansion(session.prepare_expansion(parent.target, 1)));
+            std::optional<Committed> committed;
+            for (std::uint32_t owners = 8; !committed; owners /= 2) {
+                auto prepared = session.prepare_expansion(parent.target, owners);
+                if (prepared.new_canonical_count() <= kTargetBudget - optional_targets) {
+                    committed.emplace(session.commit_expansion(std::move(prepared)));
+                } else {
+                    session.discard_expansion(std::move(prepared));
+                    if (owners == 1) { return false; }
+                }
             }
-            const auto children = session.commit_expansion(std::move(prepared));
+            const auto& children = *committed;
             optional_targets += children.new_canonical_count;
             if (children.complete) {
                 mark_target(parent.stable_target_ordinal, kTargetExpanded);

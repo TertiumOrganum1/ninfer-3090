@@ -789,6 +789,20 @@ they do not infer request behavior from process-global counter deltas.
 the template has no tiered default. A preparation rejection always leaves the resolved field
 `null`.
 
+`request_done.materialization` is the context-cache decision committed for that request: predicted
+immediate, future-loss and total nanoseconds (`predicted_now_ns`, `predicted_future_loss_ns`,
+`predicted_total_ns`, and `initial_predicted_total_ns` before search); `targets_evaluated`,
+`projection_work`, `planning_elapsed_ns` and `search_elapsed_ns`; `stop_reason`; `budget_exhausted`;
+`selected_degradation_units` and `selected_maximal_fallback`; and the optional-search accounting
+`first_improvement_ns` (or `null`), `incumbent_improvements`, `search_work`, `search_granted_ns`,
+`search_renewals`, `search_discovery_used`, `search_overshoot_ns`, `search_stop_phase` and
+`search_boundary_limited`. Stop reasons are `no_pressure`, `queue_exhausted`, `target_budget`,
+`expansion_capacity`, `time_budget`, `insufficient_expected_gain` and `work_budget`; `time_budget`
+means the wall or control allowance ran out, while a request too cheap to justify optional search
+reports `insufficient_expected_gain`. Search phases are `none`, `setup`, `construction`,
+`assessment`, `expansion` and `refinement`. Search is bounded and heuristic; these diagnostics do not
+claim model or global optimality, and aborted planning attempts are not published.
+
 `request_done.result.tool_call_parse` records whether a complete marker was seen, the structured
 call count, empty non-string arguments omitted during normalization, schema-mismatched arguments
 preserved for consumer validation, and a stable text-fallback reason. Fallback reasons are `none`,

@@ -353,8 +353,12 @@ inline PressurePlanningSessionImpl<NINFER_QWEN36_VARIANT>::PressurePlanningSessi
 }
 
 inline PressurePlanningSessionImpl<NINFER_QWEN36_VARIANT>::~PressurePlanningSessionImpl() noexcept {
+    // Leased assessments and construction cursors hold a raw pointer to this session and release
+    // into it on destruction, so outliving it is a use-after-free; stop at the violation instead.
     if (std::any_of(assessment_slots.begin(), assessment_slots.end(),
-                    [](const AssessmentSlot& slot) { return slot.leased; })) {
+                    [](const AssessmentSlot& slot) { return slot.leased; }) ||
+        std::any_of(construction_slots.begin(), construction_slots.end(),
+                    [](const ConstructionSlot& slot) { return slot.leased; })) {
         std::terminate();
     }
     if (program != nullptr) { program->pressure_planning_active_ = false; }
