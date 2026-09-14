@@ -254,7 +254,9 @@ MaterializedArtifact materialize(const Reader& reader, const MaterializationPlan
             .destination  = dst,
         });
     }
-    if (ranges.empty()) { throw ArtifactError("materialization plan has no device tensors"); }
+    if (ranges.empty() && transcoded.empty()) {
+        throw ArtifactError("materialization plan has no device tensors");
+    }
     (void)out.device_arena_->alloc_bytes(static_cast<std::size_t>(capacity), 1);
     std::sort(ranges.begin(), ranges.end(), [](const CopyRange& a, const CopyRange& b) {
         return a.source_begin < b.source_begin;
@@ -284,10 +286,15 @@ MaterializedArtifact materialize(const Reader& reader, const MaterializationPlan
             align_up(span.end - span.begin, alignment, "artifact direct I/O span overflows u64"),
             "artifact direct I/O byte count overflows u64");
     }
+    // A plan whose device tensors are all transcoded has nothing to read directly: no staging
+    // slots, and the transcode loop below materializes every tensor.
     const std::size_t slot_bytes =
         static_cast<std::size_t>(std::min<std::uint64_t>(kSlotBytes, aligned_read_bytes));
-    const std::size_t slot_count = static_cast<std::size_t>(
-        std::min<std::uint64_t>(kMaximumSlotCount, 1 + (aligned_read_bytes - 1) / slot_bytes));
+    const std::size_t slot_count =
+        aligned_read_bytes == 0
+            ? 0
+            : static_cast<std::size_t>(std::min<std::uint64_t>(
+                  kMaximumSlotCount, 1 + (aligned_read_bytes - 1) / slot_bytes));
     std::vector<std::unique_ptr<Slot>> slots;
     slots.reserve(slot_count);
     const std::uint64_t staging_bytes = static_cast<std::uint64_t>(slot_bytes) * slot_count;
