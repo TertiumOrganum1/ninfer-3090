@@ -132,6 +132,28 @@ ConstructedTarget construct_registered(const EngineOptions& options, DeviceConte
                 "--vision-residency overlay requires CUDA virtual memory management support");
         }
         overlay_window_bytes = staging + sequence_planner.vision_window_bytes();
+        {
+            // The exclusive fallback borrows the encode window from the evict-ranked weights, so
+            // they must cover it -- with the pool's own chunk alignment. Load-time transcoding
+            // (--embedding-q4/q6, --lm-head-q4/q6, --mtp-experts-q4) shrinks exactly those tensors,
+            // so say which knobs trade against each other instead of failing inside the pool.
+            constexpr std::size_t chunk = EvictableWeightPool::kChunkBytes;
+            const auto align = [](std::size_t value) { return (value + chunk - 1) / chunk * chunk; };
+            const std::size_t arena = load_plan.materialization().device_capacity_bytes;
+            const std::size_t tail  = load_plan.materialization().evictable_tail_bytes;
+            const std::size_t usable_tail = align(arena) - align(arena - tail);
+            if (align(overlay_window_bytes) > usable_tail) {
+                const auto mib = [](std::size_t bytes) {
+                    return std::to_string(bytes / (1024ULL * 1024ULL)) + " MiB";
+                };
+                throw std::invalid_argument(
+                    "--vision-residency overlay needs " + mib(align(overlay_window_bytes)) +
+                    " of evict-ranked weights for one encode window, but the loaded head, embedding, "
+                    "draft and MTP weights provide " + mib(usable_tail) +
+                    "; lower --vision-max-merged, use --vision-residency resident, or drop a flag that "
+                    "shrinks those weights (--embedding-q4/q6, --lm-head-q4/q6, --mtp-experts-q4)");
+            }
+        }
         pool                 = std::make_unique<EvictableWeightPool>(
             device, EvictableWeightPool::Config{
                         .arena_bytes           = load_plan.materialization().device_capacity_bytes,
