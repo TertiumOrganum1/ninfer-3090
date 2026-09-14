@@ -206,6 +206,14 @@ measured 4.373904 -> 4.389698 (**+0.36%**, same protocol), about the cost of NVF
 It is supported there as a trade rather than recommended. Its head is already Q6G64 in the artifact,
 so `--lm-head-q4`/`--lm-head-q6` are rejected at startup on that model.
 
+**Overlay vision has a floor on how far these tensors may shrink.** Its exclusive fallback borrows
+the encode window from the evict-ranked weights (head, embedding, draft head, MTP), so they must
+cover one window. On the 27B they are about 3 GiB and nothing here comes close. On the 35B-A3B they
+are about a GiB against a 960 MiB window at the default `--vision-max-merged 16384`, so a smaller
+embedding there (Q4, or Q6 alongside other savings) no longer covers it. Startup then refuses with
+the sizes and the three ways out: a lower `--vision-max-merged`, `--vision-residency resident`, or
+dropping a shrinking flag.
+
 **Overlay vision** works with transcoded tensors, because the eviction mirror is captured after
 the materializer writes them: with `--vision --vision-residency overlay --embedding-q4 --lm-head-q6`
 and KV too small to fund the encode window, the image request opened an exclusive window that evicted
