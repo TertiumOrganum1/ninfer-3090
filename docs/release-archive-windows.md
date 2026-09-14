@@ -83,9 +83,11 @@ requested Engine runtime reservation requires 2864526592 bytes,
 but only 2375691264 bytes are available for runtime capacity
 ```
 
-Drop a context rung first — `NINFER_CONTEXT=98304`, then 81920, then 65536. Speculation is the next
-lever (`NINFER_SPEC=none`), worth about 992 MiB at the cost of decode speed. Drop vision last: in
-overlay residency it costs almost nothing resident.
+Drop a context rung first: set `NINFER_CONTEXT` to the next rung below the launcher's default. Each
+`-maxctx` launcher lists its rungs in its header, measured on this card — for
+`run-qwen38-c1-maxctx.bat` (default 163,840) that is 131072, then 114688, then 98304. Speculation is
+the next lever (`NINFER_SPEC=none`), worth about 992 MiB on the 35B-A3B at the cost of decode speed.
+Drop vision last: in overlay residency it costs almost nothing resident.
 
 To size a profile before running it, open
 [docs/config-calculator.html](https://github.com/ashalliants/ninfer-3090/blob/master/docs/config-calculator.html)
