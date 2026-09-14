@@ -17,7 +17,10 @@ struct SparseMoeRankedValue {
 
 __device__ __forceinline__ bool sparse_moe_ranked_better(const SparseMoeRankedValue& a,
                                                          const SparseMoeRankedValue& b) {
-    return a.value > b.value || (a.value == b.value && a.id < b.id);
+    // Bitwise, not short-circuit. `||` and `&&` are sequence points, and nvcc is free to lower them
+    // to a branch; on d2's single warp nothing hides a data-dependent branch, so the whole order is
+    // evaluated unconditionally and combined as a bool. Same comparisons, same total order.
+    return (a.value > b.value) | ((a.value == b.value) & (a.id < b.id));
 }
 
 // Sorts one lane's eight candidates descending, branch-free.
@@ -98,17 +101,24 @@ sparse_moe_merge_ranked_runs(SparseMoeRankedValue (&run)[kSparseMoeTopK]) {
             merged[rank] = sparse_moe_ranked_better(run[rank], other) ? run[rank] : other;
         }
         // The kept half is bitonic; three compare-exchange stages restore descending order.
+        //
+        // Written as selects, the same way sparse_moe_sort_eight_descending's compare_exchange is.
+        // This used to be `if (!better) { swap }`: a data-dependent branch per exchange, 12 per
+        // merge step and 60 across the five, on a kernel with one warp -- so no other warp ever
+        // covers a branch while it resolves. The sort was made branch-free for exactly this reason
+        // in #88; the merge that consumes its output never was. `(rank & stride) != 0` is still a
+        // plain `continue` because rank and stride are both compile-time after the unroll.
 #pragma unroll
         for (int stride = kSparseMoeTopK / 2; stride > 0; stride >>= 1) {
 #pragma unroll
             for (int rank = 0; rank < kSparseMoeTopK; ++rank) {
                 if ((rank & stride) != 0) { continue; }
-                const int partner_rank = rank | stride;
-                if (!sparse_moe_ranked_better(merged[rank], merged[partner_rank])) {
-                    const SparseMoeRankedValue swap = merged[rank];
-                    merged[rank]                    = merged[partner_rank];
-                    merged[partner_rank]            = swap;
-                }
+                const int partner_rank        = rank | stride;
+                const SparseMoeRankedValue a  = merged[rank];
+                const SparseMoeRankedValue b  = merged[partner_rank];
+                const bool keep               = sparse_moe_ranked_better(a, b);
+                merged[rank]                  = keep ? a : b;
+                merged[partner_rank]          = keep ? b : a;
             }
         }
 #pragma unroll

@@ -2178,9 +2178,11 @@ mechanism, and it is not tile geometry.**
       source, not measured*: confirm it with `l1tex__data_pipe_lsu_wavefronts_mem_shared` against
       `l1tex__data_pipe_lsu_wavefronts_mem_global` before committing to the retile.
 
-- [ ] **`sparse_moe_d2_warp_kernel` cost 8.45% of the 35B's decode kernel time on one warp of one
-      SM. Half of that is now gone — the branch-free sort shipped, **+3.15% end to end** — and the
-      other half still wants warps.**
+- [x] **`sparse_moe_d2_warp_kernel` cost 8.45% of the 35B's decode kernel time on one warp of one
+      SM. Both halves are now gone, and the second did not need warps.** The branch-free sort
+      shipped 2026-09-09 for **+3.15%**; the branch-free *merge* shipped 2026-09-13 for **+2.39%**.
+      Read the 2026-09-13 note at the end before the 8-warp design below -- that design is now
+      mostly unnecessary.
 
       **Shipped 2026-09-09: a branch-free sorting network.** The stall breakdown below put 15.25% of
       d2's active warp cycles in `branch_resolving`, all of it the `while`-loop insertion sort over
@@ -2246,6 +2248,57 @@ mechanism, and it is not tile geometry.**
       instances is ~15.5 ms of 795.8 — **roughly 2% end to end, not the 5-6% this entry claimed
       before the branch-free sort landed.** Still worth having, and worth knowing it is 2% before
       committing to a bitonic-32 that needs its own exhaustive verification.
+
+      **2026-09-13: the 2% arrived without the bitonic-32, because the op count above was right
+      about *which* half dominates and wrong about *why*.** It modelled the merge's 60 bitonic
+      restores as work to spread across warps. They were branches. The restore stage was written
+      `if (!better) { swap }` -- a data-dependent branch per exchange -- and
+      `sparse_moe_ranked_better` used short-circuit `||` / `&&`, which nvcc is free to lower to
+      branches too. On a kernel with one warp nothing covers a branch while it resolves. That is
+      precisely the lesson the 2026-09-09 sort fix applied to the *sort*; the merge that consumes
+      the sort's output was never given it.
+
+      Decomposed first, because the D3 work had just shown a kernel-level win need not reach the
+      model. Three probes on d2 itself, each verified to have actually relinked:
+
+      | probe | d2 time | reads as |
+      |---|---:|---|
+      | empty kernel (launch + teardown) | 1.47 us | launch floor |
+      | + read and consume every score, no selection | 3.26 us | loads cost 1.79 us |
+      | full selection (shipped before) | 11.04 us | **selection arithmetic 7.78 us** |
+      | full selection, branch-free merge | **5.73 us** | **selection arithmetic 2.47 us** |
+
+      **The selection arithmetic got 3.1x faster**, from making 60 exchanges and one comparator
+      select instead of branch, with no change to the algorithm, the network, the order, or the
+      warp count. Register spills were ruled out on the way (0 local loads, 0 local stores, 46
+      registers), which is what pointed at branches.
+
+      **Checked that it converts before believing it.** A `clock64` spin of +12.8 us inside d2
+      cost **-6.89%** end to end (4/4 pairs negative), against ~-9.7% if d2 were fully serial -- so
+      d2 is ~71% on the critical path, about 0.54% of throughput per us per instance. The
+      branch-free merge saves 5.3 us, predicting **+2.85%**. Measured on `master`, paired median of
+      10: **+2.39%** (9/10 positive). An earlier run on another branch gave +2.53% (10/10). Three
+      independent estimates within half a point of each other.
+
+      **Output is bit-identical**, which it has to be -- the same comparisons in the same total
+      order, evaluated unconditionally. Verified rather than argued: greedy decode on the 35B
+      produces the same text from both builds, and `ninfer_sparse_moe_route_network_test` (all
+      40,320 permutations and 6,561 tie patterns, which exercises the changed comparator) and
+      `ninfer_sparse_moe_test` are green.
+
+      **What is left is small and should not be chased hard.** 2.47 us of selection arithmetic
+      remains, about 1.3% end to end at the measured sensitivity even if it went to zero, and the
+      8-warp bitonic-32 above would take only part of that while needing its own exhaustive
+      verification. The same fix also reaches prefill and small-T, which call the same
+      `sparse_moe_select_top8_warp`; those were not measured separately.
+
+      Two measurement traps from this session, both of which silently produced wrong numbers:
+      (1) **the first attempt at a slowdown probe repeated the selection N times and measured
+      identically to 0.01 us at N=1 and N=4** -- nvcc removed the redundant identical stores; a
+      `clock64` spin is what cannot be elided. (2) **A `ninja` still running from another process
+      left `build.log` locked, the build failed, and the old binary was measured as if it were
+      new.** Compare the executable's mtime before and after every build, and refuse to measure if
+      it did not change.
 
       One thing that makes step 1 cheaper than it looks: lanes 8..31 of the merging warp can hold
       runs of `{-inf, INT_MAX}`, which are trivially descending and can never be selected, so the
