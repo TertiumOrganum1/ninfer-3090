@@ -52,7 +52,8 @@ rem So speculation does not buy context, it spends it: turning MTP off is worth 
 rem native 262,144 back. The draft head is the cheap half of that pair -- 136 MiB for a measured
 rem +1.9% to +15.6% decode, against the MTP head's 856 MiB for +38%.
 rem
-rem MEASURED MAX CONTEXT, all four combinations, taken under the quiet-desktop condition:
+rem MEASURED MAX CONTEXT, all four combinations, taken under the quiet-desktop condition BEFORE the
+rem memory flags (pre-flag history; the active profile's current figures are in MEMORY FLAGS above):
 rem
 rem   KV       speculation        max context   free after startup
 rem   ------------------------------------------------------------
@@ -60,6 +61,9 @@ rem   rk8v4    none                   262,144         ~256 MiB      native maxim
 rem   rk8v4    MTP3 + draft head      131,072         ~184 MiB
 rem   int8     none                   196,608         ~344 MiB
 rem   int8     MTP3 + draft head       94,208         ~292 MiB
+rem
+rem With --mtp-experts-q4 --gdn-state-fp16 the rk8v4 MTP3 + draft head row reaches 196,608 (246 MiB
+rem free, measured 2026-09-14 with the desktop at ~505 MiB, a busier condition than this table's).
 rem
 rem rk8v4 is worth +33% context unspeculated and +39% with speculation, for +0.082% perplexity.
 rem int8 cannot reach the native 262,144 at all -- 204,800 already over-runs the reservation.
