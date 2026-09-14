@@ -90,6 +90,10 @@ artifact::DeviceTranscode head_transcode(const qwen3_6::StartupFeatures& feature
         throw std::invalid_argument("--lm-head-q4 and --lm-head-q6 are mutually exclusive");
     }
     if (!features.lm_head_q4 && !features.lm_head_q6) { return artifact::DeviceTranscode::None; }
+    // Qwen3.6-27B groupwise already ships a Q6 head: nothing to transcode.
+    if (features.lm_head_q6 && vocabulary_format == NumericFormat::Q6G64_F16S) {
+        return artifact::DeviceTranscode::None;
+    }
     if (vocabulary_format != NumericFormat::W8G32_F16S) {
         throw std::invalid_argument("--lm-head-q4/--lm-head-q6 require a W8G32 output head");
     }
