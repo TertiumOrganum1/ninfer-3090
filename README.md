@@ -154,24 +154,33 @@ Vision is on in both. Overlay residency keeps the tower host-pinned and streams 
 a borrowed device window, so it costs about **10 MiB** of runtime reservation — measured 3.93 GiB
 without it against 3.94 GiB with, at the same context. There is no reason to trade it away.
 
-**Why the 27B stops short of 262,144 when the 35B-A3B reaches it.** The runtime reservation is
-linear in context: seven measured points from 49,152 to 163,840 fit
-`runtime = 0.553 GiB + 27,719 × context` with a worst residual of 3.9 MiB, and a second lane adds
-a flat 0.38 GiB. A headless 3090 has roughly 7.06 GiB for the reservation, so 262,144 would need
-7.32 GiB at one lane and 7.70 GiB at two — it does not fit either way, and the zero-margin
-ceilings are about 252,000 tokens at C1 and 237,000 at C2.
+**What limits the 27B's context.** The runtime reservation is linear in context: seven measured
+points from 49,152 to 163,840 fit `runtime = 0.553 GiB + 27,719 × context` with a worst residual of
+3.9 MiB, and a second lane adds a flat 0.38 GiB. Without the memory flags a headless 3090 has roughly
+7.06 GiB for the reservation, so 262,144 would need 7.32 GiB at one lane and 7.70 GiB at two — it
+does not fit either way, and the zero-margin ceilings are about 252,000 tokens at C1 and 237,000 at
+C2.
+
+The two flags the launchers now pass move both sides of that sum. `--embedding-q4` frees 644 MiB of
+weights, so the reservation budget grows to about 7.69 GiB; `--gdn-state-fp16` takes 71.7 MiB off
+each device state slot, so the intercept drops to 0.41 GiB at one lane and each second lane adds
+0.24 GiB. The measured 196,608 rung (5.49 GiB) sits exactly on that line. On that estimate the native
+262,144 fits a headless card with about +0.51 GiB at one lane and +0.27 GiB at two — extrapolated,
+not measured, since no desktop machine can start it.
 
 That is the model, not the tuning. The 27B spends 16 full-attention layers × 4 kv_heads × 256
 head_dim per token against the 35B-A3B's 10 × 2 × 256 — **3.2× the KV per token**, 27.07 KiB
 against roughly 7.8. The 35B-A3B reaches the native maximum because its KV is cheap.
 
-So the Linux launcher defaults to **212,992** — 6.43 GiB predicted at two lanes, leaving +0.63 GiB.
-`NINFER_CONTEXT=196608` is the more cautious rung at +1.05 GiB. Both are extrapolated rather than
-measured, since a desktop machine cannot start either, so treat the first headless start as the
-confirmation and drop a rung if it refuses.
+So the Linux launcher defaults to **212,992** — 6.15 GiB predicted at two lanes with the flags,
+leaving about +1.54 GiB (it was 6.43 GiB and +0.63 GiB before them). `NINFER_CONTEXT=196608` is the
+more cautious rung at about +1.96 GiB, and `NINFER_CONTEXT=262144` the aggressive one at about
++0.27 GiB. All three are extrapolated rather than measured, since a desktop machine cannot start
+them, so treat the first headless start as the confirmation and drop a rung if it refuses.
 
-One thing to know: this model's StateImage is **147 MiB**, 2.4× the 35B-A3B's, because it has 48 GDN
-layers with 48 value heads. `--host-state-slots 32` therefore pins **4.59 GiB of host memory** — host,
+One thing to know: this model's StateImage is **147 MiB** in FP32, 2.4× the 35B-A3B's, because it has
+48 GDN layers with 48 value heads, and **74.5 MiB** with the `--gdn-state-fp16` the launchers pass.
+`--host-state-slots 32` therefore pins **2.34 GiB of host memory** (4.59 GiB without the flag) — host,
 not device, and the price of taking prefix reuse from 8.4% to 98.3%. Lower it if the box is short
 on RAM.
 
