@@ -1,6 +1,7 @@
 #include "artifact/binder.h"
 #include "artifact/materializer.h"
 #include "artifact/reader.h"
+#include "artifact/transcode.h"
 #include "artifact/typed_binding.h"
 #include "artifact_fixture.h"
 #include "core/device.h"
@@ -15,6 +16,7 @@
 #include <iostream>
 #include <memory>
 #include <stdexcept>
+#include <vector>
 
 namespace {
 
@@ -82,6 +84,54 @@ void require(bool condition, const char* message) {
 }
 
 } // namespace
+
+// One W8G32 row-split tensor, [2,128]: a 256-byte code plane and 16 bytes of scales.
+ninfer::test::artifact_fixture::TemporaryArtifact write_transcode_fixture() {
+    using Json = ninfer::test::artifact_fixture::Json;
+    return ninfer::test::artifact_fixture::write_fixture(
+        {
+            {"identity", {{"model_id", "fixture-model"}, {"weights_id", "fixture-weights"}}},
+            {"objects", Json::array({
+                            {{"name", "weights/w8"},
+                             {"kind", "tensor"},
+                             {"shape", {2, 128}},
+                             {"format", "W8G32_F16S"},
+                             {"layout", "row-split-k128-v1"},
+                             {"offset", 0},
+                             {"bytes", 272}},
+                        })},
+        },
+        "transcode");
+}
+
+// Every device tensor transcoded: the plan has no direct-I/O range at all.
+void check_transcode_only_plan(ninfer::DeviceContext& device) {
+    auto fixture = write_transcode_fixture();
+    ninfer::artifact::Reader reader(fixture.path);
+    ninfer::artifact::Binder binder(reader);
+    const auto w8 = ninfer::artifact::bind_tensor(
+        binder, "weights/w8", ninfer::artifact::NumericFormat::W8G32_F16S, {2, 128},
+        ninfer::artifact::TensorPlacement::Device, 0,
+        ninfer::artifact::DeviceTranscode::W8G32ToQ4G64);
+    const auto plan = binder.finish();
+    constexpr std::array<std::uint64_t, 2> shape = {2, 128};
+    const auto q4 = ninfer::artifact::row_split_geometry(ninfer::artifact::NumericFormat::Q4G64_F16S,
+                                                         shape);
+    require(plan.device_objects.size() == 1 && plan.device_capacity_bytes == q4.encoded_bytes,
+            "transcode-only plan did not reserve the Q4 encoding");
+
+    std::vector<std::byte> expected(q4.encoded_bytes);
+    ninfer::artifact::transcode_row_split(ninfer::artifact::DeviceTranscode::W8G32ToQ4G64, shape,
+                                          reader.payload("weights/w8").data, expected);
+    auto materialized = ninfer::artifact::materialize(reader, plan, device);
+    std::vector<std::byte> copied(q4.encoded_bytes);
+    CUDA_CHECK(cudaMemcpy(copied.data(), materialized.device_data(w8), copied.size(),
+                          cudaMemcpyDeviceToHost));
+    require(copied == expected, "transcode-only plan did not materialize the transcoded bytes");
+    require(materialized.stats().h2d_bytes == q4.encoded_bytes &&
+                materialized.stats().peak_staging_bytes == 0,
+            "transcode-only plan statistics are wrong");
+}
 
 int main() {
     try {
@@ -310,6 +360,7 @@ int main() {
             require(pinned_materialized.stats().pinned_weight_bytes == kSecondTensor.size(),
                     "pinned weight bytes are not accounted");
         }
+        check_transcode_only_plan(device);
         return 0;
     } catch (const std::exception& error) {
         std::cerr << error.what() << '\n';
