@@ -10,9 +10,19 @@
 #
 # CONTEXT CACHE. A checkpoint is a KV prefix plus a StateImage, and on this model the StateImage
 # is 147 MiB flat regardless of prefix length - 48 GDN layers of 128x128x48 FP32 recurrent state
-# plus conv. That is 2.4x the 35B-A3B's 61.4 MiB, so the slots are correspondingly expensive:
-# --host-state-slots 32 pins 4.59 GiB of host memory. It is host memory, not device, and it is
+# plus conv - or 74.5 MiB with --gdn-state-fp16, which this profile uses, so --host-state-slots 32
+# pins 2.34 GiB of host memory rather than 4.59 GiB. It is host memory, not device, and it is
 # what takes prefix reuse from 8.4% to 98.3% on a multi-preamble workload.
+#
+# MEMORY FLAGS, both free on quality (docs/maintainer/quality-trade-experiments.md):
+#   --embedding-q4    token embedding stored as Q4 at load: -644 MiB of weights, perplexity
+#                     4.346413 -> 4.343738 (noise), decode unchanged.
+#   --gdn-state-fp16  recurrent state stored as FP16: -72 MiB per device state slot (four at two
+#                     lanes), perplexity unchanged, greedy output bit-identical.
+# They add about 0.91 GiB to the two-lane headroom estimated below, taking the 212,992 default from
+# +0.63 GiB to roughly +1.54 GiB. Measured on the Windows box, they buy one full rung at one lane
+# (see the .bat). --lm-head-q6 frees another 341 MiB for +0.01% perplexity but costs 2-5% of
+# single-lane decode until a Q6 small-T kernel exists, so it is left off.
 #
 # --auto-prefix-grid lets two callers whose prompts merely start alike share a cached prefix with
 # no client hint. A grid point is only materialised once two independent callers have both asked
@@ -134,6 +144,7 @@ exec "$server" "$MODEL" \
   --kv-capacity "$KV_CAPACITY" \
   --kv-dtype "$KV_DTYPE" \
   "${spec_args[@]}" \
+  --embedding-q4 --gdn-state-fp16 \
   --prefill-chunk 1024 \
   --max-pending-requests 16 --pending-timeout-ms 600000 \
   "${vision_args[@]}" \

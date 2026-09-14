@@ -36,7 +36,7 @@ plus the draft head, and vision in overlay residency. For the dense 27B instead:
 
 ```powershell
 .\download-qwen38-27b.bat              # ~17 GB
-.\run-qwen38-c1-maxctx.bat             # one user, 131,072 tokens
+.\run-qwen38-c1-maxctx.bat             # one user, 163,840 tokens
 ```
 
 `run-qwen38-c1.bat` and `run-qwen38-c8.bat` are the older INT8 profiles — one user at 65,536 tokens,

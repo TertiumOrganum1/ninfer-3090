@@ -123,7 +123,7 @@ predictable. Same shape of command:
 
 ```powershell
 .\download-qwen38-27b.bat                 # downloads qwen3_8_27b.ninfer (~17 GB, resumable)
-.\run-qwen38-c1-maxctx.bat                # one user, 131,072 tokens, rk8v4, MTP3 + draft, vision
+.\run-qwen38-c1-maxctx.bat                # one user, 163,840 tokens, rk8v4, MTP3 + draft, vision
 ```
 
 ```bash
