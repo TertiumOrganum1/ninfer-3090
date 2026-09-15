@@ -527,9 +527,9 @@ contains earlier calls.
 A forced selection names one function: `tool_choice` naming it directly, `required`, or
 `allowed_tools` with mode `required` over a single callable tool. NInfer executes it by ending the
 generation prompt with that call's opener, so the answer can only continue inside the call. It
-therefore requires a fresh answer position and is rejected when reasoning is enabled for the
-request; `required` over several callable tools is rejected too, because the function itself would
-still be sampled. The forced call is present and first in the output; a model that keeps writing may
+therefore requires a fresh answer position. Reasoning that only the server default enables is
+turned off for that request, and a request that enables reasoning itself is rejected; `required`
+over several callable tools is rejected too, because the function itself would still be sampled. The forced call is present and first in the output; a model that keeps writing may
 add further calls, exactly as under `auto` with parallel calls enabled.
 
 NInfer does not execute functions or enforce JSON Schema through constrained decoding, so
@@ -698,7 +698,8 @@ declared effort capability.
 
 User-defined, non-strict tools support `name`, `description`, object `input_schema`, and
 `input_examples`. `tool_choice` `auto`, `none`, `tool` naming a declared tool, and `any` over a
-single callable tool are executable; the last two require reasoning to be disabled for the request.
+single callable tool are executable; the last two turn off reasoning that only the server default
+enables and are rejected when the request enables `thinking`.
 `any` over several tools, `strict:true`, active single-call enforcement, deferred tools, tools that
 exclude direct model calls, Anthropic-provided/server tools, toolsets, MCP, and containers are
 rejected because their required constraint or executor is absent. `tool_result` preserves text/image order and marks

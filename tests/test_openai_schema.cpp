@@ -269,6 +269,17 @@ int test_tools() {
     failures += check(api_error([&] { (void)prompt(parse(body).generation); }).code ==
                           "tool_choice_not_supported",
                       "a forced choice with reasoning enabled is rejected");
+    body.erase("enable_thinking");
+    const GenerationRequest default_reasoning = parse(body).generation;
+    failures += check(!semantics(default_reasoning).enable_thinking &&
+                          !prompt(default_reasoning).options.enable_thinking &&
+                          prompt(default_reasoning).options.forced_tool_name == "weather",
+                      "a forced choice turns off reasoning that only the server default enabled");
+    body["reasoning_effort"] = "high";
+    failures += check(api_error([&] { (void)prompt(parse(body).generation); }).code ==
+                          "tool_choice_not_supported",
+                      "a forced choice with a requested reasoning effort is rejected");
+    body.erase("reasoning_effort");
 
     body                        = base_request();
     body["tools"]               = Json::array({function_tool(), function_tool("search")});
