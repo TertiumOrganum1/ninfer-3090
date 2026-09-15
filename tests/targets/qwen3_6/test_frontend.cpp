@@ -1745,14 +1745,7 @@ int test_terminal_flush(const Frontend& frontend) {
 }
 
 int test_structured_tool_output() {
-    FrontendResources owned = resources();
-    owned.tokenizer_json =
-        read_file(official_resource_path("tokenizer.json").c_str());
-    owned.tokenizer_config_json =
-        read_file(official_resource_path("tokenizer_config.json").c_str());
-    owned.generation_config_json =
-        read_file(official_resource_path("generation_config.json").c_str());
-    const Frontend frontend = FrontendFactory::create_component(owned);
+    const Frontend frontend = FrontendFactory::create_component(resources());
 
     ninfer::ChatMessage message;
     message.role = ninfer::ChatRole::User;
@@ -2426,7 +2419,6 @@ int main() {
         failures += test_literal_control_tokens_with_media();
         failures += test_explicit_leading_instruction_cache_boundary();
         failures += test_media_admission_uses_aggregate_resources(frontend);
-        failures += test_structured_tool_output();
     } else {
         std::cout << "SKIP: official Qwen3.6-27B HF export not found at "
                   << official_resource_dir()
@@ -2448,6 +2440,7 @@ int main() {
     failures += test_cross_round_stop(frontend);
     failures += test_same_token_stop_priority(frontend);
     failures += test_terminal_flush(frontend);
+    failures += test_structured_tool_output();
     failures += test_forced_tool_call(frontend);
     failures += test_reasoning_split(frontend);
     failures += test_thinking_budget_control(frontend);
