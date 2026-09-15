@@ -275,10 +275,19 @@ int test_tools() {
                           !prompt(default_reasoning).options.enable_thinking &&
                           prompt(default_reasoning).options.forced_tool_name == "weather",
                       "a forced choice turns off reasoning that only the server default enabled");
-    body["reasoning_effort"] = "high";
-    failures += check(api_error([&] { (void)prompt(parse(body).generation); }).code ==
-                          "tool_choice_not_supported",
-                      "a forced choice with a requested reasoning effort is rejected");
+    body["reasoning_effort"]                 = "high";
+    const GenerationRequest requested_effort = parse(body).generation;
+    ServeOptions effort_server;
+    ninfer::PromptCapabilities effort_template;
+    effort_template.enable_thinking         = true;
+    effort_template.reasoning_effort.low    = true;
+    effort_template.reasoning_effort.medium = true;
+    effort_template.reasoning_effort.xhigh  = true;
+    failures +=
+        check(api_error([&] {
+                  (void)resolve_prompt_semantics(requested_effort, effort_server, effort_template);
+              }).code == "tool_choice_not_supported",
+              "a forced choice with a requested reasoning effort is rejected");
     body.erase("reasoning_effort");
 
     body                        = base_request();
