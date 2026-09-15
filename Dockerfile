@@ -36,6 +36,7 @@ RUN apt-get update \
         libavutil58 \
         libcurl4t64 \
         libswscale7 \
+        curl \
     && rm -rf /var/lib/apt/lists/*
 
 # The CUDA runtime image ships forward-compatibility libraries in
@@ -55,4 +56,7 @@ WORKDIR /workspace
 EXPOSE 8080
 STOPSIGNAL SIGTERM
 
-CMD ["ninfer-serve", "--help"]
+# The deployment passes serve flags as the container command, so the binary is the
+# entrypoint rather than part of it.
+ENTRYPOINT ["ninfer-serve"]
+CMD ["--help"]
