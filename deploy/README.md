@@ -4,10 +4,11 @@ This profile serves the verified `qwen3_8_27b.ninfer` artifact on the dedicated 
 leaving the Q4_K_M llama.cpp embedder resident. It uses vision-enabled C1 with overlay vision
 residency (the Vision tower lives in pinned host memory and encodes through device memory borrowed
 from temporarily evicted read-only text weights, or from free KV pages when they cover the window),
-a shared 203,200-token RotorQuant `rk8v4` KV pool (the largest explicit capacity that boots with
-this profile; the earlier 120K profile paid for resident Vision weights, encode workspace, and the
+a shared 198,400-token RotorQuant `rk8v4` KV pool (sized to leave about 120 MiB of VRAM free
+beside the embedder after startup, the margin the previous line kept at 203,200; the earlier 120K
+profile paid for resident Vision weights, encode workspace, and the
 `--vision-max-merged`-bounded output transient), MTP3, the optimized draft head, CUDA Graphs, and
-compatible-prefix reuse. The single active request can use a 203,200-token prompt-plus-output
+compatible-prefix reuse. The single active request can use a 198,400-token prompt-plus-output
 window; additional requests wait in the bounded pending queue instead of reserving a second
 generation lane. `rk8v4` is a lossy KV-cache format and trades some output fidelity for the larger
 context window. `context-cost-presets.json` feeds the planner the RTX 3090's measured prefill and
@@ -38,9 +39,13 @@ to the largest explicit `--kv-capacity` that boots with this profile on a 24 GiB
 | `fp8` | 4.345732 | +0.070% | 184,320 |
 | `nvfp4` | 4.358745 | +0.370% | 262,144 (model cap) |
 
+The maxima were measured on the previous line (3cc34b77). This line needs about 100 MiB more
+runtime VRAM at the same profile (5.80 instead of 5.70 GiB at 203,200 tokens), roughly 4,000
+`rk8v4` tokens at 1.7 MiB per 64-token page.
+
 `rk8v4` (rotated INT8 keys, rotated packed INT4 values) buys 32% more context than `int8` for
 +0.077% perplexity and beats `k8v4` on both axes; `nvfp4` reaches the model cap at +0.370%. The
-GPU2 profile therefore keeps `rk8v4` and spends the capacity on the 203,200-token window beside the
+GPU2 profile therefore keeps `rk8v4` and spends the capacity on the 198,400-token window beside the
 resident embedder. A 32-value scale group for the packed values (as in ashalliants' unrotated port,
 where it halves the penalty) was measured here at 4.345997: the value rotation already spreads the
 outliers, so the finer group buys 0.0007% for 2% more KV bytes and was not adopted.

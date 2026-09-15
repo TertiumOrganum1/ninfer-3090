@@ -29,10 +29,12 @@ services:
       - "8080"
       - --model-id
       - qwen3.8-27b
+      # 198,400 leaves about 120 MiB of VRAM free beside the embedder after startup; this line's
+      # runtime is about 100 MiB larger than the previous line's at the same profile.
       - --max-context
-      - "203200"
+      - "198400"
       - --kv-capacity
-      - "203200"
+      - "198400"
       - --max-concurrency
       - "1"
       - --max-pending-requests
