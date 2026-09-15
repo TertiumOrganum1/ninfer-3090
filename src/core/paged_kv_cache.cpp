@@ -341,10 +341,11 @@ void DeviceKVPagePool::resize_reservation(DeviceKVPageReservation& reservation,
     if (!can_resize_reservation(reservation, new_reserved_pages)) {
         throw ContextCacheExhausted(
             "Paged KV pool cannot resize the page reservation: usable " +
-            std::to_string(usable_pages()) + " pages (capacity " + std::to_string(capacity_pages()) +
-            ", lent " + std::to_string(lent_pages_) + "), allocated " +
-            std::to_string(allocated_pages_) + ", reserved " + std::to_string(reserved_pages_) +
-            " of which this reservation " + std::to_string(reservation.pages_) + ", requested " +
+            std::to_string(usable_pages()) + " pages (capacity " +
+            std::to_string(capacity_pages()) + ", lent " + std::to_string(lent_pages_) +
+            "), allocated " + std::to_string(allocated_pages_) + ", reserved " +
+            std::to_string(reserved_pages_) + " of which this reservation " +
+            std::to_string(reservation.pages_) + ", requested " +
             std::to_string(new_reserved_pages));
     }
     reserved_pages_    = reserved_pages_ - reservation.pages_ + new_reserved_pages;

@@ -1217,9 +1217,14 @@ std::vector<float> ProgramImplCore::causal_score(PreparedPromptData&& prompt,
 
     try {
         state = state_store->reserve_reset(device.stream);
-        if (!state) { throw ninfer::ContextCacheExhausted("Device StateImage store has no free slot for a fresh sequence"); }
+        if (!state) {
+            throw ninfer::ContextCacheExhausted(
+                "Device StateImage store has no free slot for a fresh sequence");
+        }
         address = text_kv_addresses->create_active(entitlement, 0);
-        if (!address) { throw ninfer::ContextCacheExhausted("text KV address space has no free active entry"); }
+        if (!address) {
+            throw ninfer::ContextCacheExhausted("text KV address space has no free active entry");
+        }
         if (text_kv_addresses->bound_row(*address) != 0) {
             throw std::logic_error("causal score did not bind the unique Main KV row");
         }
@@ -4985,7 +4990,8 @@ void ProgramImplCore::prepare_materialization(MaterializationTransaction& transa
             --state_count;
             transaction.state_fork_destination = state_store->reserve_destination();
             if (!transaction.state_fork_destination) {
-                throw ninfer::ContextCacheExhausted("Device StateImage store has no free slot for the fork");
+                throw ninfer::ContextCacheExhausted(
+                    "Device StateImage store has no free slot for the fork");
             }
         } else if (source_state != nullptr &&
                    details.source_mode == runtime::PrivateSourceMode::Retain &&
@@ -4997,7 +5003,8 @@ void ProgramImplCore::prepare_materialization(MaterializationTransaction& transa
             std::optional<StateImageHandle> destination =
                 state_store->reserve_logical_destination();
             if (!destination) {
-                throw ninfer::ContextCacheExhausted("Device StateImage store has no free slot for the split");
+                throw ninfer::ContextCacheExhausted(
+                    "Device StateImage store has no free slot for the split");
             }
             transaction.reserved_states[transaction.reserved_state_count++] = *destination;
             transaction.split_state_identity                                = true;
@@ -5009,7 +5016,8 @@ void ProgramImplCore::prepare_materialization(MaterializationTransaction& transa
     for (std::uint32_t index = 0; index < state_count; ++index) {
         std::optional<StateImageHandle> state = state_store->reserve_destination();
         if (!state) {
-            throw ninfer::ContextCacheExhausted("Device StateImage store has no free slot for the destination");
+            throw ninfer::ContextCacheExhausted(
+                "Device StateImage store has no free slot for the destination");
         }
         transaction.reserved_states[transaction.reserved_state_count++] = *state;
     }
@@ -5165,7 +5173,9 @@ void ProgramImplCore::prepare_materialization(MaterializationTransaction& transa
                 ? state_store->begin_host_fork(*host_state_restore, *host_state_fork_destination,
                                                device.transfer_stream)
                 : state_store->begin_host_to_device(*host_state_restore, device.transfer_stream);
-        if (!restore) { throw ninfer::ContextCacheExhausted("Host StateImage restore could not be started"); }
+        if (!restore) {
+            throw ninfer::ContextCacheExhausted("Host StateImage restore could not be started");
+        }
         transaction.state_restore.emplace(std::move(*restore));
         stop_context_transfer_timer(runtime::ContextResourceClass::State);
         transaction.transfer_timer_mask |=
@@ -5231,7 +5241,8 @@ void ProgramImplCore::prepare_prefix_forks(MaterializationTransaction& transacti
         std::optional<HostKVExtentReservation> reserved =
             host_kv_extents->prepare(pages, membership);
         if (!reserved) {
-            throw ninfer::ContextCacheExhausted("Host KV extent store cannot hold the retained KV tail backup");
+            throw ninfer::ContextCacheExhausted(
+                "Host KV extent store cannot hold the retained KV tail backup");
         }
         backup.emplace(std::move(*reserved));
     };
@@ -5816,7 +5827,8 @@ void ProgramImplCore::prepare_pressure_work(MaterializationTransaction::Pressure
             std::optional<StateImageTransfer> transfer =
                 state_store->begin_device_to_host(*source, device.transfer_stream);
             if (!transfer) {
-                throw ninfer::ContextCacheExhausted("Host StateImage store has no free slot for the pressure offload");
+                throw ninfer::ContextCacheExhausted(
+                    "Host StateImage store has no free slot for the pressure offload");
             }
             change.transfer.emplace(std::move(*transfer));
         }
@@ -5870,7 +5882,8 @@ void ProgramImplCore::prepare_pressure_work(MaterializationTransaction::Pressure
         std::optional<HostKVExtentReservation> reserved =
             host_kv_extents->prepare(pages, change.pages);
         if (!reserved) {
-            throw ninfer::ContextCacheExhausted("Host KV extent store cannot hold the pressure KV offload");
+            throw ninfer::ContextCacheExhausted(
+                "Host KV extent store cannot hold the pressure KV offload");
         }
         if (change.sources.size() != change.pages.size()) {
             throw std::logic_error("pressure KV source backing was not prepared");
@@ -10678,7 +10691,8 @@ void ProgramImplCore::reserve_state_entitlement(SequenceState& sequence, std::ui
     }
     std::optional<StateImageHandle> reserved = state_store->reserve_destination();
     if (!reserved) {
-        throw ninfer::ContextCacheExhausted("Device StateImage store has no free slot for the sequence reservation");
+        throw ninfer::ContextCacheExhausted(
+            "Device StateImage store has no free slot for the sequence reservation");
     }
     sequence.reserved_state = *reserved;
     if (sequence_exclusive_state_resources(sequence).device.state_slots != slots) {
@@ -11152,7 +11166,8 @@ void ProgramImplCore::prepare_graphs() {
     for (std::uint32_t row = 0; row < max_concurrency; ++row) {
         std::optional<StateImageHandle> state = state_store->reserve_reset(device.stream);
         if (!state) {
-            throw ninfer::ContextCacheExhausted("Device StateImage store cannot provide a CUDA Graph capture state");
+            throw ninfer::ContextCacheExhausted(
+                "Device StateImage store cannot provide a CUDA Graph capture state");
         }
         capture_states[row] = *state;
     }
@@ -11178,7 +11193,8 @@ void ProgramImplCore::prepare_graphs() {
             std::optional<KVAddressSpaceHandle> allocation =
                 addresses.create_active(1, static_cast<std::int32_t>(row));
             if (!allocation) {
-                throw ninfer::ContextCacheExhausted("KV address space cannot provide a CUDA Graph capture entry");
+                throw ninfer::ContextCacheExhausted(
+                    "KV address space cannot provide a CUDA Graph capture entry");
             }
             allocations.push_back(*allocation);
             addresses.ensure_mapped_to_tokens(*allocation, 1, device.stream);

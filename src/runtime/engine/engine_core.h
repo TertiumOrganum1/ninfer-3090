@@ -1523,10 +1523,10 @@ private:
                             ++cumulative_stats_.context_cache_exhausted_requests;
                             consecutive_context_cache_exhaustions_.fetch_add(
                                 1, std::memory_order_relaxed);
-                            complete_error(request, std::make_exception_ptr(RequestError(
-                                                        RequestErrorKind::Overloaded,
-                                                        "context cache exhausted: " +
-                                                            terminal.failure)));
+                            complete_error(request,
+                                           std::make_exception_ptr(RequestError(
+                                               RequestErrorKind::Overloaded,
+                                               "context cache exhausted: " + terminal.failure)));
                         } else {
                             complete_detached_cancelled(request);
                         }

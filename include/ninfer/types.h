@@ -562,6 +562,7 @@ struct PromptInput {
 class ContextCacheExhausted final : public std::bad_alloc {
 public:
     explicit ContextCacheExhausted(std::string message) : message_(std::move(message)) {}
+
     [[nodiscard]] const char* what() const noexcept override { return message_.c_str(); }
 
 private:
