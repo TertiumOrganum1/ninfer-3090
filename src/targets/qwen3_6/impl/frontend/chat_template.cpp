@@ -219,6 +219,10 @@ ThinkParts derive_think_parts(const RenderedFragment& content) {
     return parts;
 }
 
+// Opener of Qwen's call syntax. Rendered into assistant history, and into the generation prompt
+// when the caller forced a function: everything after it can only be that call.
+constexpr std::string_view kToolCallOpen = "<tool_call>\n<function=";
+
 constexpr std::string_view kToolInstructions =
     "\n\nIf you choose to call a function ONLY reply in the following format with NO suffix:\n\n"
     "<tool_call>\n"
@@ -277,7 +281,7 @@ std::string parameter_text(const OrderedJson& value) {
 RenderedFragment render_tool_call(const ToolCall& call) {
     RenderBuilder rendered;
     if (call.arguments_json.empty()) {
-        rendered.append_template("<tool_call>\n<function=");
+        rendered.append_template(kToolCallOpen);
         rendered.append_literal(call.name);
         rendered.append_template(">\n</function>\n</tool_call>");
         return std::move(rendered).release();
@@ -287,7 +291,7 @@ RenderedFragment render_tool_call(const ToolCall& call) {
         throw std::invalid_argument("tool call arguments must be a JSON object");
     }
 
-    rendered.append_template("<tool_call>\n<function=");
+    rendered.append_template(kToolCallOpen);
     rendered.append_literal(call.name);
     rendered.append_template(">\n");
     for (auto it = args.begin(); it != args.end(); ++it) {
@@ -454,6 +458,17 @@ RenderedChat CompiledChatTemplate::render(const std::vector<ChatMessage>& messag
         }
         if (options.enable_thinking) {
             throw std::invalid_argument("assistant continuation cannot start in thinking mode");
+        }
+    }
+    if (!options.forced_tool_name.empty()) {
+        if (continue_final_assistant || !options.add_generation_prompt) {
+            throw std::invalid_argument("a forced tool call requires a new assistant turn to open");
+        }
+        if (options.enable_thinking) {
+            throw std::invalid_argument("a forced tool call cannot start in thinking mode");
+        }
+        if (options.tool_jsons.empty()) {
+            throw std::invalid_argument("a forced tool call requires declared tools");
         }
     }
 
@@ -665,6 +680,12 @@ RenderedChat CompiledChatTemplate::render(const std::vector<ChatMessage>& messag
             rendered.append_template("<think>\n");
             add_rewrite_execution_boundary();
             rendered.append_template(kCanonicalReasoningCloseSerialization);
+            add_rewrite_execution_boundary();
+        }
+        if (!options.forced_tool_name.empty()) {
+            rendered.append_template(kToolCallOpen);
+            rendered.append_literal(options.forced_tool_name);
+            rendered.append_template(">\n");
             add_rewrite_execution_boundary();
         }
     }

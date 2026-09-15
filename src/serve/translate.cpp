@@ -123,6 +123,13 @@ ResolvedPromptSemantics resolve_prompt_semantics(const GenerationRequest& reques
             invalid_prompt_option("assistant prefill cannot be combined with enabled thinking",
                                   "messages", "assistant_prefill_not_supported");
         }
+        if (!request.tool_choice.forced_name.empty() && result.enable_thinking) {
+            // The call opener is written into the generation prompt, and a thinking prompt ends
+            // inside the reasoning block, where the opener has no place.
+            invalid_prompt_option("a forced tool_choice requires reasoning to be disabled for the "
+                                  "request",
+                                  "tool_choice", "tool_choice_not_supported");
+        }
         if (result.enable_thinking) {
             result.effective_reasoning_effort = result.reasoning_effort
                                                     ? result.reasoning_effort
@@ -287,6 +294,7 @@ ninfer::PromptInput to_prompt_input(const GenerationRequest& request,
             });
         }
     }
+    if (request.uses_tools()) { input.options.forced_tool_name = request.tool_choice.forced_name; }
     input.context_cache.allow_engine_automatic_shared_prefixes =
         request.allow_engine_automatic_shared_prefixes;
     if (request.private_cache_boundary_at_prompt_end && !input.messages.empty()) {

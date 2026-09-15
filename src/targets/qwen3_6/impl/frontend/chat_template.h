@@ -110,6 +110,7 @@ struct ChatRenderOptions {
     std::optional<bool> preserve_thinking;
     bool add_vision_id = false;
     std::vector<std::string> tool_jsons;
+    std::string forced_tool_name;
     std::vector<PromptCacheMarker> cache_markers;
 };
 
