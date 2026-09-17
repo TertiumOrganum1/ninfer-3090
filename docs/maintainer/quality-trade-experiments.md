@@ -146,6 +146,10 @@ clean.
 Qwen3.8-27B stores both vocabulary matrices as `W8G32_F16S`, 248320 x 5120: **1,288 MiB each**,
 together 2.5 GiB of a 17.9 GB resident model. Neither needs eight bits.
 
+> Naming: the v3 container and this code now spell that coding `q8_g32_fp16` / `QType::Q8_G32_FP16`,
+> and Q4G64/Q6G64 are `Q4_G64_FP16`/`Q6_G64_FP16`. The measurements below predate the rename and use
+> the old spellings throughout; the stored bytes and the codecs are the same.
+
 `src/artifact/transcode.{h,cpp}` requantizes a row-split W8G32 payload into a narrower group-64
 row-split encoding on the host, while the weights load. The binder plans the target encoding's size,
 so the arena genuinely shrinks; the materializer writes the target bytes after the direct-I/O

@@ -1,5 +1,37 @@
 # TODO
 
+## Open after the 2026-09-17 upstream catch-up (v3 artifacts, `src/models/qwen3_5`)
+
+The fork now sits on Neroued/ninfer `f76e19c0`. Everything below this section predates that merge;
+what it says about kernels and measurements still holds except where this section contradicts it.
+
+- [ ] **Upstream retuned route tables that this card has never measured.** The catch-up kept this
+      fork's sm_86 tables wherever both sides had tuned the same one, but upstream also retuned or
+      added tables this fork never swept, and those are now live on the 3090 as unmeasured 5090
+      values: Q4 linear 1024/4096/6144/7168/34816 x 5120 and the new 5120x6144; the Q4 draft head
+      (131072) now takes capacity tiles instead of this fork's exact-width kernels; every Q5, Q6,
+      BF16, FP8-A16 and NVFP4-A16 shape table; every Q8 linear shape table except the vocabulary
+      crossover (including the new 5120x25600 routes, upstream's cache-policy change 028eb61e, and
+      `r32_c64` at T=129..144 on 2048x16384 replacing the deleted c144 route); the new Q5
+      `linear_add` tail route past 513 columns; and the new dense `linear_add` Q8/Q4 routes.
+      **Every one of these is a hypothesis on this card** (AGENTS.md), and the fork's own history is
+      that inherited tables were wrong by 12-41%. Sweep them with the op schedule benches before
+      quoting any decode number as a regression or a win.
+- [ ] **No end-to-end performance measurement has been taken since the catch-up.** The decode,
+      prefill and serving figures throughout this file and in `docs/performance.md` were measured on
+      the pre-merge tree. The catch-up was verified functionally only (full suite plus real-model
+      and CLI checks on both 27B artifacts and the 35B-A3B).
+- [ ] **Re-measure the RTX 3090 context-cost presets.** They were re-keyed to v3 prefill signatures
+      without re-running `ninfer_context_cost_bench`; the coefficients are the 2026-09-14 fits. The
+      27B signatures are the ones this box reports for the upgraded artifacts, so a converted-from-
+      source artifact with different bindings will fall back to generic coefficients.
+- [ ] **A load-time transcode changes nothing in the prefill signature** (it is keyed on the stored
+      format), but `--mlp-a8-decode`-style execution choices are not in the signature either. If a
+      future preset needs to distinguish them, the signature is the place to say so.
+- [ ] **The multi-GPU split has only been run with `--devices 0,0` on this single-GPU box.** The
+      pinned-host crossing path, the compute-capability rejection and the actual capacity win need a
+      real second card (`scripts/multi-gpu-testing/`).
+
 State as of 2026-09-09. Four passes: a profiling pass that closed six items and refuted five of its
 own hypotheses, a measurement-hygiene pass that closed three more, a counter pass that put a *cause*
 under the four biggest performance entries, and a kernel pass that shipped **two** speedups and
