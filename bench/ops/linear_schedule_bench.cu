@@ -15,6 +15,9 @@
 //   * q4 ksplit_cN is masked to its compile-time capacity: handed more columns it computes N of
 //     them at a constant cost and looks like it wins everywhere. max_cols = N.
 //   * q5 ksplit_cN is an exact-T instantiation, same story.
+//   * q8 K-split capacities above 64 do not fit sm_86's 49,152-byte static shared budget with four
+//     K warps. The 88-column rung compiles and then faults the device on launch rather than
+//     returning an error, so it is not offered here; no shipped table selects above 64 either.
 
 #include "ninfer/ops/linear.h"
 
@@ -37,6 +40,18 @@
 #include <vector>
 
 namespace {
+
+// Optional name filter (`--only sub[,sub...]`). A schedule that faults takes the process with it,
+// so being able to run one candidate at a time is how a faulting one gets identified.
+std::vector<std::string> g_only;
+
+bool selected(const char* name) {
+    if (g_only.empty()) { return true; }
+    for (const std::string& part : g_only) {
+        if (std::string(name).find(part) != std::string::npos) { return true; }
+    }
+    return false;
+}
 
 using ninfer::DType;
 using ninfer::QType;
@@ -192,7 +207,6 @@ std::vector<Candidate<detail::Q8Launch>> q8_candidates() {
         {"k56_ca", detail::launch_q8_ksplit<Geometry, 56, Q8K<56, Cache::ca>>, 56},
         {"k64_ca", detail::launch_q8_ksplit<Geometry, 64, Q8K<64, Cache::ca>>, 64},
         {"k64_cg", detail::launch_q8_ksplit<Geometry, 64, Q8K<64, Cache::cg>>, 64},
-        {"k88_ca", detail::launch_q8_ksplit<Geometry, 88, Q8K<88, Cache::ca>>, 88},
         {"mma_r32_c64", detail::launch_q8_mma_r32_c64, 0},
         {"mma_r32_c96", detail::launch_q8_mma_r32_c96, 0},
         {"mma_r32_c128", detail::launch_q8_mma_r32_c128, 0},
@@ -220,6 +234,7 @@ void run(QType qtype, std::int32_t n, std::int32_t k,
     std::vector<ninfer::bench::SweepEntry> schedules;
     schedules.reserve(candidates.size());
     for (const Candidate<Launch>& candidate : candidates) {
+        if (!selected(candidate.name)) { continue; }
         const Launch launch = candidate.launch;
         schedules.push_back({candidate.name,
                              [&, launch](std::int32_t tokens, cudaStream_t stream) {
@@ -319,6 +334,21 @@ int main(int argc, char** argv) {
     const std::string key(argv[1]);
     --argc;
     ++argv;
+    for (int i = 1; i + 1 < argc; ++i) {
+        if (std::string(argv[i]) != "--only") { continue; }
+        const std::string value(argv[i + 1]);
+        std::size_t start = 0;
+        while (start <= value.size()) {
+            const std::size_t comma = value.find(',', start);
+            const std::string item  = value.substr(start, comma - start);
+            if (!item.empty()) { g_only.push_back(item); }
+            if (comma == std::string::npos) { break; }
+            start = comma + 1;
+        }
+        for (int j = i; j + 2 <= argc; ++j) { argv[j] = argv[j + 2]; }
+        argc -= 2;
+        break;
+    }
 
     ninfer::bench::SweepOptions options;
     options.tokens = {1,  2,  4,  8,  12,  16,  20,  24,  32,  40,  48,  56,  64, 80,

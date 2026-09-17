@@ -20,6 +20,23 @@ candidate、kernel 或 route forcing 选项。
 Q4/Q5/Q6/Q8 LinearAdd、LinearSwiGLU、LinearPair 和其他 fused Ops 不属于这个
 benchmark。它们继续由各自的 benchmark 独立测量。
 
+本 benchmark 回答"plan 选中的 route 有多快"。回答"boundary 该放在哪里"的是另一个
+maintainer benchmark：`bench/ops/linear_schedule_bench.cu`（`ninfer_linear_schedule_bench`），
+建立在共享的 `bench/ops/schedule_sweep.cuh` 之上。它在同一 column count 上逐个计时每个
+candidate launch，包括当前 shape table 永远不会选中的那些，并把 shape table 自己的
+function pointer 反查回 candidate 名字输出为 `routed_to`。它有意包含 Linear 私有 launcher
+头，因此不受本文"只经过 public 入口"的约束——两者是互补的，不要把其中一个的规则套到
+另一个上。
+
+```bash
+./build/bench/ninfer_linear_schedule_bench q4:131072x5120 --repeat 11 --spread
+./build/bench/ninfer_linear_schedule_bench q8:2048x16384 --tokens 24,32,40,48 --only k32,mma
+```
+
+2026-09-17 用它在 sm_86 上重扫了 catch-up 带进来的 Q4/Q5/Q8 全部十八个 shape table，
+十八个全部与 RTX 5090 的取值不一致，最大处相差 3.84x；逐 band 的测量值记在各 shape
+文件里，汇总见 `TODO.md` 顶部。
+
 Q4/Q5/Q6/Q8 和 BF16 使用现有 A16 route。以下 NVFP4 exact problem 同时支持 A16
 与 A4 policy，并作为永久开发 surface 使用，不加入 model suite：
 

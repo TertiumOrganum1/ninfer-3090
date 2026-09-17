@@ -29,7 +29,8 @@ int q8_a16_conformance() {
         // Cover live-column tails and the transitions from K-split to tiled contractions.
         for (int t : {1,  2,  3,  4,  5,  7,  8,  9,  15,  16,  17,  23,  24,  25,
                       31, 32, 33, 39, 40, 41, 44, 47, 48,  49,  55,  56,  57,  63,
-                      64, 65, 79, 80, 81, 95, 96, 97, 127, 128, 129, 256, 1024}) {
+                      64, 65, 79, 80, 81, 95, 96, 97, 127, 128, 129, 159, 160,
+                      161, 191, 192, 193, 256, 1024}) {
             calls.push_back({t});
         }
         if (shape.n == 2048 && shape.k == 16384) {

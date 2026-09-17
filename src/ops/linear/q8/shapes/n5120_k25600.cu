@@ -1,6 +1,5 @@
 #include "ops/linear/q8/q8_shapes.h"
 #include "ops/linear/q8/q8_ksplit_launch.cuh"
-#include "ops/linear/q8/q8_rowsplit_gemm_mma.cuh"
 
 namespace ninfer::ops::detail {
 namespace {
@@ -9,37 +8,32 @@ using Access   = Q8KSplitScaleAccess;
 using Stage    = Q8KSplitActivationStage;
 using C8       = Q8KSplitSchedule<8, 8, 2, Access::Shared, Cache::ca, Cache::cg, Stage::ActiveOnly>;
 using C16 = Q8KSplitSchedule<8, 16, 2, Access::Shared, Cache::ca, Cache::cg, Stage::ActiveOnly>;
-using C24 = Q8KSplitSchedule<8, 24, 2, Access::Shared, Cache::ca, Cache::cg, Stage::ActiveOnly>;
-using C32 = Q8KSplitSchedule<8, 32, 2, Access::Shared, Cache::ca, Cache::cg, Stage::ActiveOnly>;
-using C40 = Q8KSplitSchedule<4, 40, 2, Access::Shared, Cache::ca, Cache::cg, Stage::ActiveOnly>;
-using C48 = Q8KSplitSchedule<4, 48, 2, Access::Shared, Cache::ca, Cache::cg, Stage::ActiveOnly>;
-using C56 = Q8KSplitSchedule<4, 56, 2, Access::Shared, Cache::ca, Cache::cg, Stage::ActiveOnly>;
-
-template <int Rows>
-void launch_tiled(const Tensor& x, const Weight& weight, Tensor& out, cudaStream_t stream) {
-    // Retain the predicated variant on complete tiles: the Full variant regresses T=64.
-    using Schedule = Q8RowSplitMmaGemmSchedule<Rows, 64, 16, 16, 1, 2, 128, 1>;
-    const dim3 grid(weight.n / Rows, (x.ne[1] + 63) / 64);
-    const Q8ContiguousOutput output{static_cast<__nv_bfloat16*>(out.data), weight.n};
-    q8_rowsplit_gemm_mma_kernel<Schedule, false><<<grid, Schedule::THREADS, 0, stream>>>(
-        static_cast<const __nv_bfloat16*>(x.data), static_cast<const std::uint8_t*>(weight.qdata),
-        static_cast<const std::uint8_t*>(weight.scales), output, weight.n, weight.k, x.ne[1],
-        weight.padded_shape[1]);
-    CUDA_CHECK(cudaGetLastError());
-}
+using S32 = Q8KSplitSchedule<4, 32, 2, Access::Shared, Cache::ca, Cache::cg, Stage::ActiveOnly>;
+using S48 =
+    Q8KSplitSchedule<4, 48, 2, Access::Shared, Cache::ca, Cache::cg, Stage::RuntimeActive>;
 
 } // namespace
 
 Q8Launch select_q8_n5120_k25600(std::int32_t tokens) {
     if (tokens <= 8) return launch_q8_ksplit<Geometry, 8, C8>;
     if (tokens <= 16) return launch_q8_ksplit<Geometry, 16, C16>;
-    if (tokens <= 24) return launch_q8_ksplit<Geometry, 24, C24>;
-    if (tokens <= 32) return launch_q8_ksplit<Geometry, 32, C32>;
-    if (tokens <= 40) return launch_q8_ksplit<Geometry, 40, C40>;
-    if (tokens <= 48) return launch_q8_ksplit<Geometry, 48, C48>;
-    if (tokens <= 56) return launch_q8_ksplit<Geometry, 56, C56>;
-    if (tokens <= 64) return launch_tiled<16>;
-    if (tokens <= 128) return launch_tiled<32>;
+    // sm_86, measured 2026-09-17 (bench/ops/linear_schedule_bench.cu `q8:5120x25600`, cold,
+    // median of 11; us, new vs the route that shipped):
+    //   T=24  S32 213.0 vs 257.0 (+21%)     T=32  S32 256.0 vs 343.0 (+34%)
+    //   T=40  S48 345.1 vs 390.1 (+13%)     T=48  S48 389.1 vs 473.1 (+22%)
+    //   T=56  r32_c64 475.1 vs 506.9 (+7%)  T=64  455.7 vs 471.0 (+3%)
+    //   T=80  r32_c96 514.0 vs 725.0 (+41%) T=96  521.2 vs 742.4 (+42%)
+    //   T=112 r32_c128 617.5 vs 760.8 (+23%) T=128 644.1 vs 788.5 (+22%)
+    //   T=160 r64_c96 900.1 vs 1076.2 (+20%) T=192 877.6 vs 1085.4 (+24%)
+    // T<=16 and T>=256 are upstream's values and are best here too. The two `launch_tiled`
+    // row-split tiles this shape introduced are what 65..128 loses 22-42% to; they are no longer
+    // selected anywhere and are gone with them.
+    if (tokens <= 32) return launch_q8_ksplit<Geometry, 32, S32>;
+    if (tokens <= 48) return launch_q8_ksplit<Geometry, 48, S48>;
+    if (tokens <= 64) return launch_q8_mma_r32_c64;
+    if (tokens <= 96) return launch_q8_mma_r32_c96;
+    if (tokens <= 128) return launch_q8_mma_r32_c128;
+    if (tokens <= 192) return launch_q8_mma_r64_c96;
     return launch_q8_mma_r64_c128;
 }
 

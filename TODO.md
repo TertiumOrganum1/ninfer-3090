@@ -5,18 +5,56 @@
 The fork now sits on Neroued/ninfer `f76e19c0`. Everything below this section predates that merge;
 what it says about kernels and measurements still holds except where this section contradicts it.
 
-- [ ] **Upstream retuned route tables that this card has never measured.** The catch-up kept this
-      fork's sm_86 tables wherever both sides had tuned the same one, but upstream also retuned or
-      added tables this fork never swept, and those are now live on the 3090 as unmeasured 5090
-      values: Q4 linear 1024/4096/6144/7168/34816 x 5120 and the new 5120x6144; the Q4 draft head
-      (131072) now takes capacity tiles instead of this fork's exact-width kernels; every Q5, Q6,
-      BF16, FP8-A16 and NVFP4-A16 shape table; every Q8 linear shape table except the vocabulary
-      crossover (including the new 5120x25600 routes, upstream's cache-policy change 028eb61e, and
-      `r32_c64` at T=129..144 on 2048x16384 replacing the deleted c144 route); the new Q5
-      `linear_add` tail route past 513 columns; and the new dense `linear_add` Q8/Q4 routes.
-      **Every one of these is a hypothesis on this card** (AGENTS.md), and the fork's own history is
-      that inherited tables were wrong by 12-41%. Sweep them with the op schedule benches before
-      quoting any decode number as a regression or a win.
+- [x] **The plain `linear` Q4/Q5/Q8 shape tables are swept and retuned on sm_86.** They were
+      upstream's RTX 5090 sweep and **every one of the eighteen shapes measured here was wrong**,
+      by between 1.2x and 3.8x at some width. `bench/ops/linear_schedule_bench.cu` is the sweep --
+      the fourth user of `bench/ops/schedule_sweep.cuh`, and the first for an Op whose tables return
+      a plain launch pointer rather than a schedule enum, so `routed_to` is recovered by matching
+      the shape table's own pointer against the candidate set. Cold, L2 flushed, median of 11 and
+      then a second independent run at median of 21-31 with min..p95; a band moved only where both
+      runs agreed on the sign and the margin cleared the spread. Best speedup per shape, public
+      `linear()` before vs after:
+
+      | shape | best | shape | best | shape | best |
+      |---|---|---|---|---|---|
+      | q4 131072x5120 | **3.84x** (T=12) | q8 34816x5120 | **2.72x** (T=56) | q4 1024x5120 | 1.95x (T=24) |
+      | q8 6144x5120 | 1.85x (T=56) | q4 5120x6144 | 1.72x (T=128) | q5 5120x6144 | 1.67x (T=160) |
+      | q4 7168x5120 | 1.66x (T=12) | q4 34816x5120 | 1.63x (T=12) | q4 6144x5120 | 1.61x (T=12) |
+      | q8 2048x16384 | 1.60x (T=128) | q5 5120x17408 | 1.60x (T=160) | q8 5120x10240 | 1.53x (T=64) |
+      | q8 5120x6144 | 1.53x (T=64) | q5 7168x5120 | 1.51x (T=112) | q8 14336x5120 | 1.46x (T=160) |
+      | q8 5120x25600 | 1.44x (T=96) | q5 1024x5120 | 1.42x (T=1024) | q8 5120x17408 | 1.39x (T=32) |
+      | q4 4096x5120 | 1.37x (T=256) | q5 6144x5120 | 1.30x (T=112) | | |
+
+      Four corrections recur and are worth knowing before touching any other inherited table:
+
+      * **The draft head was the worst route in the registry.** `q4 131072x5120` sent everything
+        above eight columns to the 128-wide tile; at the widths a DFlash2 or MTP round actually
+        uses that is 1.7-3.8x the right tile. Nothing about it is specific to the draft head --
+        it is what a single wide tile costs when the extent does not fill it.
+      * **`ca` beats `cg` for staged activations on sm_86.** Upstream's 028eb61e moved the Q8
+        K-split activation loads to `cg`; measured here that is backwards by 11-19% at every
+        capacity that was flipped. The L1 `cg` bypasses is where the staged slab wants to live.
+      * **Eight K warps fit sm_86's 49,152 bytes up to a 32-column tile**, so `Q8KSplitSm8xFourWarpSchedule`'s
+        blanket four-warp fallback gave away 20-26% on the narrow Q8 rungs of the tall shapes.
+        It is still the right fallback above 32 columns.
+      * **Above the capacity ladder, 64-row MMA tiles beat 32-row ones and beat wide K-split rungs.**
+        This is the same "too few CTAs" story §2c records for the GDN projection, and it accounts
+        for most of the 33..192 band on every shape of both quantizations.
+
+      Each shape file now records what moved, by how much, and which bands are upstream's value
+      kept because it measured best here. `tests/ops/linear/test_q{4,5,8}_a16.cpp` gained the new
+      route boundaries.
+- [ ] **Not yet swept on this card: the Q6, BF16, FP8-A16 and NVFP4-A16 `linear` shape tables**, and
+      the Q4/Q5 `1152`-family Vision shapes. `linear_schedule_bench.cu` has no candidate set for
+      them yet; adding one is the 40-line file its header promises, and given that eighteen of
+      eighteen swept shapes moved, the prior on these is not good. The Q8 vocabulary crossover
+      (`248320x5120`) is deliberately excluded -- it is this fork's own measurement and the catch-up
+      left it alone.
+- [ ] **Not yet swept: the wider Q8 K-split cross product.** The sweep offered each capacity with
+      `ca`/`cg` activations, and eight K warps only at capacities 8 and 16. Eight warps also fit at
+      24 and 32 and won wherever it was offered, and staging (`ActiveOnly` / `RuntimeActive` /
+      `PaddedZero`) was only sampled. Three shapes still show their shipped route beating every
+      swept candidate at T=17..24, which is the signature of a rung the sweep did not offer.
 - [ ] **No end-to-end performance measurement has been taken since the catch-up.** The decode,
       prefill and serving figures throughout this file and in `docs/performance.md` were measured on
       the pre-merge tree. The catch-up was verified functionally only (full suite plus real-model

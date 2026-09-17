@@ -30,6 +30,10 @@ int q5_a16_conformance() {
         convenience(1), graph(1), a16(4),    a16(5),      a16(16),    graph(17),
         a16(48),        a16(49),  a16(160),  a16(161),    graph(512), a16(513),
         a16(640),       a16(128), a16(1280), graph(1281), a16(1282),
+        // Route boundaries introduced by the 2026-09-17 sm_86 retune of this shape
+        // table (src/ops/linear/...); each pair straddles one of them.
+        a16(2), a16(3), a16(6), a16(7), a16(8), a16(32), a16(33),
+        a16(80), a16(81), a16(448), a16(449), a16(704), a16(705),
     };
     failures += run_shape("Q5_A16", ActivationCompute::A16, make_q5_g64_fp16_weight,
                           {1024, 5120, 151U, Comparison::Full, true, kN1024K5120});
@@ -54,6 +58,9 @@ int q5_a16_conformance() {
         a16(113),
         a16(128),
         graph(1024),
+        // Route boundaries introduced by the 2026-09-17 sm_86 retune of this shape
+        // table (src/ops/linear/...); each pair straddles one of them.
+        a16(8), a16(9), a16(160), a16(161),
     };
     failures += run_shape("Q5_A16", ActivationCompute::A16, make_q5_g64_fp16_weight,
                           {6144, 5120, 157U, Comparison::Sampled, false, kN6144K5120});
@@ -76,6 +83,9 @@ int q5_a16_conformance() {
         a16(113),
         a16(128),
         graph(1024),
+        // Route boundaries introduced by the 2026-09-17 sm_86 retune of this shape
+        // table (src/ops/linear/...); each pair straddles one of them.
+        a16(8), a16(9),
     };
     failures += run_shape("Q5_A16", ActivationCompute::A16, make_q5_g64_fp16_weight,
                           {7168, 5120, 163U, Comparison::Sampled, false, kN7168K5120});
@@ -100,6 +110,9 @@ int q5_a16_conformance() {
         a16(256),
         a16(257),
         a16(1024),
+        // Route boundaries introduced by the 2026-09-17 sm_86 retune of this shape
+        // table (src/ops/linear/...); each pair straddles one of them.
+        a16(8), a16(9), a16(17), a16(96), a16(97), a16(176), a16(177),
     };
     failures += run_shape("Q5_A16", ActivationCompute::A16, make_q5_g64_fp16_weight,
                           {5120, 6144, 167U, Comparison::Sampled, false, kN5120K6144});
@@ -124,6 +137,9 @@ int q5_a16_conformance() {
         a16(256),
         a16(257),
         a16(1024),
+        // Route boundaries introduced by the 2026-09-17 sm_86 retune of this shape
+        // table (src/ops/linear/...); each pair straddles one of them.
+        a16(8), a16(9), a16(17), a16(96), a16(97), a16(129),
     };
     failures += run_shape("Q5_A16", ActivationCompute::A16, make_q5_g64_fp16_weight,
                           {5120, 17408, 173U, Comparison::Sampled, false, kN5120K17408});
