@@ -1,3 +1,4 @@
+#include "guarded_main.h"
 #include "ninfer/engine.h"
 
 #include <algorithm>
@@ -7,7 +8,7 @@
 #include <string>
 #include <vector>
 
-int main() {
+int run() {
     const char* artifact = std::getenv("NINFER_TEST_ARTIFACT");
     if (artifact == nullptr || *artifact == '\0') {
         std::cout << "SKIP: NINFER_TEST_ARTIFACT is not set\n";
@@ -68,3 +69,5 @@ int main() {
     std::cout << "OK causal_score_real\n";
     return 0;
 }
+
+NINFER_GUARDED_TEST_MAIN(run)

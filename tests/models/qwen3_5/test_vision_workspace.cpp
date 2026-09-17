@@ -1,3 +1,4 @@
+#include "guarded_main.h"
 #include "core/device.h"
 #include "models/qwen3_5/load.h"
 #include "models/qwen3_5/execution/parameters.h"
@@ -12,7 +13,7 @@
 #include <stdexcept>
 #include <utility>
 
-int main() {
+int run() {
     namespace qwen       = ninfer::models::qwen3_5;
     const char* artifact = std::getenv("NINFER_TEST_ARTIFACT");
     if (!artifact || !*artifact) { return 77; }
@@ -67,3 +68,5 @@ int main() {
         return 1;
     }
 }
+
+NINFER_GUARDED_TEST_MAIN(run)

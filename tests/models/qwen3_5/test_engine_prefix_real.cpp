@@ -1,3 +1,4 @@
+#include "guarded_main.h"
 #include "ninfer/engine.h"
 
 #include <cstdint>
@@ -2121,7 +2122,7 @@ int exercise_artifact(const char* artifact) {
     return 0;
 }
 
-int main() {
+int run() {
     const char* artifact = std::getenv("NINFER_TEST_ARTIFACT");
     if (!artifact || !*artifact) {
         std::cout << "skip: NINFER_TEST_ARTIFACT is not set\n";
@@ -2172,3 +2173,5 @@ int main() {
     if (result == 0) { std::cout << "ok\n"; }
     return result;
 }
+
+NINFER_GUARDED_TEST_MAIN(run)

@@ -1,3 +1,4 @@
+#include "guarded_main.h"
 #include "ninfer/engine.h"
 
 #include <cstdint>
@@ -25,10 +26,28 @@ ninfer::EngineOptions engine_options(const char* artifact) {
     return options;
 }
 
+// The pinned maximum layout is a 262,144-token Vision+MTP configuration, which cannot fit beside
+// 21 GiB of resident weights on a 24 GB card: the whole test then dies here and takes the text,
+// prefix and Vision coverage with it, none of which needs anything like that much context.
+// NINFER_REAL_TEST_MAX_CONTEXT lowers the ceiling; unset, the pinned 256K layout is exercised
+// exactly as before.
+std::uint32_t maximum_context() {
+    static const std::uint32_t value = [] {
+        const char* override_value = std::getenv("NINFER_REAL_TEST_MAX_CONTEXT");
+        if (override_value == nullptr || *override_value == '\0') { return 262144U; }
+        const unsigned long parsed = std::strtoul(override_value, nullptr, 10);
+        if (parsed == 0) {
+            throw std::invalid_argument("NINFER_REAL_TEST_MAX_CONTEXT must be a positive context");
+        }
+        return static_cast<std::uint32_t>(parsed);
+    }();
+    return value;
+}
+
 ninfer::EngineOptions maximum_engine_options(const char* artifact) {
     ninfer::EngineOptions options     = engine_options(artifact);
-    options.max_context               = 262144;
-    options.kv_capacity               = ninfer::KvCapacityPolicy::explicit_capacity(262144);
+    options.max_context = maximum_context();
+    options.kv_capacity = ninfer::KvCapacityPolicy::explicit_capacity(maximum_context());
     options.speculative.backend       = ninfer::SpeculativeBackend::Mtp;
     options.speculative.draft_tokens  = 5;
     options.speculative.proposal_head = ninfer::ProposalHead::Optimized;
@@ -200,7 +219,8 @@ int exercise_maximum_configuration(const char* artifact) {
     ninfer::Engine engine(maximum_engine_options(artifact));
     const ninfer::MemorySummary memory = engine.memory_summary();
     const auto* vision = memory.vision_workspace ? &*memory.vision_workspace : nullptr;
-    if (memory.max_context != 262144 || memory.kv_cache != ninfer::KvCacheStorage::Int8Group64 ||
+    if (memory.max_context != maximum_context() ||
+        memory.kv_cache != ninfer::KvCacheStorage::Int8Group64 ||
         memory.kv_payload_bytes == 0 || memory.sequence.capacity_bytes == 0 ||
         memory.sequence.used_bytes == 0 ||
         memory.sequence.used_bytes > memory.sequence.capacity_bytes ||
@@ -210,14 +230,14 @@ int exercise_maximum_configuration(const char* artifact) {
         vision->handoff_capacity_bytes >
             memory.workspace.capacity_bytes - vision->handoff_offset_bytes ||
         vision->handoff_active_bytes != 0 || memory.cuda_graph_allowance_bytes == 0) {
-        std::cerr << "35B maximum configuration does not match the planned 256K layout: context="
+        std::cerr << "35B maximum configuration does not match its planned layout: context="
                   << memory.max_context << " kv_payload=" << memory.kv_payload_bytes
                   << " sequence=" << memory.sequence.capacity_bytes
                   << " workspace=" << memory.workspace.capacity_bytes << '\n';
         return 1;
     }
 
-    std::vector<ninfer::TokenId> oversized(262145, 198);
+    std::vector<ninfer::TokenId> oversized(maximum_context() + 1U, 198);
     bool rejected = false;
     try {
         (void)engine.generate(engine.prepare_tokens(std::move(oversized)),
@@ -248,7 +268,7 @@ int exercise_maximum_configuration(const char* artifact) {
 
 } // namespace
 
-int main() {
+int run() {
     const char* artifact = std::getenv("NINFER_TEST_ARTIFACT");
     if (artifact == nullptr || *artifact == '\0') {
         std::cout << "skip: NINFER_TEST_ARTIFACT is not set\n";
@@ -265,3 +285,5 @@ int main() {
     std::cout << "ok\n";
     return 0;
 }
+
+NINFER_GUARDED_TEST_MAIN(run)

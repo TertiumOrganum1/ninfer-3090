@@ -1,3 +1,4 @@
+#include "guarded_main.h"
 #include "ninfer/engine.h"
 #include "speculative_page_boundary.h"
 
@@ -373,7 +374,7 @@ int exercise_vision_dflash(const char* artifact, const std::vector<ninfer::Token
 
 } // namespace
 
-int main() {
+int run() {
     const char* artifact = std::getenv("NINFER_TEST_ARTIFACT");
     if (artifact == nullptr || *artifact == '\0') {
         std::cout << "skip: NINFER_TEST_ARTIFACT is not set\n";
@@ -439,3 +440,5 @@ int main() {
     std::cout << "ok\n";
     return 0;
 }
+
+NINFER_GUARDED_TEST_MAIN(run)
