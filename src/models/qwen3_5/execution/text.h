@@ -164,6 +164,12 @@ private:
     void gdn_mix(const BlockParameters& weights, Tensor& x, int index, Phase phase);
     void mlp_tail(const BlockParameters& weights, Tensor& x, Phase phase,
                   const ops::SparseMoeHints& hints);
+    // Move bytes between two ranks' devices, ordered by event rather than a host synchronize.
+    void cross_rank_copy(const void* source, std::size_t from_rank, void* destination,
+                         std::size_t to_rank, std::size_t bytes);
+    // mlp_tail, on another device when this layer's expert block was offloaded there.
+    void run_mlp_tail(const BlockParameters& weights, Tensor& x, Phase phase,
+                      std::size_t expert_rank, const ops::SparseMoeHints& hints);
     [[nodiscard]] ops::SparseMoeHints next_projection_hints(int layer) const;
     void run_layers(Tensor& x, Phase phase);
     template <class Tap>

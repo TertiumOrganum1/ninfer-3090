@@ -1,5 +1,6 @@
 #pragma once
 
+#include "core/pipeline_split.h"
 #include "core/weight_view.h"
 #include "ninfer/ops/linear.h"
 
@@ -84,6 +85,9 @@ struct TextWeights {
     WeightId token_embedding, output_head, final_norm;
     WeightUseId output_head_use;
     std::vector<BlockWeights> layers;
+    // Which device holds each layer's expert/MLP block. The identity mapping for one device, which
+    // is what keeps every consumer a no-op there; `--devices` gives it a second rank.
+    PipelineSplit split{0};
 };
 
 struct MtpWeights {

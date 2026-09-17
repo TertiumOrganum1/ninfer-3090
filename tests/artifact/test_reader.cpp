@@ -47,7 +47,7 @@ void file_set_and_bindings() {
             "Use policy changed");
     (void)binder.resource("text", "tokenizer.json");
     auto plan = std::move(binder).finish();
-    require(plan.device_objects.size() == 1 && plan.device_capacity_bytes == 528 &&
+    require(plan.device_objects.size() == 1 && plan.device_capacity(0) == 528 &&
                 plan.host_objects.size() == 1,
             "selected parent deduplication or residency failed");
 }

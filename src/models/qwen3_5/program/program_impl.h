@@ -596,6 +596,10 @@ public:
     std::unique_ptr<EvictableKVPool> kv_arena;
     DeviceArena persistent;
     DeviceArena workspace_storage;
+    // Expert-offload split only: scratch for the ranks past the primary device, each allocated in
+    // its own card's memory. `work` borrows a slice of each and switches between them as the layer
+    // loop walks ranks, so every existing workspace call site keeps using one arena object.
+    std::vector<DeviceArena> workspace_storage_by_rank;
     WorkspaceArena work;
     std::unique_ptr<qwen3_5::DecoderState> decoder;
     std::unique_ptr<HostKVArena> host_kv_arena;

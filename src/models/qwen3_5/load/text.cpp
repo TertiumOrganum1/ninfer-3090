@@ -1,7 +1,9 @@
 #include "models/qwen3_5/load/bindings.h"
 
+#include <cstdlib>
 #include <limits>
 #include <set>
+#include <stdexcept>
 
 namespace ninfer::models::qwen3_5::loading {
 
@@ -77,6 +79,28 @@ MoeWeights bind_moe(Bindings& b, const TextConfig& config, const std::string& pr
     return out;
 }
 
+// The whole post-mixer tail moves, not just the expert matmul: post_attention_norm is placed with
+// the expert block precisely so the offloaded card can run rmsnorm and the experts back to back and
+// hand back a finished residual, which costs one crossing out and one back instead of two of each.
+void place_post_mixer(Bindings& b, const BlockWeights& block, std::size_t rank) {
+    if (rank == 0) { return; }
+    b.place(block.post_attention_norm, rank);
+    const auto place_dense = [&](const DenseWeights& dense) {
+        b.place(dense.gate, rank);
+        b.place(dense.up, rank);
+        b.place(dense.down, rank);
+    };
+    if (const auto* dense = std::get_if<DenseWeights>(&block.ffn)) {
+        place_dense(*dense);
+        return;
+    }
+    const auto& moe = std::get<MoeWeights>(block.ffn);
+    b.place(moe.router, rank);
+    b.place(moe.shared_score, rank);
+    for (const auto& expert : moe.experts) { place_dense(expert); }
+    place_dense(moe.shared);
+}
+
 } // namespace
 
 BlockWeights bind_block(Bindings& b, const TextConfig& config, const std::string& p,
@@ -97,8 +121,39 @@ BlockWeights bind_block(Bindings& b, const TextConfig& config, const std::string
     return out;
 }
 
-TextWeights bind_text(Bindings& b, const TextConfig& config, const LoadOptions& options) {
+PipelineSplit plan_pipeline_split(std::uint32_t layers, const LoadOptions& options) {
+    if (options.ranks <= 1) { return PipelineSplit(layers); }
+    if (options.ranks > layers) {
+        // experts_on_last would happily leave the middle ranks empty; refusing here keeps a
+        // planning mistake from reaching the device as a silently degenerate configuration.
+        throw std::invalid_argument("--devices asks for more devices than the model has layers");
+    }
+    // Offload every layer's expert/MLP block. It is the overwhelming majority of the weights and
+    // the only part that can move without dragging state with it, so every byte it vacates on the
+    // card that serves attention becomes KV.
+    //
+    // NINFER_KEEP_EXPERTS keeps that many layers' blocks on rank 0, trading KV room for fewer
+    // crossings. 0 -- offload everything -- maximises capacity and is the default.
+    std::uint32_t keep = 0;
+    if (const char* env = std::getenv("NINFER_KEEP_EXPERTS"); env != nullptr && env[0] != 0) {
+        const auto value = std::strtoull(env, nullptr, 10);
+        if (value > std::numeric_limits<std::uint32_t>::max()) {
+            throw std::invalid_argument("NINFER_KEEP_EXPERTS exceeds the layer index domain");
+        }
+        keep = static_cast<std::uint32_t>(value);
+    }
+    try {
+        return PipelineSplit::experts_on_last(layers, options.ranks, keep);
+    } catch (const std::invalid_argument& error) {
+        throw std::invalid_argument("--devices cannot serve this model: " +
+                                    std::string(error.what()));
+    }
+}
+
+TextWeights bind_text(Bindings& b, const TextConfig& config, const LoadOptions& options,
+                      PipelineSplit split) {
     TextWeights out;
+    out.split = std::move(split);
     out.token_embedding =
         b.parameter("text/token_embedding", {config.vocab_size, config.hidden_size});
     std::vector<std::string> head_inputs{"text/final_hidden"};
@@ -112,6 +167,10 @@ TextWeights bind_text(Bindings& b, const TextConfig& config, const LoadOptions& 
     for (std::uint32_t i = 0; i < config.num_hidden_layers; ++i) {
         out.layers.push_back(
             bind_block(b, config, "text/layers/" + std::to_string(i) + "/", config.layer_types[i]));
+        // Everything else -- embeddings, attention and GDN projections, the input norm and the head
+        // -- stays on rank 0, because each is tied to state that cannot move with it: the KV cache,
+        // the GDN recurrent state, round state and the persistent prefill buffer.
+        place_post_mixer(b, out.layers.back(), out.split.placement(i).rank);
     }
     return out;
 }

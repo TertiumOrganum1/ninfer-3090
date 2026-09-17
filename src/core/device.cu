@@ -336,6 +336,11 @@ cudaStream_t DeviceContext::stream_for_rank(std::size_t rank) const {
     return endpoints_[rank].stream;
 }
 
+cudaStream_t DeviceContext::transfer_stream_for_rank(std::size_t rank) const {
+    if (rank >= endpoints_.size()) { throw std::out_of_range("CUDA device rank is out of range"); }
+    return endpoints_[rank].transfer_stream;
+}
+
 cudaEvent_t DeviceContext::fence_for_rank(std::size_t rank) const {
     if (rank >= endpoints_.size()) { throw std::out_of_range("CUDA device rank is out of range"); }
     return endpoints_[rank].fence;

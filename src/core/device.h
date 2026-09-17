@@ -113,6 +113,9 @@ struct DeviceContext {
     [[nodiscard]] std::size_t active_rank() const noexcept;
     [[nodiscard]] const std::vector<int>& device_ids() const noexcept;
     [[nodiscard]] cudaStream_t stream_for_rank(std::size_t rank) const;
+    // Weight upload goes to the arena of the rank that owns the object, and a host-to-device copy
+    // has to be issued on a stream belonging to the destination device.
+    [[nodiscard]] cudaStream_t transfer_stream_for_rank(std::size_t rank) const;
     [[nodiscard]] cudaEvent_t fence_for_rank(std::size_t rank) const;
     // Pinned host staging for cross-rank copies. Allocated only for a model-parallel context.
     //

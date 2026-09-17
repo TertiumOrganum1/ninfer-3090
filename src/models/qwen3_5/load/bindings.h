@@ -42,6 +42,10 @@ public:
     bool transcode(WeightId id, QType target, std::string_view option);
     // Places every stored object behind a device parameter in the evictable device tail.
     void evict(WeightId id, std::uint32_t rank);
+    // Materializes every stored object behind a device parameter on another pipeline rank's
+    // device. Rank 0 is the default and this is then a no-op, so the single-device path is
+    // untouched.
+    void place(WeightId id, std::size_t rank);
 
     artifact::Binder& binder;
     std::vector<PendingWeight> weights;
@@ -57,8 +61,13 @@ private:
                                       bool draft = false);
 [[nodiscard]] BlockWeights bind_block(Bindings& bindings, const TextConfig& config,
                                       const std::string& prefix, MixerKind mixer);
+// `split` decides which device holds each layer's expert/MLP block; its identity form (one rank)
+// binds exactly what a single-GPU load always bound.
 [[nodiscard]] TextWeights bind_text(Bindings& bindings, const TextConfig& config,
-                                    const LoadOptions& options);
+                                    const LoadOptions& options, PipelineSplit split);
+// The pipeline split `options.ranks` devices ask for over `layers` layers, honouring
+// NINFER_KEEP_EXPERTS. Throws when the model cannot be served by that many devices.
+[[nodiscard]] PipelineSplit plan_pipeline_split(std::uint32_t layers, const LoadOptions& options);
 // Pinned residency keeps the tower in the page-locked Host block, one contiguous group per stage
 // (patch/position embedding, each layer, merger) in binding order.
 [[nodiscard]] VisionWeights bind_vision(Bindings& bindings, const VisionConfig& config,

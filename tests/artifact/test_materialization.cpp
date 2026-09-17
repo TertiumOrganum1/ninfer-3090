@@ -7,11 +7,13 @@
 #include <cuda_runtime.h>
 
 #include <algorithm>
+#include <array>
 #include <cstring>
 #include <iostream>
 #include <map>
 #include <memory>
 #include <optional>
+#include <span>
 #include <vector>
 
 namespace ninfer::test {
@@ -92,14 +94,14 @@ void overlay_placement(DeviceContext& device) {
         require(plan.device_objects.size() == 2 && plan.device_objects.front().offset == 0 &&
                     plan.evictable_tail_offset == kChunk && plan.evictable_tail_bytes == 8 &&
                     plan.device_objects.back().offset == kChunk &&
-                    plan.device_capacity_bytes == kChunk + 8,
+                    plan.device_capacity(0) == kChunk + 8,
                 "evict-ranked object was not planned into a chunk-aligned arena tail");
         if (!EvictableWeightPool::supported(device)) {
             std::cout << "note: VMM unsupported, overlay transaction not exercised\n";
         } else {
             auto pool = std::make_unique<EvictableWeightPool>(
                 device, EvictableWeightPool::Config{
-                            .arena_bytes = static_cast<std::size_t>(plan.device_capacity_bytes),
+                            .arena_bytes = static_cast<std::size_t>(plan.device_capacity(0)),
                             .evictable_tail_bytes =
                                 static_cast<std::size_t>(plan.evictable_tail_bytes),
                         });
@@ -138,7 +140,7 @@ void overlay_placement(DeviceContext& device) {
         Binder binder(reader);
         const auto row = binder.parameter("row", {1, 130}, Residency::Pinned);
         const auto plan = std::move(binder).finish();
-        require(plan.device_capacity_bytes == 0 && plan.pinned_objects.size() == 1 &&
+        require(plan.device_capacity(0) == 0 && plan.pinned_objects.size() == 1 &&
                     plan.pinned_capacity_bytes == 528,
                 "pinned residency did not plan the page-locked block");
         auto backing = materialize(reader, MaterializationPlan(plan), device);
@@ -298,6 +300,69 @@ void staging_reuse(DeviceContext& device) {
     }
 }
 
+// Two ranks on one card: the expert-offload split's planning, its separate per-rank arenas and its
+// per-rank upload stream, exercised without a second GPU. A repeated device id is supported for
+// exactly this reason -- it frees no memory, but every placement and transfer path is the real one.
+void pipeline_rank_placement() {
+    const std::array<int, 2> ids{0, 0};
+    DeviceContext split{std::span<const int>(ids)};
+    Fixture fixture;
+    fixture.write(true);
+    Reader reader(fixture.entry);
+    const auto matrix   = reader.find("q5");
+    const auto divisors = reader.find("divisors");
+    std::vector<std::byte> expected = reader.read_object(divisors);
+
+    Binder binder(reader);
+    (void)binder.parameter("matrix", {2, 130});
+    binder.require_device(divisors);
+    binder.device_rank(divisors, 1);
+    const auto plan = std::move(binder).finish();
+    require(plan.device_rank_count() == 2 && plan.device_capacity(0) == 528 &&
+                plan.device_capacity(1) == 8,
+            "per-rank device capacities were not planned independently");
+    for (const auto& placement : plan.device_objects) {
+        require((placement.object.index == divisors.index) == (placement.rank == 1) &&
+                    placement.offset == 0,
+                "each rank's objects must start at the base of that rank's own arena");
+    }
+
+    auto backing = materialize(reader, MaterializationPlan(plan), split);
+    require(backing.stats().device_capacity_bytes == 528 &&
+                backing.stats().offloaded_device_capacity_bytes == 8 &&
+                backing.stats().h2d_bytes == 536,
+            "split materialization did not report one arena per rank");
+    require(backing.device_parent(matrix).data != backing.device_parent(divisors).data,
+            "both ranks were served from one allocation");
+    std::vector<std::byte> actual(expected.size());
+    CUDA_CHECK(cudaMemcpy(actual.data(), backing.device_parent(divisors).data, actual.size(),
+                          cudaMemcpyDeviceToHost));
+    require(actual == expected, "the offloaded rank received the wrong bytes");
+
+    {
+        Binder rejected(reader);
+        rejects([&] { rejected.device_rank(divisors, 1); },
+                "a pipeline rank was accepted without a device placement");
+    }
+    {
+        Binder rejected(reader);
+        rejected.require_device(divisors);
+        rejected.device_rank(divisors, 1);
+        rejects([&] { rejected.device_rank(divisors, 0); },
+                "one object was accepted on two different devices");
+    }
+    {
+        // An offloaded rank holds expert blocks and nothing a Vision window could borrow, so the
+        // evictable tail and a non-primary rank must not be planned together.
+        Binder rejected(reader);
+        rejected.require_device(divisors);
+        rejected.evict_device(divisors, 1);
+        rejected.device_rank(divisors, 1);
+        rejects([&] { (void)std::move(rejected).finish(); },
+                "an evictable placement was accepted away from the primary device");
+    }
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -321,6 +386,7 @@ int main(int argc, char** argv) {
         materialization(device);
         failure_and_host_only(device);
         overlay_placement(device);
+        pipeline_rank_placement();
 #if defined(NINFER_TEST_LINK_WRAP)
         ninfer::test::materialization_cuda_errors(device);
 #else

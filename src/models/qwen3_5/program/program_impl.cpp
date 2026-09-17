@@ -65,6 +65,29 @@ std::unique_ptr<EvictableKVPool> make_kv_arena(DeviceContext& device,
                 });
 }
 
+// Scratch for the ranks beyond the first. Each is allocated while its own device is current, so the
+// arena lands in that card's memory; `work` then borrows a slice of each and switches between them
+// as the layer loop walks ranks. Empty without a split, which leaves the single-GPU path unchanged.
+//
+// Only the general region is duplicated: an offloaded rank runs the post-mixer tail and nothing
+// else, so it never needs the Vision, causal-score or bridge regions the primary card's capacity
+// also covers.
+std::vector<DeviceArena> make_rank_workspaces(DeviceContext& device,
+                                              const execution::TextParameters& text,
+                                              std::size_t general_capacity_bytes) {
+    std::vector<DeviceArena> out;
+    if (!text.split_execution()) { return out; }
+    if (text.rank_count > device.size()) {
+        throw std::invalid_argument("Qwen3.5 pipeline split needs more devices than are attached");
+    }
+    out.reserve(text.rank_count - 1);
+    for (std::size_t rank = 1; rank < text.rank_count; ++rank) {
+        ScopedDeviceRank guard(device, rank);
+        out.emplace_back(general_capacity_bytes);
+    }
+    return out;
+}
+
 } // namespace
 
 ProgramImpl::ProgramImpl(const execution::Parameters& parameters_in, const SequencePlanImpl& plan,
@@ -83,6 +106,8 @@ ProgramImpl::ProgramImpl(const execution::Parameters& parameters_in, const Seque
       kv_arena(make_kv_arena(device_in, parameters_in, plan)),
       persistent(kv_arena ? DeviceArena(kv_arena->arena()) : DeviceArena(plan.persistent.bytes)),
       workspace_storage(plan.workspace.capacity),
+      workspace_storage_by_rank(
+          make_rank_workspaces(device_in, parameters_in.text, plan.workspace.general_capacity)),
       work(DeviceSpan{workspace_storage.base(), plan.workspace.general_capacity}),
       continuation_states(continuation_capacity), continuation_slots(continuation_capacity),
       shared_prefix_states(shared_prefix_capacity), shared_prefix_slots(shared_prefix_capacity),
@@ -110,6 +135,12 @@ ProgramImpl::ProgramImpl(const execution::Parameters& parameters_in, const Seque
                                CudaEventTimer(device_in, device_in.transfer_stream)} {
     if (&parameters != plan.parameters || parameters.model.options() != plan.features) {
         throw std::invalid_argument("Program parameters do not match the frozen sequence plan");
+    }
+    // Hand `work` the extra ranks' storage. From here one arena serves every device: the layer loop
+    // switches ranks alongside ScopedDeviceRank and every workspace call site is unchanged.
+    for (DeviceArena& rank_storage : workspace_storage_by_rank) {
+        work.attach_rank_storage(
+            DeviceSpan{rank_storage.base(), workspace_plan.general_capacity});
     }
     if (workspace_plan.general_capacity == 0 ||
         workspace_plan.vision.has_value() != vision_enabled ||

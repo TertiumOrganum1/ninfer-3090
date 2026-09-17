@@ -87,6 +87,18 @@ void Bindings::evict(WeightId id, std::uint32_t rank) {
     }
 }
 
+void Bindings::place(WeightId id, std::size_t rank) {
+    if (rank == 0) { return; }
+    const auto& parameter = at(id);
+    if (parameter.reference.residency != artifact::Residency::Device) {
+        throw artifact::ArtifactError(parameter.reference.name +
+                                      ": only a device parameter can be offloaded to another GPU");
+    }
+    for (const auto& part : parameter.reference.binding.parts) {
+        binder.device_rank(part.object, rank);
+    }
+}
+
 bool Bindings::transcode(WeightId id, QType target, std::string_view option) {
     const auto& parameter = at(id);
     bool requested        = false;

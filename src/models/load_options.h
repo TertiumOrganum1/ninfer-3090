@@ -2,6 +2,8 @@
 
 #include "ninfer/types.h"
 
+#include <algorithm>
+#include <cstddef>
 #include <string_view>
 
 namespace ninfer::models {
@@ -32,6 +34,11 @@ struct LoadOptions {
     // embedding, proposal head and MTP layer in an evictable device tail that one encode window
     // may borrow. Resident whenever Vision is disabled.
     VisionResidency vision_residency = VisionResidency::Resident;
+    // How many devices the instance spans (`--devices`). One is the single-GPU route and the
+    // identity pipeline split; two offloads every layer's expert/MLP block and its
+    // post_attention_norm to the second device, leaving attention, GDN, KV, state and the head on
+    // the primary card so the bytes the experts vacated become KV.
+    std::size_t ranks = 1;
 
     bool operator==(const LoadOptions&) const = default;
 
@@ -91,7 +98,8 @@ struct LoadOptions {
             .gdn_state_fp16 = options.gdn_state_fp16,
             .vision_max_merged_tokens = options.vision_max_merged_tokens,
             .vision_residency         = options.enable_vision ? options.vision_residency
-                                                              : VisionResidency::Resident};
+                                                              : VisionResidency::Resident,
+            .ranks = std::max<std::size_t>(options.devices.size(), 1)};
 }
 
 } // namespace ninfer::models

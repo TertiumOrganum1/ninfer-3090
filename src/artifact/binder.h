@@ -56,6 +56,13 @@ public:
     // object; ascending rank places the highest rank at the arena end, which an eviction pool
     // borrows first. A repeated request keeps the highest rank.
     void evict_device(ObjectHandle object, std::uint32_t rank);
+    // Materializes a device object in another pipeline rank's arena, on that rank's device. The
+    // object must already have a device demand, and a repeated request must name the same rank.
+    //
+    // This is what a `--devices` expert offload is made of: the placement mechanism is the plan's,
+    // so the artifact is still validated in full and every consumer keeps reading one
+    // MaterializedArtifact. Rank 0 is the default and the only rank a single-device load uses.
+    void device_rank(ObjectHandle object, std::size_t rank);
     // Places an object in the pinned Host block, in first-request order so a caller's logical
     // groups stay contiguous. It excludes device and Host placements of the same object.
     void require_pinned(ObjectHandle object);
@@ -73,6 +80,7 @@ private:
         std::uint64_t alignment = 256;
         std::optional<QType> transcode;
         std::uint32_t evict_rank = 0;
+        std::optional<std::size_t> device_rank;
         std::optional<std::uint64_t> pinned_order;
         std::vector<std::byte> host_data;
     };

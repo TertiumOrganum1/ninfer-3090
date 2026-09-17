@@ -70,7 +70,7 @@ void check_selection(const qwen::LoadPlan& plan, const LoadOptions& options) {
                 "device placement overlaps or is unaligned");
         end = item.offset + item.bytes;
     }
-    require(end == plan.materialization().device_capacity_bytes,
+    require(end == plan.materialization().device_capacity(0),
             "weight capacity differs from actual placements");
 }
 
@@ -234,7 +234,7 @@ int main(int argc, char** argv) {
                 std::cout << path.filename().string() << ": Host binding passed, architecture="
                           << architecture_name(plan.config().text.architecture)
                           << " V=" << plan.resources().public_token_count
-                          << " device_bytes=" << plan.materialization().device_capacity_bytes
+                          << " device_bytes=" << plan.materialization().device_capacity(0)
                           << '\n';
                 return 0;
             }

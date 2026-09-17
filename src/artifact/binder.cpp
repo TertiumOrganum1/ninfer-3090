@@ -118,6 +118,20 @@ void Binder::evict_device(ObjectHandle object, std::uint32_t rank) {
     demand.evict_rank = std::max(demand.evict_rank, rank);
 }
 
+void Binder::device_rank(ObjectHandle object, std::size_t rank) {
+    const auto& tensor = reader_.directory().tensor(object);
+    auto& demand       = demands_.at(object.index);
+    if (!demand.device) {
+        throw ArtifactError(tensor.id + ": a pipeline rank requires a device placement");
+    }
+    // Two callers asking for different devices means the object is shared across the split, which
+    // no single placement can satisfy -- exactly the sort of binding mistake worth failing on.
+    if (demand.device_rank && *demand.device_rank != rank) {
+        throw ArtifactError(tensor.id + ": conflicting pipeline ranks");
+    }
+    demand.device_rank = rank;
+}
+
 void Binder::require_pinned(ObjectHandle object) {
     const auto& geometry = reader_.geometry(object);
     auto& demand         = demands_.at(object.index);
@@ -208,16 +222,28 @@ MaterializationPlan Binder::finish(std::uint64_t evictable_alignment) && {
                                       .bytes
                                 : reader_.geometry(handle).bytes;
     };
+    std::size_t rank_count = 1;
+    for (const auto& demand : demands_) {
+        if (demand.device && demand.device_rank) {
+            rank_count = std::max(rank_count, *demand.device_rank + 1);
+        }
+    }
+    plan.device_capacity_by_rank.assign(rank_count, 0);
     const auto place_device = [&](std::size_t index) {
-        const auto& demand = demands_[index];
-        const auto bytes   = device_bytes(index);
-        const auto offset  = align_up(plan.device_capacity_bytes, demand.alignment, "device offset");
+        const auto& demand  = demands_[index];
+        const auto rank     = demand.device_rank.value_or(0);
+        const auto bytes    = device_bytes(index);
+        auto& capacity      = plan.device_capacity_by_rank[rank];
+        const auto offset   = align_up(capacity, demand.alignment, "device offset");
         plan.device_objects.push_back(
-            {ObjectHandle{index}, offset, bytes, demand.alignment, demand.transcode});
-        plan.device_capacity_bytes = checked_add(offset, bytes, "device capacity");
+            {ObjectHandle{index}, offset, bytes, demand.alignment, demand.transcode, rank});
+        capacity = checked_add(offset, bytes, "device capacity");
     };
     std::vector<std::size_t> evictable;
     std::vector<std::size_t> pinned;
+    // Placements are emitted rank by rank so each rank's offsets stay ascending, which is what
+    // materialization validates. Rank 0 first keeps a single-device plan byte-for-byte what it was.
+    std::vector<std::vector<std::size_t>> resident(rank_count);
     for (std::size_t i = 0; i < demands_.size(); ++i) {
         const auto& demand = demands_[i];
         if (demand.pinned_order && (demand.device || demand.host)) {
@@ -227,20 +253,31 @@ MaterializationPlan Binder::finish(std::uint64_t evictable_alignment) && {
         if (demand.pinned_order) { pinned.push_back(i); }
         if (!demand.device) { continue; }
         if (demand.evict_rank != 0) {
+            // The evictable tail exists so a Vision encode window can borrow weight memory on the
+            // card that runs Vision, which is the primary device. An offloaded rank holds expert
+            // blocks and nothing else, so there is nothing there for a window to borrow.
+            if (demand.device_rank.value_or(0) != 0) {
+                throw ArtifactError(reader_.directory().tensor(ObjectHandle{i}).id +
+                                    ": an evictable placement must stay on the primary device");
+            }
             evictable.push_back(i);
         } else {
-            place_device(i);
+            resident[demand.device_rank.value_or(0)].push_back(i);
         }
     }
+    for (const std::size_t index : resident[0]) { place_device(index); }
     if (!evictable.empty()) {
         std::stable_sort(evictable.begin(), evictable.end(), [&](std::size_t a, std::size_t b) {
             return demands_[a].evict_rank < demands_[b].evict_rank;
         });
-        plan.evictable_tail_offset =
-            align_up(plan.device_capacity_bytes, evictable_alignment, "evictable tail offset");
-        plan.device_capacity_bytes = plan.evictable_tail_offset;
+        plan.evictable_tail_offset = align_up(plan.device_capacity_by_rank[0], evictable_alignment,
+                                              "evictable tail offset");
+        plan.device_capacity_by_rank[0] = plan.evictable_tail_offset;
         for (const std::size_t index : evictable) { place_device(index); }
-        plan.evictable_tail_bytes = plan.device_capacity_bytes - plan.evictable_tail_offset;
+        plan.evictable_tail_bytes = plan.device_capacity_by_rank[0] - plan.evictable_tail_offset;
+    }
+    for (std::size_t rank = 1; rank < rank_count; ++rank) {
+        for (const std::size_t index : resident[rank]) { place_device(index); }
     }
     std::sort(pinned.begin(), pinned.end(), [&](std::size_t a, std::size_t b) {
         return *demands_[a].pinned_order < *demands_[b].pinned_order;
