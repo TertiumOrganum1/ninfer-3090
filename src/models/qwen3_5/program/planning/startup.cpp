@@ -147,6 +147,7 @@ PersistentLayout persistent_layout(const SequencePlanImpl& plan) {
                 .key_head_dim   = (config.gdn ? dimension(config.gdn->linear_key_head_dim) : 0),
                 .slot_count     = state_image_slots,
                 .conv_dtype     = DType::BF16,
+                .recurrent_dtype = plan.features.gdn_state_fp16 ? DType::FP16 : DType::FP32,
             },
         .hidden = dimension(config.hidden_size),
     };
@@ -358,7 +359,8 @@ WorkspacePlan build_workspace_plan(const SequencePlanImpl& plan) {
             }
             auto stage = layout.scope();
             (void)workspace::post_mixer_hidden(layout, config, last);
-            scratch(layout, execution::ffn_workspace_bytes(block.ffn, first, last));
+            scratch(layout, execution::ffn_workspace_bytes(block.ffn, first, last, false,
+                                                           phase == TextPhase::Verify));
         }
         if (!plan.causal_scoring) {
             linear_scratch(layout, parameters.text.output_head, first, last);

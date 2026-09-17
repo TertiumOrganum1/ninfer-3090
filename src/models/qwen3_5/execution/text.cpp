@@ -1066,11 +1066,11 @@ ops::SparseMoeHints TextContext::next_projection_hints(int layer) const {
                                                  : ops::SparseMoeHints{};
 }
 
-void TextContext::mlp_tail(const BlockParameters& weights, Tensor& x, Phase,
+void TextContext::mlp_tail(const BlockParameters& weights, Tensor& x, Phase phase,
                            const ops::SparseMoeHints& hints) {
     Tensor h = workspace::post_mixer_hidden(work_, config_, x.ne[1]);
     ops::rmsnorm(x, weights.post_attention_norm, config_.rms_norm_eps, true, h, ctx_.stream);
-    ffn(h, weights.ffn, x, hints, work_, ctx_.stream);
+    ffn(h, weights.ffn, x, hints, work_, ctx_.stream, false, phase == Phase::Verify);
 }
 
 template <class Tap>

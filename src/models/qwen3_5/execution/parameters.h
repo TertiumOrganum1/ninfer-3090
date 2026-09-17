@@ -25,6 +25,10 @@ using LinearParameters = ops::SingleProjectionWeight;
 struct DenseParameters {
     LinearParameters gate_up;
     LinearParameters down;
+    // gate_up policy for Verify-phase calls. It differs from gate_up.policy only when
+    // --mlp-a8-decode widens an integer-activation gate_up to AllowA8IntDecode; prefill and scoring
+    // never take the decode-width integer route.
+    ops::LinearPolicy verify_gate_up_policy = ops::LinearPolicy::A16Only;
 };
 
 using FfnParameters = std::variant<DenseParameters, ops::SparseMoeWeights>;

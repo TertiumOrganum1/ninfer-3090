@@ -53,12 +53,34 @@ public:
     }
 
     DenseParameters dense(const DenseWeights& w) const {
-        return {with_context(model_.weight(w.gate).name,
-                             [&] {
-                                 return ops::prepare_linear_swiglu_weight(model_.input(w.gate),
-                                                                          model_.input(w.up));
-                             }),
-                linear(w.down)};
+        DenseParameters out{with_context(model_.weight(w.gate).name,
+                                         [&] {
+                                             return ops::prepare_linear_swiglu_weight(
+                                                 model_.input(w.gate), model_.input(w.up));
+                                         }),
+                            linear(w.down)};
+#if defined(NINFER_SM8X_COMPAT)
+        // The integer-activation route is an sm_86 addition: it feeds groupwise-int weights to the
+        // s8 tensor cores, which Ampere has and which no A16 route uses. It is registered only for
+        // the 27B Dense MLP pair, so the policy is keyed on those exact shapes rather than the
+        // format alone; any other projection keeps what its Use permits.
+        const auto integer_route = [](LinearParameters& p, QType format, std::int32_t n,
+                                      std::int32_t k) {
+            if (p.policy == ops::LinearPolicy::A16Only && p.weight.qtype == format &&
+                p.weight.n == n && p.weight.k == k) {
+                p.policy = ops::LinearPolicy::AllowA8Int;
+            }
+        };
+        integer_route(out.gate_up, QType::Q4_G64_FP16, 34816, 5120);
+        integer_route(out.down, QType::Q5_G64_FP16, 5120, 17408);
+#endif
+        // --mlp-a8-decode only widens a gate_up that already admits integer activations: the flag
+        // must not conjure an integer route on a build or shape that has none.
+        out.verify_gate_up_policy =
+            model_.options().mlp_a8_decode && out.gate_up.policy == ops::LinearPolicy::AllowA8Int
+                ? ops::LinearPolicy::AllowA8IntDecode
+                : out.gate_up.policy;
+        return out;
     }
 
     FfnParameters ffn(const BlockWeights& w) const {

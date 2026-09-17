@@ -18,6 +18,13 @@ struct LoadOptions {
     bool embedding_q4   = false;
     bool embedding_q6   = false;
     bool mtp_experts_q4 = false;
+    // Execution selection carried with the instance: admit the integer small-T gate_up route at
+    // verify widths (see execution::DenseParameters::verify_gate_up_policy).
+    bool mlp_a8_decode = false;
+    // Store the GDN recurrent state in FP16 between steps; the recurrence still computes in FP32.
+    // Free within measurement noise for a ~2% C8 decode gain and a halved per-slot host state
+    // image (docs/maintainer/quality-trade-experiments.md).
+    bool gdn_state_fp16 = false;
 
     bool operator==(const LoadOptions&) const = default;
 
@@ -68,7 +75,9 @@ struct LoadOptions {
             .lm_head_q6     = options.lm_head_q6,
             .embedding_q4   = options.embedding_q4,
             .embedding_q6   = options.embedding_q6,
-            .mtp_experts_q4 = options.mtp_experts_q4};
+            .mtp_experts_q4 = options.mtp_experts_q4,
+            .mlp_a8_decode  = options.mlp_a8_decode,
+            .gdn_state_fp16 = options.gdn_state_fp16};
 }
 
 } // namespace ninfer::models
