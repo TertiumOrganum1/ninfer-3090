@@ -63,9 +63,14 @@ set_tests_properties(
   ninfer_qwen3_5_vision_workspace_test
   PROPERTIES SKIP_RETURN_CODE 77)
 
+# k=7 graph=1 optimized=1 batch=2 kv=int8 vision=0 state_slots=1. The argv fallbacks are k=15,
+# batch=8 and 3 state slots, which want about 6.3 GB of runtime reservation and cannot fit beside the
+# 20.4 GB artifact on a 24 GB card. This configuration exercises the same DFlash2 accept/rollback
+# path and fits, so the test is coverage rather than a standing failure.
 ninfer_add_test(ninfer_qwen3_5_dflash2_real_test
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/test_engine_dflash2_real.cpp"
-  LIBRARIES ninfer_engine)
+  LIBRARIES ninfer_engine
+  TEST_ARGS 7 1 1 2 int8 0 1)
 
 set_tests_properties(
   ninfer_qwen3_5_dflash2_real_test
