@@ -50,6 +50,23 @@ what it says about kernels and measurements still holds except where this sectio
       eighteen swept shapes moved, the prior on these is not good. The Q8 vocabulary crossover
       (`248320x5120`) is deliberately excluded -- it is this fork's own measurement and the catch-up
       left it alone.
+- [x] **The new Q5 `linear_add` tail route past 513 columns is right on this card too, and is kept.**
+      `MmaResidualR64C128Tail` splits a wide extent into whole 512-column waves plus a narrow tail
+      routed through the normal table, on the argument that a trailing mostly-empty 128-wide tile is
+      billed as a full wave. Swept with `bench/ops/q5_linear_add_schedule_bench.cu`, cold, median of
+      11 with min..p95, public Op (the composite) against `mma_r64_c128` (the plain wide launch),
+      both k (us):
+
+      | T | 513 | 576 | 640 | 704 | 768 | 896 | 1024 | 1152 | 1280 | 1536 |
+      |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+      | k=6144 composite | 610 | 751 | 828 | 877 | 869 | 1070 | 1149 | 1402 | 1440 | 1708 |
+      | k=6144 plain | 864 | 865 | 812 | 940 | 897 | 1098 | 1194 | 1404 | 1490 | 1762 |
+      | k=17408 composite | 1635 | 2004 | 2209 | 2358 | 2369 | 2862 | 3144 | 3786 | 3912 | 4682 |
+      | k=17408 plain | 2330 | 2378 | 2189 | 2585 | 2478 | 2998 | 3239 | 3717 | 4036 | 4804 |
+
+      **1.42x at 513 columns** on both k, 1.1-1.2x through 704, and 1.0-1.05x beyond. The two points
+      where the composite is 1-2% behind (640 and k=17408's 1152) are inside the spread. This is the
+      one inherited table in this pass that measured right as it shipped; do not re-sweep it.
 - [ ] **Not yet swept: the wider Q8 K-split cross product.** The sweep offered each capacity with
       `ca`/`cg` activations, and eight K warps only at capacities 8 and 16. Eight warps also fit at
       24 and 32 and won wherever it was offered, and staging (`ActiveOnly` / `RuntimeActive` /
