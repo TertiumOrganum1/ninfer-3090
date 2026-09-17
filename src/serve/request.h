@@ -126,8 +126,7 @@ struct SamplingParams {
 };
 
 // Protocol-level effort vocabulary. Each wire adapter accepts the values from
-// its external contract; translation then resolves them against the capabilities
-// advertised by the chat template embedded in the loaded artifact.
+// its external contract; translation passes explicit values to the selected template.
 enum class RequestedReasoningEffort : std::uint8_t {
     None,
     Minimal,
@@ -187,6 +186,7 @@ struct GenerationRequest {
     std::optional<std::uint32_t> thinking_budget;
     std::optional<RequestedReasoningEffort> reasoning_effort;
     std::optional<bool> preserve_thinking;
+    std::string chat_template_kwargs_json;
     ninfer::PromptContinuationMode continuation = ninfer::PromptContinuationMode::NewAssistantTurn;
     bool private_cache_boundary_at_prompt_end   = false;
     bool allow_engine_automatic_shared_prefixes = true;

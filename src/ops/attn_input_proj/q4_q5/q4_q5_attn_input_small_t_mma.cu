@@ -2,7 +2,7 @@
 
 #include "core/device.h"
 #include "ops/common/small_t_split_store.cuh"
-#include "ops/linear/q4/q4_small_t_mma.cuh"
+#include "ops/linear/q4/q4_ksplit_mma.cuh"
 #include "ops/linear/q5/q5_small_t_mma.cuh"
 
 #include <cuda_bf16.h>
@@ -50,12 +50,12 @@ void launch_gate_value(const Tensor& x, const Weight& w, Tensor& gate, Tensor& v
 template <int TileCols, int KWarps = 8, int Stages = 1>
 void launch_query_key(const Tensor& x, const Weight& w, Tensor& q, Tensor& k,
                       cudaStream_t stream) {
-    q4_small_t_mma_launch<AttnQueryKeyGeometry, TileCols, TileCols, SmallTSplitStore,
-                          Q4SmallTMmaIdentityRows, true, KWarps, Stages>(
+    q4_ksplit_mma_launch<AttnQueryKeyGeometry, TileCols, TileCols, SmallTSplitStore,
+                         Q4KSplitIdentityRows, true, KWarps, Stages>(
         kParentRows / SmallTLayout<KWarps>::kRowsPerCta, stream,
         static_cast<const __nv_bfloat16*>(x.data), static_cast<const std::uint8_t*>(w.qdata),
         static_cast<const std::uint8_t*>(w.scales), static_cast<__nv_bfloat16*>(q.data),
-        split_store(q, k, x.ne[1]), Q4SmallTMmaIdentityRows{}, x.ne[1]);
+        split_store(q, k, x.ne[1]), Q4KSplitIdentityRows{}, x.ne[1]);
 }
 
 } // namespace

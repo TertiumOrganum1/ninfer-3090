@@ -1,3 +1,4 @@
+#include "core/weight.h"
 #include "ops/gdn_input_proj/q4_q5/q4_q5_gdn_input_plan.h"
 
 #include "ops/gdn_input_proj/q4_q5/q4_q5_gdn_input_kernels.h"
@@ -159,7 +160,7 @@ struct RouteSpec {
 // tile; the 128-wide tile remains the prefill-chunk anchor.
 //
 // 2026-09-11, RTX 3090 under Linux: SmallTMma -- the Q4 and Q5 small-T MMA kernels
-// (q4_small_t_mma.cuh, q5_small_t_mma.cuh) over query/key and value/z -- is flat across T=1..8 and
+// (q4_ksplit_mma.cuh, q5_small_t_mma.cuh) over query/key and value/z -- is flat across T=1..8 and
 // beats everything below it, the T=1 GEMVs included. Cold, median of 31 (us):
 //
 //   T                  1      2      3      4      5      6      7      8

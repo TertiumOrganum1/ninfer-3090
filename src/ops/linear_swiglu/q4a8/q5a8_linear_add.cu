@@ -1,6 +1,6 @@
 // Integer-activation route for the 27B mlp/down LinearAdd, companion to the gate_up route.
 //
-// mlp/down is Q5G64_F16S [5120,17408] in the same artifact: a 4-bit low plane laid out exactly as
+// mlp/down is Q5_G64_FP16 [5120,17408] in the same artifact: a 4-bit low plane laid out exactly as
 // Q4's, an 8-byte-per-group high plane carrying each code's fifth bit, and an FP16 scale per group.
 // A code decodes as ((low4 | hbit << 4) ^ 0x10) - 0x10, two's complement over [-16,15], which int8
 // represents exactly -- so the fifth bit costs some unpack arithmetic and nothing else. The high
@@ -251,7 +251,7 @@ __global__ __launch_bounds__(kThreads) void q5a8_add_kernel(
 bool q5a8_tokens_supported(std::int32_t tokens) { return tokens >= kBN && tokens % kBN == 0; }
 
 bool q5a8_add_supported(const Weight& down, std::int32_t tokens) {
-    return down.qtype == QType::Q5G64_F16S && down.layout == QuantLayout::RowSplit &&
+    return down.qtype == QType::Q5_G64_FP16 && down.layout == QuantLayout::RowSplit &&
            down.n == kRows && down.k == kCols && down.group == kGroup && down.qdata != nullptr &&
            down.qhigh != nullptr && down.scales != nullptr && tokens >= kBN && tokens % kBN == 0;
 }

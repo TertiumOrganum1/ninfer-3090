@@ -1,213 +1,207 @@
 #include "artifact/binder.h"
 
+#include "artifact/framing.h"
+#include "artifact/transcode.h"
+
 #include <algorithm>
+#include <bit>
+#include <cmath>
+#include <cstring>
 #include <limits>
-#include <stdexcept>
-#include <string>
-#include <utility>
-#include <variant>
 
 namespace ninfer::artifact {
-namespace {
 
-std::uint64_t align_up(std::uint64_t value, std::uint64_t alignment) {
-    const std::uint64_t mask = alignment - 1;
-    if (value > std::numeric_limits<std::uint64_t>::max() - mask) {
-        throw ArtifactError("materialization plan size overflows u64");
+float HostValues::scalar_f32() const {
+    if (format != QType::FP32 || elements != 1 || data.size() != 4) {
+        throw ArtifactError("auxiliary requires one represented FP32 value");
     }
-    return (value + mask) & ~mask;
+    return std::bit_cast<float>(read_u32_le(data.data()));
 }
 
-} // namespace
+std::vector<std::int32_t> HostValues::integers() const {
+    if (format != QType::INT32 || data.size() != checked_mul(elements, 4, "integer values")) {
+        throw ArtifactError("semantic table requires INT32 values");
+    }
+    std::vector<std::int32_t> out;
+    out.reserve(static_cast<std::size_t>(elements));
+    for (std::size_t i = 0; i < elements; ++i) {
+        out.push_back(std::bit_cast<std::int32_t>(read_u32_le(data.data() + i * 4)));
+    }
+    return out;
+}
 
 Binder::Binder(const Reader& reader)
-    : reader_(reader), consumed_(reader.objects().size(), false),
-      planned_(reader.objects().size(), false) {
-    materialization_.object_count = reader.objects().size();
+    : reader_(reader), demands_(reader.directory().objects.size()) {}
+
+ParameterReference Binder::parameter(std::string_view name, Shape shape, Residency residency,
+                                     std::optional<QType> exact_format) {
+    const auto found = reader_.directory().bindings.find(name);
+    if (found == reader_.directory().bindings.end()) {
+        throw ArtifactError("missing logical parameter " + std::string(name));
+    }
+    return binding(std::string(name), found->second, std::move(shape), residency, exact_format);
 }
 
-bool Binder::has_object(std::string_view name) const noexcept {
-    return reader_.find(name) != nullptr;
-}
-
-ObjectHandle Binder::find_unconsumed(std::string_view name) {
-    const auto& objects            = reader_.objects();
-    const ObjectDescriptor* object = reader_.find(name);
-    if (object == nullptr) {
-        throw ArtifactError("required artifact object is missing: " + std::string(name));
+ParameterReference Binder::binding(std::string name, const Binding& binding, Shape shape,
+                                   Residency residency, std::optional<QType> exact_format) {
+    if (weight_element_count(shape) != binding.elements ||
+        (binding.whole_object &&
+         reader_.directory().tensor(binding.parts.at(0).object).shape != shape)) {
+        throw ArtifactError(name + ": logical shape differs from Binding coverage");
     }
-    const auto index = static_cast<std::size_t>(object - objects.data());
-    if (consumed_[index]) {
-        throw ArtifactError("artifact object was bound more than once: " + std::string(name));
-    }
-    consumed_[index] = true;
-    return ObjectHandle{index};
-}
-
-ObjectHandle Binder::require_tensor(std::string_view name, NumericFormat format,
-                                    StorageLayout layout, std::span<const std::uint64_t> shape) {
-    const ObjectHandle handle = find_unconsumed(name);
-    const auto* tensor        = std::get_if<TensorDescriptor>(&descriptor(handle));
-    if (tensor == nullptr) {
-        throw ArtifactError("required tensor is a resource: " + std::string(name));
-    }
-    if (tensor->format != format || tensor->layout != layout ||
-        !std::equal(tensor->shape.begin(), tensor->shape.end(), shape.begin(), shape.end())) {
-        throw ArtifactError("tensor descriptor does not match target contract: " +
-                            std::string(name));
-    }
-    return handle;
-}
-
-ObjectHandle Binder::require_resource(std::string_view name, ResourceEncoding encoding) {
-    const ObjectHandle handle = find_unconsumed(name);
-    const auto* resource      = std::get_if<ResourceDescriptor>(&descriptor(handle));
-    if (resource == nullptr) {
-        throw ArtifactError("required resource is a tensor: " + std::string(name));
-    }
-    if (resource->encoding != encoding) {
-        throw ArtifactError("resource encoding does not match target contract: " +
-                            std::string(name));
-    }
-    return handle;
-}
-
-bool Binder::contains(std::string_view name) const noexcept {
-    return reader_.find(name) != nullptr;
-}
-
-const ObjectDescriptor& Binder::descriptor(ObjectHandle handle) const {
-    if (handle.index >= reader_.objects().size()) {
-        throw ArtifactError("artifact object handle is out of range");
-    }
-    return reader_.objects()[handle.index];
-}
-
-PayloadSpan Binder::payload(ObjectHandle handle) const {
-    return reader_.payload(descriptor(handle));
-}
-
-void Binder::materialize_on_device(ObjectHandle handle, std::uint32_t evict_rank,
-                                   DeviceTranscode transcode) {
-    const auto* tensor = std::get_if<TensorDescriptor>(&descriptor(handle));
-    if (tensor == nullptr) {
-        throw ArtifactError("resource cannot be materialized as a device tensor");
-    }
-    if (planned_[handle.index]) {
-        throw ArtifactError("artifact object has more than one materialization placement: " +
-                            std::string(tensor->name));
-    }
-    std::uint64_t bytes = tensor->bytes;
-    if (transcode != DeviceTranscode::None) {
-        if (tensor->format != transcode_source_format(transcode) ||
-            tensor->layout != StorageLayout::RowSplitK128V1) {
-            throw ArtifactError("tensor format cannot be transcoded as requested: " +
-                                std::string(tensor->name));
+    for (const auto& part : binding.parts) {
+        const auto& geometry = reader_.geometry(part.object);
+        if (exact_format && geometry.format != *exact_format) {
+            throw ArtifactError(name +
+                                ": representation does not match its mathematical value type");
         }
-        bytes = row_split_geometry(transcode_target_format(transcode), tensor->shape).encoded_bytes;
-    }
-    const std::uint64_t alignment = tensor_alignment(tensor->layout);
-    if (evict_rank != 0) {
-        // Evictable tensors receive their offsets in finish(): they are packed into the arena
-        // suffix so that higher ranks sit closer to the end.
-        evictable_.push_back(PendingEvictable{handle, bytes, alignment, evict_rank, transcode});
-        planned_[handle.index] = true;
-        return;
-    }
-    const std::uint64_t offset = align_up(materialization_.device_capacity_bytes, alignment);
-    if (bytes > std::numeric_limits<std::uint64_t>::max() - offset) {
-        throw ArtifactError("materialization plan size overflows u64");
-    }
-    materialization_.device_objects.push_back(
-        DeviceMaterialization{handle, offset, bytes, alignment, transcode});
-    materialization_.device_capacity_bytes = offset + bytes;
-    planned_[handle.index]                 = true;
-}
-
-void Binder::materialize_on_host_pinned(ObjectHandle handle) {
-    const auto* tensor = std::get_if<TensorDescriptor>(&descriptor(handle));
-    if (tensor == nullptr) {
-        throw ArtifactError("resource cannot be materialized as a pinned host tensor");
-    }
-    if (planned_[handle.index]) {
-        throw ArtifactError("artifact object has more than one materialization placement: " +
-                            std::string(tensor->name));
-    }
-    const std::uint64_t alignment = tensor_alignment(tensor->layout);
-    const std::uint64_t offset    = align_up(materialization_.pinned_capacity_bytes, alignment);
-    if (tensor->bytes > std::numeric_limits<std::uint64_t>::max() - offset) {
-        throw ArtifactError("materialization plan size overflows u64");
-    }
-    materialization_.pinned_objects.push_back(
-        PinnedMaterialization{handle, offset, tensor->bytes, alignment});
-    materialization_.pinned_capacity_bytes = offset + tensor->bytes;
-    planned_[handle.index]                 = true;
-}
-
-void Binder::retain_on_host(ObjectHandle handle) {
-    const auto* resource = std::get_if<ResourceDescriptor>(&descriptor(handle));
-    if (resource == nullptr) {
-        throw ArtifactError("tensor cannot be retained as a host resource");
-    }
-    if (planned_[handle.index]) {
-        throw ArtifactError("artifact object has more than one materialization placement: " +
-                            std::string(resource->name));
-    }
-    materialization_.host_objects.push_back(HostMaterialization{handle});
-    planned_[handle.index] = true;
-}
-
-void Binder::validate_only(ObjectHandle handle) {
-    const ObjectDescriptor& object = descriptor(handle);
-    if (planned_[handle.index]) {
-        throw ArtifactError("artifact object has more than one materialization placement: " +
-                            std::string(object_name(object)));
-    }
-    planned_[handle.index] = true;
-}
-
-MaterializationPlan Binder::finish(std::uint64_t evictable_alignment) {
-    const auto it = std::find(consumed_.begin(), consumed_.end(), false);
-    if (it != consumed_.end()) {
-        const auto index = static_cast<std::size_t>(it - consumed_.begin());
-        throw ArtifactError("artifact object was not consumed by the selected target: " +
-                            std::string(object_name(reader_.objects()[index])));
-    }
-    const auto unplanned = std::find(planned_.begin(), planned_.end(), false);
-    if (unplanned != planned_.end()) {
-        const auto index = static_cast<std::size_t>(unplanned - planned_.begin());
-        throw ArtifactError("artifact object has no materialization placement: " +
-                            std::string(object_name(reader_.objects()[index])));
-    }
-    if (!evictable_.empty()) {
-        if (evictable_alignment == 0) {
-            throw ArtifactError("evictable tail alignment must be nonzero");
+        if (residency == Residency::Device) {
+            require_device(part.object);
+        } else if (residency == Residency::Host) {
+            (void)host_object(part.object);
         }
-        // Ascending rank order packs the highest rank at the arena end, which the eviction pool
-        // unmaps first. Ties keep their registration order.
-        std::stable_sort(evictable_.begin(), evictable_.end(),
-                         [](const PendingEvictable& a, const PendingEvictable& b) {
-                             return a.rank < b.rank;
-                         });
-        const std::uint64_t tail_begin =
-            align_up(materialization_.device_capacity_bytes, evictable_alignment);
-        materialization_.evictable_tail_offset = tail_begin;
-        materialization_.device_capacity_bytes = tail_begin;
-        for (const PendingEvictable& pending : evictable_) {
-            const std::uint64_t offset =
-                align_up(materialization_.device_capacity_bytes, pending.alignment);
-            if (pending.bytes > std::numeric_limits<std::uint64_t>::max() - offset) {
-                throw ArtifactError("materialization plan size overflows u64");
-            }
-            materialization_.device_objects.push_back(DeviceMaterialization{
-                pending.handle, offset, pending.bytes, pending.alignment, pending.transcode});
-            materialization_.device_capacity_bytes = offset + pending.bytes;
-        }
-        materialization_.evictable_tail_bytes =
-            materialization_.device_capacity_bytes - tail_begin;
-        evictable_.clear();
     }
-    return std::move(materialization_);
+    return {std::move(name), std::move(shape), binding, residency};
+}
+
+const Use& Binder::use(std::string_view parameter, std::string_view input) const {
+    const auto found = reader_.directory().uses.find({std::string(parameter), std::string(input)});
+    if (found == reader_.directory().uses.end()) {
+        throw ArtifactError("missing Use " + std::string(parameter) + "@" + std::string(input));
+    }
+    return found->second;
+}
+
+bool Binder::contains(std::string_view parameter) const {
+    return reader_.directory().bindings.contains(parameter);
+}
+
+void Binder::require_device(ObjectHandle object, std::uint64_t alignment) {
+    const auto& geometry = reader_.geometry(object);
+    if (!alignment || (alignment & (alignment - 1))) {
+        throw ArtifactError("device alignment must be a power of two");
+    }
+    auto& demand     = demands_.at(object.index);
+    demand.device    = true;
+    demand.alignment = std::max({demand.alignment, alignment, geometry.alignment});
+}
+
+void Binder::transcode_device(ObjectHandle object, QType target) {
+    const auto& geometry = reader_.geometry(object);
+    const auto& tensor   = reader_.directory().tensor(object);
+    auto& demand         = demands_.at(object.index);
+    if (!demand.device) {
+        throw ArtifactError(tensor.id + ": transcoding requires a device placement");
+    }
+    if (demand.host) {
+        throw ArtifactError(tensor.id + ": a transcoded object cannot also keep Host bytes");
+    }
+    if (geometry.layout != QuantLayout::RowSplit ||
+        !row_split_transcode_supported(geometry.format, target)) {
+        throw ArtifactError(tensor.id + ": object format cannot be transcoded as requested");
+    }
+    if (demand.transcode && *demand.transcode != target) {
+        throw ArtifactError(tensor.id + ": conflicting transcode targets");
+    }
+    demand.transcode = target;
+}
+
+std::span<const std::byte> Binder::host_object(ObjectHandle object) {
+    reader_.validate_object(object);
+    auto& demand = demands_.at(object.index);
+    if (!demand.host) {
+        demand.host_data = reader_.read_object(object);
+        read_bytes_      = checked_add(read_bytes_, demand.host_data.size(), "Host read bytes");
+        demand.host      = true;
+    }
+    return demand.host_data;
+}
+
+ObjectHandle Binder::resource(std::string_view component, std::string_view role) {
+    const auto& resources = reader_.directory().component(component).resources;
+    const auto found      = resources.find(role);
+    if (found == resources.end()) {
+        throw ArtifactError(std::string(component) + ": missing resource " + std::string(role));
+    }
+    (void)host_object(found->second);
+    return found->second;
+}
+
+HostValues Binder::values(const Binding& binding, std::optional<QType> format) {
+    HostValues out;
+    out.elements = binding.elements;
+    if (binding.parts.empty()) { throw ArtifactError("value Binding is empty"); }
+    out.format = format.value_or(reader_.geometry(binding.parts.front().object).format);
+    std::uint64_t word_bytes = 0;
+    if (out.format == QType::BF16) {
+        word_bytes = 2;
+    } else if (out.format == QType::FP32 || out.format == QType::INT32) {
+        word_bytes = 4;
+    } else {
+        throw ArtifactError("owning Host values require a direct numeric format");
+    }
+    const auto total_bytes = checked_mul(out.elements, word_bytes, "Host value bytes");
+    if (total_bytes > std::numeric_limits<std::size_t>::max()) {
+        throw ArtifactError("Host values exceed size_t");
+    }
+    out.data.resize(static_cast<std::size_t>(total_bytes));
+    std::size_t destination = 0;
+    for (const auto& part : binding.parts) {
+        const auto& geometry = reader_.geometry(part.object);
+        if (geometry.layout != QuantLayout::Contiguous || geometry.format != out.format ||
+            part.begin >= part.end || part.end > geometry.elements) {
+            throw ArtifactError("Host value Binding has an incompatible representation or range");
+        }
+        const auto bytes = checked_mul(part.end - part.begin, word_bytes, "value range");
+        if (bytes > out.data.size() - destination) {
+            throw ArtifactError("Host value coverage exceeds declared size");
+        }
+        const auto source = checked_mul(part.begin, word_bytes, "value offset");
+        auto target = std::span(out.data).subspan(destination, static_cast<std::size_t>(bytes));
+        const auto& cached = demands_[part.object.index];
+        if (cached.host) {
+            std::memcpy(target.data(), cached.host_data.data() + source, target.size());
+        } else {
+            const auto& object = reader_.directory().tensor(part.object);
+            reader_.read_into(checked_add(object.offset, source, "value file offset"), target);
+            read_bytes_ = checked_add(read_bytes_, bytes, "Host read bytes");
+        }
+        destination += target.size();
+    }
+    if (destination != out.data.size()) {
+        throw ArtifactError("Host value coverage is incomplete");
+    }
+    owned_value_bytes_ = checked_add(owned_value_bytes_, out.data.size(), "owning value bytes");
+    return out;
+}
+
+MaterializationPlan Binder::finish() && {
+    MaterializationPlan plan;
+    plan.source            = &reader_;
+    plan.object_count      = demands_.size();
+    plan.prior_read_bytes  = read_bytes_;
+    plan.owned_value_bytes = owned_value_bytes_;
+    for (std::size_t i = 0; i < demands_.size(); ++i) {
+        auto& demand = demands_[i];
+        if (demand.device) {
+            const ObjectHandle handle{i};
+            const auto& geometry = reader_.geometry(handle);
+            const auto bytes =
+                demand.transcode ? weight_geometry(*demand.transcode, QuantLayout::RowSplit,
+                                                   reader_.directory().tensor(handle).shape)
+                                       .bytes
+                                 : geometry.bytes;
+            const auto offset =
+                align_up(plan.device_capacity_bytes, demand.alignment, "device offset");
+            plan.device_objects.push_back(
+                {handle, offset, bytes, demand.alignment, demand.transcode});
+            plan.device_capacity_bytes = checked_add(offset, bytes, "device capacity");
+        }
+        if (demand.host) {
+            plan.host_objects.push_back({ObjectHandle{i}, std::move(demand.host_data)});
+        }
+    }
+    return plan;
 }
 
 } // namespace ninfer::artifact

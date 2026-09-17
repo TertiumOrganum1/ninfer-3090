@@ -16,14 +16,14 @@
 //
 // It also catches the k=2048 case from a different angle: an Op can route to twelve distinct
 // schedule ids that are one kernel on this hardware. That does not show up here -- all twelve are
-// "routed" -- which is why the comment in w8_pair_plan.cpp spells the collapse out. Unrouted is the
+// "routed" -- which is why the comment in q8_pair_plan.cpp spells the collapse out. Unrouted is the
 // cheap half of the question; grep the launchers for NINFER_SM8X_COMPAT for the other half.
 
 #include "ops/attn_input_proj/q4_q5/q4_q5_attn_input_plan.h"
-#include "ops/attn_input_proj/w8/w8_attn_input_plan.h"
+#include "ops/attn_input_proj/q8/q8_attn_input_plan.h"
 #include "ops/linear_add/q5/q5_linear_add_plan.h"
-#include "ops/linear_pair/w8/w8_pair_plan.h"
-#include "ops/linear_swiglu/w8/w8_linear_swiglu_plan.h"
+#include "ops/linear_pair/q8/q8_pair_plan.h"
+#include "ops/linear_swiglu/q8/q8_linear_swiglu_plan.h"
 
 #include <algorithm>
 #include <cstdint>
@@ -73,7 +73,7 @@ struct OpReport {
     bool identity_ok = true;
 };
 
-// One Op, all of its shapes. Surveying per shape would be misleading: the w8_pair k=5120 table
+// One Op, all of its shapes. Surveying per shape would be misleading: the q8_pair k=5120 table
 // selects three schedules, so 42 of its 45 ids look "unrouted" there while most are live at
 // k=2048. What matters is whether an id is reachable from *any* registered shape of the Op.
 //
@@ -121,69 +121,69 @@ int main() {
     namespace detail = ninfer::ops::detail;
     std::vector<OpReport> reports;
 
-    using PairFn = std::function<detail::W8PairScheduleId(std::int32_t)>;
-    reports.push_back(survey<detail::W8PairScheduleId, decltype(detail::w8_pair_schedule_name),
+    using PairFn = std::function<detail::Q8PairScheduleId(std::int32_t)>;
+    reports.push_back(survey<detail::Q8PairScheduleId, decltype(detail::q8_pair_schedule_name),
                              PairFn>(
-        "w8_pair", detail::w8_pair_schedule_name, "w8_pair.unknown", {"k=5120", "k=2048"},
+        "q8_pair", detail::q8_pair_schedule_name, "q8_pair.unknown", {"k=5120", "k=2048"},
         {PairFn([](std::int32_t cols) {
-             return detail::w8_pair_resolve_plan({1024, 5120, 5120, cols}).schedule;
+             return detail::q8_pair_resolve_plan({1024, 5120, 5120, cols}).schedule;
          }),
          PairFn([](std::int32_t cols) {
-             return detail::w8_pair_resolve_plan({1024, 2048, 2048, cols}).schedule;
+             return detail::q8_pair_resolve_plan({1024, 2048, 2048, cols}).schedule;
          })},
-        {"w8_pair.dual_decode.k2048.r8", "w8_pair.dual_decode.k2048.r16",
-         "w8_pair.splitk4.mma.r16.c80", "w8_pair.splitk4.mma.r16.c88",
-         "w8_pair.splitk4.mma.r16.c96", "w8_pair.splitk4.mma.r16.c104",
-         "w8_pair.splitk4.mma.r16.c112", "w8_pair.splitk2.mma.r16.c128",
-         "w8_pair.splitk2.mma.r16.c160", "w8_pair.splitk2.mma.r16.c192",
-         "w8_pair.splitk2.mma.r16.c224", "w8_pair.splitk2.mma.r16.c256",
-         "w8_pair.concat_mma.r32.c80", "w8_pair.concat_mma.r32.c112",
-         "w8_pair.concat_mma.r48.c64", "w8_pair.concat_mma.r64.c64",
-         "w8_pair.concat_mma.r64.c80", "w8_pair.concat_mma.r96.c80",
-         "w8_pair.concat_mma.r96.c112"}));
+        {"q8_pair.dual_decode.k2048.r8", "q8_pair.dual_decode.k2048.r16",
+         "q8_pair.splitk4.mma.r16.c80", "q8_pair.splitk4.mma.r16.c88",
+         "q8_pair.splitk4.mma.r16.c96", "q8_pair.splitk4.mma.r16.c104",
+         "q8_pair.splitk4.mma.r16.c112", "q8_pair.splitk2.mma.r16.c128",
+         "q8_pair.splitk2.mma.r16.c160", "q8_pair.splitk2.mma.r16.c192",
+         "q8_pair.splitk2.mma.r16.c224", "q8_pair.splitk2.mma.r16.c256",
+         "q8_pair.concat_mma.r32.c80", "q8_pair.concat_mma.r32.c112",
+         "q8_pair.concat_mma.r48.c64", "q8_pair.concat_mma.r64.c64",
+         "q8_pair.concat_mma.r64.c80", "q8_pair.concat_mma.r96.c80",
+         "q8_pair.concat_mma.r96.c112"}));
 
-    using AttnFn = std::function<detail::W8AttnInputScheduleId(std::int32_t)>;
+    using AttnFn = std::function<detail::Q8AttnInputScheduleId(std::int32_t)>;
     reports.push_back(
-        survey<detail::W8AttnInputScheduleId, decltype(detail::w8_attn_input_schedule_name),
-               AttnFn>("w8_attn_input", detail::w8_attn_input_schedule_name,
-                       "attn_input_proj.w8.unknown", {"target", "companion", "dflash2"},
+        survey<detail::Q8AttnInputScheduleId, decltype(detail::q8_attn_input_schedule_name),
+               AttnFn>("q8_attn_input", detail::q8_attn_input_schedule_name,
+                       "attn_input_proj.q8.unknown", {"target", "companion", "dflash2"},
                        // All three shapes the resolver distinguishes -- see supported_shape() in
-                       // w8_attn_input_plan.cpp. Surveying only dflash2 reported 11 of 16
+                       // q8_attn_input_plan.cpp. Surveying only dflash2 reported 11 of 16
                        // unrouted, because it never asked the other two tables.
                        {AttnFn([](std::int32_t cols) {
-                            return detail::w8_attn_input_resolve_plan(
+                            return detail::q8_attn_input_resolve_plan(
                                        {2048, 4096, 512, 9216, 2048, cols})
                                 .schedule;
                         }),
                         AttnFn([](std::int32_t cols) {
-                            return detail::w8_attn_input_resolve_plan(
+                            return detail::q8_attn_input_resolve_plan(
                                        {2048, 4096, 1024, 6144, 2048, cols})
                                 .schedule;
                         }),
                         AttnFn([](std::int32_t cols) {
-                            return detail::w8_attn_input_resolve_plan(
+                            return detail::q8_attn_input_resolve_plan(
                                        {5120, 4096, 1024, 6144, 5120, cols})
                                 .schedule;
                         })},
-                       {"attn_input_proj.w8.simt.r8.c4",
-                        "attn_input_proj.w8.dflash2.mma.r16.c64.k128"}));
+                       {"attn_input_proj.q8.simt.r8.c4",
+                        "attn_input_proj.q8.dflash2.mma.r16.c64.k128"}));
 
-    using SwigluFn = std::function<detail::W8LinearSwiGluScheduleId(std::int32_t)>;
+    using SwigluFn = std::function<detail::Q8LinearSwiGluScheduleId(std::int32_t)>;
     reports.push_back(
-        survey<detail::W8LinearSwiGluScheduleId, decltype(detail::w8_linear_swiglu_schedule_name),
-               SwigluFn>("w8_linear_swiglu", detail::w8_linear_swiglu_schedule_name,
-                         "linear_swiglu.w8.unknown", {"companion", "dflash2"},
+        survey<detail::Q8LinearSwiGluScheduleId, decltype(detail::q8_linear_swiglu_schedule_name),
+               SwigluFn>("q8_linear_swiglu", detail::q8_linear_swiglu_schedule_name,
+                         "linear_swiglu.q8.unknown", {"companion", "dflash2"},
                          {SwigluFn([](std::int32_t cols) {
-                              return detail::w8_linear_swiglu_resolve_plan(
+                              return detail::q8_linear_swiglu_resolve_plan(
                                          {12288, 6144, 2048, 2048, cols})
                                   .schedule;
                           }),
                           SwigluFn([](std::int32_t cols) {
-                              return detail::w8_linear_swiglu_resolve_plan(
+                              return detail::q8_linear_swiglu_resolve_plan(
                                          {34816, 17408, 5120, 5120, cols})
                                   .schedule;
                           })},
-                         {"linear_swiglu.w8.dflash2.mma.r32.c64.k128"}));
+                         {"linear_swiglu.q8.dflash2.mma.r32.c64.k128"}));
 
     using AddFn = std::function<detail::Q5LinearAddScheduleId(std::int32_t)>;
     reports.push_back(
@@ -196,7 +196,7 @@ int main() {
              AddFn([](std::int32_t cols) {
                  return detail::q5_linear_add_resolve_plan({5120, 17408, 17408, cols}).schedule;
              })},
-            {"linear_add.q5.gemv.residual", "linear_add.q5.mma.r64.c16.cta_collective_residual",
+            {"linear_add.q5.mma.r64.c16.cta_collective_residual",
              "linear_add.q5.mma.r64.c24.cta_collective_residual",
              "linear_add.q5.mma.r64.c32.cta_collective_residual"}));
 
@@ -246,7 +246,7 @@ int main() {
     //
     // The inventory as measured, and what is known about each group:
     //
-    //   w8_pair            19  decode r8/r16 and splitk c224/c256 have no band in either table;
+    //   q8_pair            19  decode r8/r16 and splitk c224/c256 have no band in either table;
     //                          the seven concat tile shapes are upstream ids this fork's measured
     //                          boundaries never select; and the eight DualSplitKMediumC80..C192
     //                          ids were stranded by the k=2048 retune (c0c3000e), which collapsed
@@ -254,12 +254,13 @@ int main() {
     //                          schedules are the same kernel under NINFER_SM8X_COMPAT. Those eight
     //                          are exactly the routes that retune deleted, which is this test
     //                          doing its job -- the count moved 18 -> 26 and had to be looked at.
-    //   w8_attn_input       2  DFlash2MmaR16C64K128 won at no width in the sm_86 sweep. SimtR8C4
+    //   q8_attn_input       2  DFlash2MmaR16C64K128 won at no width in the sm_86 sweep. SimtR8C4
     //                          is reachable in principle but no shape's table picks it.
-    //   w8_linear_swiglu    1  DFlash2MmaR32C64K128 ties R64C64K128 at 33..44 and wins nowhere.
-    //   q5_linear_add       4  MmaResidualR64C32, likewise; and since 2026-09-11 GemvResidual,
-    //                          C16 and C24, when split2 took T=1 (13-14%) and the small-T MMA took
-    //                          3..32 at up to 2.9x (q5_linear_add_plan.cpp).
+    //   q8_linear_swiglu    1  DFlash2MmaR32C64K128 ties R64C64K128 at 33..44 and wins nowhere.
+    //   q5_linear_add       3  MmaResidualR64C32, likewise; and since 2026-09-11 C16 and C24,
+    //                          when the small-T MMA took 3..32 at up to 2.9x
+    //                          (q5_linear_add_plan.cpp). GemvResidual (unrouted since split2 took
+    //                          T=1) was deleted upstream in the 2026-09-17 catch-up: 31 -> 30.
     //   q4_q5_attn_input    4  grouped_r32_c64_s4, pair_r32_c64_s3, pair_r32_c64_s4 -- the family
     //                          whose dispatch held both switch bugs the catch-up merge shipped --
     //                          and ParentSplitFixed since 2026-09-11, when the small-T MMA took
@@ -267,7 +268,7 @@ int main() {
     //
     // All of them are kept on purpose: deleting an upstream schedule costs merge effort at every
     // future catch-up for no measured gain here. The point is that the set is written down.
-    constexpr std::size_t kExpectedUnrouted = 31;
+    constexpr std::size_t kExpectedUnrouted = 30;
     if (total != kExpectedUnrouted) {
         std::cerr << "route coverage changed: " << total << " unrouted schedules, expected "
                   << kExpectedUnrouted

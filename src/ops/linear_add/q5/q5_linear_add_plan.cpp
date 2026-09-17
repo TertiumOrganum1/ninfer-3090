@@ -1,3 +1,4 @@
+#include "core/weight.h"
 #include "ops/linear_add/q5/q5_linear_add_plan.h"
 
 #include "ops/linear_add/q5/q5_linear_add_kernels.h"
@@ -127,25 +128,29 @@ constexpr std::array<SupportSpec, 2> kSupports{{
 //           best MMA 106.6  99.3  109.6  105.5  105.5
 //   k=17408 small_t 106.5  107.6  128.0  132.1  144.4
 //           best MMA 285.7 277.5  294.9  294.9  289.8
-constexpr std::array<RouteSpec, 5> kK6144Routes{{
+constexpr std::array<RouteSpec, 6> kK6144Routes{{
     {{1, 2}, Q5LinearAddScheduleId::Split2ExactResidual},
     {{3, 32}, Q5LinearAddScheduleId::SmallTMmaResidual},
     {{33, 103}, Q5LinearAddScheduleId::MmaResidualR64C32S3},
     {{104, 127}, Q5LinearAddScheduleId::MmaResidualR64C64},
-    {{128, kAnyCols}, Q5LinearAddScheduleId::MmaResidualR64C128},
+    {{128, 512}, Q5LinearAddScheduleId::MmaResidualR64C128},
+    // Upstream's wave-tail composite (measured on RTX 5090 only; sm_86 was swept to 384 columns).
+    {{513, kAnyCols}, Q5LinearAddScheduleId::MmaResidualR64C128Tail},
 }};
 
 // Same sweep, k=17408. This table had no 16-wide route at all, so 11..16 paid C32's cost for a
 // C16-shaped extent (T=16: c16 270.3 vs c32 300.0). Above that the story matches k=6144, with the
 // S4/S3 crossover later: T=48 s4 437.2 vs c24 474.1; T=96 s3 629.8 vs s4 683.0; T=128 c128 665.6
 // vs s3 817.2; T=192 c128 798.7 vs s3 1359.9.
-constexpr std::array<RouteSpec, 6> kK17408Routes{{
+constexpr std::array<RouteSpec, 7> kK17408Routes{{
     {{1, 2}, Q5LinearAddScheduleId::Split2ExactResidual},
     {{3, 32}, Q5LinearAddScheduleId::SmallTMmaResidual},
     {{33, 64}, Q5LinearAddScheduleId::MmaResidualR64C32S4},
     {{65, 103}, Q5LinearAddScheduleId::MmaResidualR64C32S3},
     {{104, 127}, Q5LinearAddScheduleId::MmaResidualR64C64},
-    {{128, kAnyCols}, Q5LinearAddScheduleId::MmaResidualR64C128},
+    {{128, 512}, Q5LinearAddScheduleId::MmaResidualR64C128},
+    // Upstream's wave-tail composite (measured on RTX 5090 only; sm_86 was swept to 384 columns).
+    {{513, kAnyCols}, Q5LinearAddScheduleId::MmaResidualR64C128Tail},
 }};
 
 template <std::size_t N>
@@ -172,12 +177,41 @@ bool supported_shape(const Q5LinearAddProblem& problem) noexcept {
     return false;
 }
 
+// The 128-wide MMA tile loads one row-block of weights per column tile, so a launch costs whole
+// waves of 4 column tiles (80 row-blocks x 4 = 320 blocks at 5120 rows): measured on this host a
+// 512-column launch costs ~456 us at k=17408 and a 513-column launch ~934 us, i.e. the trailing
+// mostly-empty tile is billed as a full wave. Send up to 192 columns of remainder - the whole
+// narrow band - to the narrow routes instead, which stay under that wave for every T in it. A
+// wider remainder keeps the single wide launch: its tail needs a 128-wide tile of its own, which
+// costs the wave the composite is trying to avoid.
+constexpr std::int32_t kWaveCols       = 512;
+constexpr std::int32_t kNarrowTailCols = 192;
+
+void launch_wide_with_narrow_tail(const Tensor& x, const Weight& w, Tensor& residual_out,
+                                  WorkspaceArena& ws, cudaStream_t stream) {
+    const std::int32_t cols = x.ne[1];
+    const std::int32_t wide = (cols / kWaveCols) * kWaveCols;
+    const std::int32_t tail = cols - wide;
+    if (wide == 0 || tail == 0 || tail > kNarrowTailCols) {
+        q5_linear_add_mma_r64_c128_launch(x, w, residual_out, stream);
+        return;
+    }
+
+    const Tensor x_wide = x.slice(1, 0, wide);
+    Tensor out_wide     = residual_out.slice(1, 0, wide);
+    q5_linear_add_mma_r64_c128_launch(x_wide, w, out_wide, stream);
+
+    const Tensor x_tail = x.slice(1, wide, tail);
+    Tensor out_tail     = residual_out.slice(1, wide, tail);
+    q5_linear_add_execute_plan(
+        q5_linear_add_resolve_plan({residual_out.ne[0], x.ne[0], w.padded_shape[1], x_tail.ne[1]}),
+        x_tail, w, out_tail, ws, stream);
+}
+
 } // namespace
 
 const char* q5_linear_add_schedule_name(Q5LinearAddScheduleId schedule) noexcept {
     switch (schedule) {
-    case Q5LinearAddScheduleId::GemvResidual:
-        return "linear_add.q5.gemv.residual";
     case Q5LinearAddScheduleId::Split2ExactResidual:
         return "linear_add.q5.simt.split2.exact.residual";
     case Q5LinearAddScheduleId::MmaResidualR64C16:
@@ -196,6 +230,8 @@ const char* q5_linear_add_schedule_name(Q5LinearAddScheduleId schedule) noexcept
         return "linear_add.q5.mma.r64.c128.cta_collective_residual";
     case Q5LinearAddScheduleId::SmallTMmaResidual:
         return "linear_add.q5.mma.small_t.residual";
+    case Q5LinearAddScheduleId::MmaResidualR64C128Tail:
+        return "linear_add.q5.mma.r64.c128.cta_collective_residual.narrow_tail";
     }
     return "linear_add.q5.unknown";
 }
@@ -240,9 +276,6 @@ void q5_linear_add_execute_plan(const Q5LinearAddPlan& plan, const Tensor& x, co
     (void)ws;
 
     switch (plan.schedule) {
-    case Q5LinearAddScheduleId::GemvResidual:
-        q5_linear_add_gemv_residual_launch(x, w, residual_out, stream);
-        return;
     case Q5LinearAddScheduleId::Split2ExactResidual:
         q5_linear_add_split2_exact_launch(x, w, residual_out, stream);
         return;
@@ -269,6 +302,9 @@ void q5_linear_add_execute_plan(const Q5LinearAddPlan& plan, const Tensor& x, co
         return;
     case Q5LinearAddScheduleId::SmallTMmaResidual:
         q5_linear_add_small_t_mma_launch(x, w, residual_out, stream);
+        return;
+    case Q5LinearAddScheduleId::MmaResidualR64C128Tail:
+        launch_wide_with_narrow_tail(x, w, residual_out, ws, stream);
         return;
     }
     throw std::logic_error("q5 linear_add: unknown schedule");

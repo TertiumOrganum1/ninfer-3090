@@ -85,7 +85,7 @@ int run_k(std::int32_t k) {
     options.row_split_codes = qw::RowSplitCodePattern::Hashed;
     options.row_split_scale = qw::RowSplitScalePattern::Small;
     qw::PackedWeight host_weight =
-        qw::make_patterned_weight(QType::Q5G64_F16S, kRows, k, 0x5157U + k, options);
+        qw::make_patterned_weight(QType::Q5_G64_FP16, kRows, k, 0x5157U + k, options);
     ninfer::test::GuardedDeviceBuffer device_weight(host_weight.payload.size());
     device_weight.copy_from_host(host_weight.payload.data(), host_weight.payload.size());
     const ninfer::Weight weight = host_weight.device_weight(device_weight.data());
@@ -97,7 +97,7 @@ int run_k(std::int32_t k) {
 
     // The patterned fixture carries no dequantized matrix; decode the payload for the oracle.
     const std::vector<float> dequant =
-        qw::decode_row_split_lowbit(host_weight.payload, kRows, k, k, QType::Q5G64_F16S);
+        qw::decode_row_split_lowbit(host_weight.payload, kRows, k, k, QType::Q5_G64_FP16);
     std::vector<double> oracle(static_cast<std::size_t>(kRows) * kMaxTokens);
     for (std::int32_t col = 0; col < kMaxTokens; ++col) {
         const std::uint16_t* xcol = activation.data() + static_cast<std::size_t>(col) * k;

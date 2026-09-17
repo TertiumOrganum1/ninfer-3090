@@ -36,6 +36,12 @@ rather than seven (+22.6%), two more route tables re-measured for `sm_86` (up to
 races fixed in paths that produced wrong output rather than an error. Previous:
 [v0.9.0](RELEASE_NOTES_0.9.0.md).
 
+> **Model files are now v3.** This release follows upstream NInfer onto the v3 `.ninfer` container.
+> A v2 file from an earlier release is refused at load; upgrade it in place of a re-download with
+> `python tools/upgrade_ninfer_v2_to_v3.py OLD.ninfer NEW.ninfer` (standard library only, works on
+> Windows and Linux, and keeps the weight bytes unchanged). See
+> [weight conversion](docs/weight-conversion.md#upgrade-an-existing-v2-artifact).
+
 ## Quick start
 
 **You do not need to build anything.** Grab the prebuilt archive for your platform from

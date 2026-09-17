@@ -1,5 +1,6 @@
 #pragma once
 
+#include "core/weight.h"
 #include "core/tensor.h"
 
 #include <cuda_runtime.h>
@@ -46,7 +47,7 @@ Q4Q5GdnInputPlan q4_q5_gdn_input_resolve_plan(const Q4Q5GdnInputProblem& problem
 // had it last: its {{1, 6}} / {{7, 32}} boundary is where DFlash2 loses 15% between five and six
 // draft tokens, and where a C8 decode cohort starts paying a 32-wide tile for eight live columns,
 // and until now neither could be checked against the alternative. Mirrors
-// q4_linear_swiglu_execute_schedule and w8_pair_execute_schedule.
+// q4_linear_swiglu_execute_schedule and q8_pair_execute_schedule.
 //
 // Nothing on the inference path should call this: the check execute_plan adds is what keeps a plan
 // from being executed against a problem it was not resolved for.

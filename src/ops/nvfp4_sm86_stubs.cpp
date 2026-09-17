@@ -17,11 +17,8 @@ namespace {
 
 } // namespace
 
-void launch_nvfp4_w4a4_quantize(const Tensor&, const Weight&, Nvfp4W4a4Workspace, cudaStream_t) {
-    reject_nvfp4_a4();
-}
-
-void launch_nvfp4_w4a4(const Tensor&, const Weight&, Tensor&, Nvfp4W4a4Workspace, cudaStream_t) {
+void launch_nvfp4_w4a4_quantize(const Tensor&, const Weight&, Nvfp4W4a4Workspace, Nvfp4ScaleLayout,
+                                cudaStream_t) {
     reject_nvfp4_a4();
 }
 

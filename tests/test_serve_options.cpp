@@ -178,8 +178,8 @@ int main() {
                           configured.context_cache.host_kv_capacity_bytes == 0,
                       "root-only server mode retained default Host capacities");
     failures += check(configured.enable_vision, "--vision did not enable Vision");
-    failures +=
-        check(configured.preserve_thinking, "--preserve-thinking did not reach serving options");
+    failures += check(configured.preserve_thinking == true,
+                      "--preserve-thinking did not reach serving options");
     failures +=
         check(configured.max_concurrency == 4, "--max-concurrency did not reach serving options");
     failures += check(configured.max_context == 4096 &&
@@ -259,15 +259,10 @@ int main() {
                       "server accepted top_k beyond the executable candidate domain");
 
     GenerationRequest request;
-    request.max_tokens = 1;
-    ninfer::PromptCapabilities prompt_capabilities;
-    prompt_capabilities.enable_thinking                 = true;
-    prompt_capabilities.reasoning_effort.low            = true;
-    prompt_capabilities.reasoning_effort.xhigh          = true;
-    prompt_capabilities.reasoning_effort.default_effort = ninfer::ReasoningEffort::XHigh;
-    const auto semantics = resolve_prompt_semantics(request, defaults, prompt_capabilities);
-    failures += check(!semantics.reasoning_effort &&
-                          semantics.effective_reasoning_effort == ninfer::ReasoningEffort::XHigh,
+    request.max_tokens   = 1;
+    const auto semantics = resolve_prompt_semantics(request, defaults);
+    failures += check(!semantics.reasoning_effort && !semantics.enable_thinking &&
+                          !semantics.reasoning_effort,
                       "omitted reasoning effort did not resolve to the template default");
     failures +=
         check(to_request_options(request, defaults, semantics, true).execution.allow_prefix_reuse,
@@ -290,9 +285,8 @@ int main() {
                 .execution.thinking.budget == 37,
         "thinking-enabled request did not inherit the server budget");
     request.enable_thinking = false;
-    const auto non_thinking =
-        resolve_prompt_semantics(request, thinking_budget, prompt_capabilities);
-    failures += check(!non_thinking.effective_reasoning_effort,
+    const auto non_thinking = resolve_prompt_semantics(request, thinking_budget);
+    failures += check(!non_thinking.reasoning_effort,
                       "disabled thinking retained an effective reasoning effort");
     failures += check(!to_request_options(request, thinking_budget, non_thinking,
                                           thinking_budget.allow_prefix_reuse)
@@ -300,34 +294,25 @@ int main() {
                       "non-thinking request inherited the server thinking budget");
     request.enable_thinking.reset();
     request.reasoning_effort   = RequestedReasoningEffort::Low;
-    const auto explicit_effort = resolve_prompt_semantics(request, defaults, prompt_capabilities);
-    failures +=
-        check(explicit_effort.reasoning_effort == ninfer::ReasoningEffort::Low &&
-                  explicit_effort.effective_reasoning_effort == ninfer::ReasoningEffort::Low,
-              "explicit reasoning effort did not remain the effective effort");
-
+    const auto explicit_effort = resolve_prompt_semantics(request, defaults);
+    failures += check(explicit_effort.reasoning_effort == ninfer::ReasoningEffort::Low &&
+                          explicit_effort.enable_thinking == true,
+                      "explicit reasoning effort did not remain the effective effort");
     request.reasoning_effort.reset();
-    failures +=
-        check(resolve_prompt_semantics(request, configured, prompt_capabilities).preserve_thinking,
-              "server preserve-thinking default was not resolved");
+    failures += check(resolve_prompt_semantics(request, configured).preserve_thinking == true,
+                      "server preserve-thinking default was not resolved");
     request.preserve_thinking = false;
-    failures +=
-        check(!resolve_prompt_semantics(request, configured, prompt_capabilities).preserve_thinking,
-              "request preserve-thinking override did not win");
+    failures += check(resolve_prompt_semantics(request, configured).preserve_thinking == false,
+                      "request preserve-thinking override did not win");
 
-    // Client effort vocabularies are wider than the three rungs any Qwen3.6 template exposes:
-    // OpenAI and Claude Code send 'high', pi sends 'minimal' and 'max'. Those collapse onto the
-    // nearest rung rather than failing the request.
-    ninfer::PromptCapabilities effort_capabilities;
-    effort_capabilities.enable_thinking                 = true;
-    effort_capabilities.reasoning_effort.low            = true;
-    effort_capabilities.reasoning_effort.xhigh          = true;
-    effort_capabilities.reasoning_effort.default_effort = ninfer::ReasoningEffort::XHigh;
+    // Client effort vocabularies are wider than the three rungs the maintained Qwen templates
+    // accept: OpenAI and Claude Code send 'high', pi sends 'minimal' and 'max'. Those collapse
+    // onto the nearest rung rather than making the template raise.
     const auto collapses = [&](RequestedReasoningEffort wire) {
         GenerationRequest aliased = GenerationRequest{};
         aliased.max_tokens        = 1;
         aliased.reasoning_effort  = wire;
-        return resolve_prompt_semantics(aliased, defaults, effort_capabilities).reasoning_effort;
+        return resolve_prompt_semantics(aliased, defaults).reasoning_effort;
     };
     failures += check(collapses(RequestedReasoningEffort::Minimal) == ninfer::ReasoningEffort::Low,
                       "'minimal' did not collapse onto the template's low rung");
@@ -335,13 +320,10 @@ int main() {
                       "'high' did not collapse onto the template's xhigh rung");
     failures += check(collapses(RequestedReasoningEffort::Max) == ninfer::ReasoningEffort::XHigh,
                       "'max' did not collapse onto the template's xhigh rung");
-    // Collapsing is not a licence to invent a rung the template lacks: medium is absent here.
-    bool unsupported_rung_rejected = false;
-    try {
-        (void)collapses(RequestedReasoningEffort::Medium);
-    } catch (const ApiException&) { unsupported_rung_rejected = true; }
-    failures += check(unsupported_rung_rejected,
-                      "an effort rung the template lacks survived the capability gate");
+    failures += check(collapses(RequestedReasoningEffort::Medium) == ninfer::ReasoningEffort::Medium,
+                      "'medium' did not pass through unchanged");
+    failures += check(collapses(RequestedReasoningEffort::None) == ninfer::ReasoningEffort::None,
+                      "'none' did not pass through unchanged");
 
     failures +=
         check(serve_usage_text("ninfer-serve").find("--no-prefix-reuse") != std::string::npos,
@@ -417,9 +399,8 @@ int main() {
     failures +=
         check(serve_usage_text("ninfer-serve").find("--context-cost-presets") != std::string::npos,
               "serve help omits external context-cost presets");
-    failures +=
-        check(serve_usage_text("ninfer-serve").find("identity.model_id") != std::string::npos,
-              "serve help omits the artifact-derived model id default");
+    failures += check(serve_usage_text("ninfer-serve").find("metadata.name") != std::string::npos,
+                      "serve help omits the artifact-derived model id default");
 
     const ServeOptions inherited =
         parse({"ninfer-serve", "model.ninfer", "--max-context", "16384"});

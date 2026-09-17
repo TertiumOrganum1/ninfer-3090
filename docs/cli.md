@@ -1,6 +1,6 @@
 # NInfer CLI
 
-`build/apps/ninfer` runs one request against one registered `.ninfer` artifact. Build NInfer and
+`build/apps/ninfer` runs one request against one v3 `.ninfer` artifact. Build NInfer and
 download an artifact using the [project README](../README.md) before following this guide.
 
 The examples use Qwen3.8-27B NVFP4 with FP8 KV storage.
@@ -33,11 +33,18 @@ written to stderr, so stdout can be redirected independently:
   > answer.txt 2> run.log
 ```
 
-Thinking is enabled by default. If the chat template embedded in the loaded artifact exposes
-reasoning effort, `--reasoning-effort low|medium|xhigh` selects it; omitting the option uses the
-template's default. An artifact whose template does not expose effort rejects the option. Add
-`--no-thinking` for direct-response prompt rendering; it cannot be combined with
-`--reasoning-effort`. `--greedy` selects exact argmax decoding independently.
+`--chat-template FILE` overrides the artifact's built-in template with a local Jinja file.
+Changes to the file take effect after restarting NInfer:
+
+```bash
+./build/apps/ninfer models/qwen3_8_27b.ninfer \
+  --chat-template tools/chat_templates/qwen3_8.jinja --prompt "Hello"
+```
+
+Omitted thinking and effort options use the selected template's defaults. `--no-thinking` or
+`--reasoning-effort none` requests disabled thinking; other effort values cannot be combined with
+`--no-thinking`. The template interprets the selected effort. `--greedy` selects exact argmax
+decoding independently.
 
 `--thinking-budget N` places a positive upper bound on accepted model-origin tokens while the
 new-turn Qwen thinking block remains open. If the model has not emitted `</think>` at that exact
@@ -130,8 +137,8 @@ Run message files from the repository root when they contain repository-relative
 ```
 
 Supported roles are `system`, `developer`, `user`, `assistant`, and `tool`.
-System and developer messages retain their array positions; the Qwen family frontend renders both
-as system-class ChatML turns rather than moving later instructions to the beginning.
+The selected template formats these roles. The maintained Qwen templates keep system/developer
+messages at their input positions.
 
 Message content may be a string or an ordered array containing:
 
@@ -207,7 +214,8 @@ MTP remains the faster backend on text — but by 5% at DFlash2's best draft cou
 seven implies.
 Both `groupwise-int` and `nvfp4` artifacts use the same Engine route, including CUDA Graph,
 concurrent requests, sampling penalties, and prefix reuse. An artifact without the companion
-weights reports a missing DFlash2 capability when selected.
+weights reports a missing DFlash2 component when selected. Vision, MTP and DFlash follow the same
+rule: their weights are required only when that component is enabled at startup.
 
 Only one speculative backend can be enabled per Engine. The published [performance results](performance.md)
 use MTP with three draft tokens and DFlash with seven draft tokens (block length eight), both with
@@ -233,9 +241,10 @@ The table lists executable defaults. The examples above select FP8 KV and MTP3.
 | `--vision-residency resident\|overlay` | `overlay` keeps the Vision tower host-pinned and borrows device memory per image from the evictable text weight tail (no resident Vision cost; needs CUDA VMM) | `resident` |
 | `--vision-max-merged N` | merged-token budget of one media item; larger media downscales at preprocessing | 16384 |
 | `--no-cuda-graph` | disable CUDA Graph decode | graphs on |
-| `--no-thinking` | disable thinking in prompt rendering | thinking on |
+| `--chat-template FILE` | use a local Jinja template | artifact template |
+| `--no-thinking` | disable thinking | template default |
 | `--thinking-budget N` | positive model-origin thinking-token cap; omitted means unlimited | unset |
-| `--reasoning-effort low\|medium\|xhigh` | select an effort exposed by the loaded chat template | template default |
+| `--reasoning-effort none\|minimal\|low\|medium\|high\|xhigh\|max` | pass an effort value to the selected template | template default |
 | `--greedy` | exact argmax decoding | off |
 | `--temperature F` | sampling temperature override | registered model/mode default |
 | `--top-p F` | nucleus-threshold override | registered model/mode default |
@@ -245,8 +254,8 @@ The table lists executable defaults. The examples above select FP8 KV and MTP3.
 | `--frequency-penalty F` | frequency-penalty override | registered model/mode default (`0`) |
 | `--seed N` | sampling seed | `0` |
 
-When a sampling flag is omitted, Engine selects the official general-task preset registered for
-the loaded model and the rendered prompt mode. The current presets are:
+When a sampling flag is omitted, Engine selects the general-task preset for the loaded architecture
+and rendered prompt mode. The current official models use:
 
 | Model | Prompt mode | Temperature | Top-p | Top-k | Min-p | Presence penalty |
 |---|---|---:|---:|---:|---:|---:|
@@ -271,7 +280,8 @@ Run `./build/apps/ninfer --help` for the exact option contract.
 The registered model IDs have a native context limit of 262,144 tokens. The practical allocation
 on one RTX 3090 depends on the selected artifact, media workload, output budget, and KV-cache type.
 Use `--kv-dtype int8` for the recommended large-context quality profile; BF16 is also available.
-Artifact identity selects the weight profile; `--kv-dtype` selects runtime KV storage. All six
+The artifact describes its model configuration and weight representations; `--kv-dtype`
+independently selects runtime KV storage. All six
 formats — `bf16`, `int8`, `fp8`, `rk8v4`, `k8v4`, `nvfp4` — are accepted on SM86; measured size,
 decode speed and perplexity for each are in
 [`docs/config-calculator.html`](config-calculator.html). The Blackwell-only

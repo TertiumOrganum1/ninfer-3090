@@ -95,7 +95,7 @@ int run_gate_up(std::int32_t tokens) {
     constexpr std::int32_t kOut  = kRows / 2;
 
     const PackedWeight host_weight =
-        qw::make_patterned_weight(QType::Q4G64_F16S, kRows, kCols, 4801U);
+        qw::make_patterned_weight(QType::Q4_G64_FP16, kRows, kCols, 4801U);
     const std::vector<std::uint16_t> activation = make_activation(kCols, tokens, 91U);
 
     test::GuardedDeviceBuffer device_weight(host_weight.payload.size());
@@ -156,7 +156,7 @@ int run_gate_up_small_t_i8(std::int32_t kTokens) {
     constexpr std::int32_t kOut  = kRows / 2;
 
     const PackedWeight host_weight =
-        qw::make_patterned_weight(QType::Q4G64_F16S, kRows, kCols, 4802U);
+        qw::make_patterned_weight(QType::Q4_G64_FP16, kRows, kCols, 4802U);
     const std::vector<std::uint16_t> activation = make_activation(kCols, kTokens, 92U);
 
     test::GuardedDeviceBuffer device_weight(host_weight.payload.size());
@@ -214,7 +214,7 @@ int run_down(std::int32_t tokens) {
     constexpr std::int32_t kCols = 17408;
 
     const PackedWeight host_weight =
-        qw::make_patterned_weight(QType::Q5G64_F16S, kRows, kCols, 5501U);
+        qw::make_patterned_weight(QType::Q5_G64_FP16, kRows, kCols, 5501U);
     const std::vector<std::uint16_t> activation = make_activation(kCols, tokens, 77U);
     const std::vector<std::uint16_t> residual0  = make_activation(kRows, tokens, 13U);
 
@@ -272,11 +272,11 @@ int run_down(std::int32_t tokens) {
 int run_admission() {
     int failures = 0;
     const PackedWeight q4 =
-        qw::make_patterned_weight(QType::Q4G64_F16S, 34816, 5120, 1U);
+        qw::make_patterned_weight(QType::Q4_G64_FP16, 34816, 5120, 1U);
     const PackedWeight q5 =
-        qw::make_patterned_weight(QType::Q5G64_F16S, 5120, 17408, 2U);
+        qw::make_patterned_weight(QType::Q5_G64_FP16, 5120, 17408, 2U);
     const PackedWeight wrong_shape =
-        qw::make_patterned_weight(QType::Q4G64_F16S, 4096, 5120, 3U);
+        qw::make_patterned_weight(QType::Q4_G64_FP16, 4096, 5120, 3U);
 
     void* fake = reinterpret_cast<void*>(static_cast<std::uintptr_t>(4096));
     struct Case {

@@ -1,5 +1,6 @@
 #pragma once
 
+#include "core/weight.h"
 #include "core/tensor.h"
 
 #include <cuda_runtime.h>
@@ -12,13 +13,14 @@ namespace ninfer::ops {
  *   ideal[d,t] = dequantize(table)[ids[t],d].
  *
  * `ids` is contiguous I32 [T], `out` is contiguous BF16 [D,T], and every id is in
- * [0,vocab). `table` has logical shape [vocab,D] and is contiguous BF16_CTRL, Q4G64_F16S or
- * Q6G64_F16S RowSplit, W8G32_F16S RowSplit, or FP8_E4M3FN_ROW_BF16S RowScale. Dense BF16 values are copied
- * bit-exactly. For quantized tables, the oracle independently decodes each code and multiplies it
- * by the exact stored scale in FP64; the BF16 output is promoted and compared directly with that
- * ideal. Final output storage rounding belongs to the quantized embedding criterion, not the
- * oracle. The registered domains are Q4 `[248320,5120]` or `[248320,2048]`, Q6 `[248320,5120]` or `[248320,2048]`, W8 `[248320,2048]` or
- * `[248320,5120]`, and FP8 `[248320,5120]`. Q4/Q6/W8 scales are FP16; FP8 has one BF16 multiplier per
+ * [0,vocab). `table` has logical shape [vocab,D] and is contiguous BF16, Q4_G64_FP16 or
+ * Q6_G64_FP16 RowSplit, Q8_G32_FP16 RowSplit, or FP8_E4M3FN_ROW_BF16 RowScale. Dense BF16 values
+ * are copied bit-exactly. For quantized tables, the oracle independently decodes each code and
+ * multiplies it by the exact stored scale in FP64; the BF16 output is promoted and compared
+ * directly with that ideal. Final output storage rounding belongs to the quantized embedding
+ * criterion, not the oracle. The registered domains are Q4 `[248320,5120]` or `[248320,2048]`,
+ * Q6 `[248320,5120]` or `[248320,2048]`, Q8 `[248320,2048]` or `[248320,5120]`, and FP8
+ * `[248320,5120]`. Q4/Q6/Q8 scales are FP16; FP8 has one BF16 multiplier per
  * row and requires 4-byte-aligned output storage. `out` must not overlap `ids` or any table plane.
  * There is no workspace or persistent state side effect.
  */

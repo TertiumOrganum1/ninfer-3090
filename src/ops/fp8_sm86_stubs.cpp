@@ -38,10 +38,6 @@ void launch_fp8_a8_quantize(const Tensor&, const Weight&, Fp8A8Workspace, cudaSt
     reject_fp8_a8();
 }
 
-void launch_fp8_a8(const Tensor&, const Weight&, Tensor&, Fp8A8Workspace, cudaStream_t) {
-    reject_fp8_a8();
-}
-
 void fp8_attn_input_a8_launch(const Tensor&, const Weight&, Tensor&, Tensor&, Tensor&, Tensor&,
                               Fp8A8Workspace, cudaStream_t) {
     reject_fp8_a8();

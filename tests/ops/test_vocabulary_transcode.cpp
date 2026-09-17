@@ -10,6 +10,7 @@
 //    oracle over the independently decoded weights on sampled rows.
 
 #include "artifact/transcode.h"
+#include "core/weight_view.h"
 #include "ninfer/ops/linear.h"
 #include "ops/op_check.h"
 #include "ops/op_tester.h"
@@ -34,32 +35,31 @@ namespace {
 using ninfer::DType;
 using ninfer::QType;
 using ninfer::Tensor;
-using ninfer::artifact::DeviceTranscode;
 namespace qw     = ninfer::test::quantized_weight;
 namespace oracle = ninfer::test::small_t_oracle;
 
 struct Codec {
-    DeviceTranscode transcode;
     QType qtype;
-    ninfer::artifact::NumericFormat format;
     const char* name;
 };
 
 constexpr std::array<Codec, 2> kCodecs{{
-    {DeviceTranscode::W8G32ToQ4G64, QType::Q4G64_F16S, ninfer::artifact::NumericFormat::Q4G64_F16S,
-     "Q4G64"},
-    {DeviceTranscode::W8G32ToQ6G64, QType::Q6G64_F16S, ninfer::artifact::NumericFormat::Q6G64_F16S,
-     "Q6G64"},
+    {QType::Q4_G64_FP16, "Q4G64"},
+    {QType::Q6_G64_FP16, "Q6G64"},
 }};
+
+ninfer::WeightGeometry target_geometry(const Codec& codec, std::span<const std::uint64_t> shape) {
+    return ninfer::weight_geometry(codec.qtype, ninfer::QuantLayout::RowSplit, shape);
+}
 
 std::vector<std::byte> transcode(const Codec& codec, const qw::PackedWeight& source,
                                  std::int32_t rows, std::int32_t columns) {
     const std::array<std::uint64_t, 2> shape{static_cast<std::uint64_t>(rows),
                                              static_cast<std::uint64_t>(columns)};
-    const auto geometry = ninfer::artifact::row_split_geometry(codec.format, shape);
-    std::vector<std::byte> out(geometry.encoded_bytes);
+    const auto geometry = target_geometry(codec, shape);
+    std::vector<std::byte> out(geometry.bytes);
     ninfer::artifact::transcode_row_split(
-        codec.transcode, shape,
+        codec.qtype, shape,
         std::span<const std::byte>(reinterpret_cast<const std::byte*>(source.payload.data()),
                                    source.payload.size()),
         out);
@@ -171,7 +171,7 @@ int test_codec_layout() {
     for (const auto& [rows, columns] :
          std::array<std::pair<std::int32_t, std::int32_t>, 4>{{{257, 5120}, {64, 2048}, {96, 512}, {33, 100}}}) {
         const qw::PackedWeight source =
-            qw::pack_w8g32_row_split(random_matrix(rows, columns, 0x51ULL + columns), rows, columns);
+            qw::pack_q8_g32_row_split(random_matrix(rows, columns, 0x51ULL + columns), rows, columns);
         for (const Codec& codec : kCodecs) {
             const std::string label = std::string(codec.name) + " [" + std::to_string(rows) + "," +
                                       std::to_string(columns) + "]";
@@ -197,11 +197,11 @@ int test_routed_head(const Codec& codec) {
     options.row_split_codes = qw::RowSplitCodePattern::Hashed;
     options.row_split_scale = qw::RowSplitScalePattern::Small;
     const qw::PackedWeight source =
-        qw::make_patterned_weight(QType::W8G32_F16S, kRows, kColumns, 0x1a4dU, options);
+        qw::make_patterned_weight(QType::Q8_G32_FP16, kRows, kColumns, 0x1a4dU, options);
     const std::vector<std::byte> encoded = transcode(codec, source, kRows, kColumns);
 
     const std::array<std::uint64_t, 2> shape{kRows, kColumns};
-    const auto geometry = ninfer::artifact::row_split_geometry(codec.format, shape);
+    const auto geometry = target_geometry(codec, shape);
     ninfer::test::GuardedDeviceBuffer device(encoded.size());
     device.copy_from_host(encoded.data(), encoded.size());
     ninfer::Weight weight{};
@@ -210,11 +210,11 @@ int test_routed_head(const Codec& codec) {
     weight.layout           = ninfer::QuantLayout::RowSplit;
     weight.scale_dtype      = DType::FP16;
     weight.payload          = base;
-    weight.payload_bytes    = geometry.encoded_bytes;
-    weight.high_plane_bytes = geometry.high_plane_bytes;
+    weight.payload_bytes    = geometry.bytes;
+    weight.high_plane_bytes = geometry.high_bytes;
     weight.qdata            = base;
-    weight.qhigh  = geometry.high_plane_bytes == 0 ? nullptr : base + geometry.high_plane_offset;
-    weight.scales = base + geometry.scale_plane_offset;
+    weight.qhigh  = geometry.high_bytes == 0 ? nullptr : base + geometry.high_offset;
+    weight.scales = base + geometry.scale_offset;
     weight.group_size      = 64;
     weight.group           = 64;
     weight.ndim            = 2;
