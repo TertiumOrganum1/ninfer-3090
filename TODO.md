@@ -101,10 +101,58 @@ what it says about kernels and measurements still holds except where this sectio
       24 and 32 and won wherever it was offered, and staging (`ActiveOnly` / `RuntimeActive` /
       `PaddedZero`) was only sampled. Three shapes still show their shipped route beating every
       swept candidate at T=17..24, which is the signature of a rung the sweep did not offer.
-- [ ] **No end-to-end performance measurement has been taken since the catch-up.** The decode,
-      prefill and serving figures throughout this file and in `docs/performance.md` were measured on
-      the pre-merge tree. The catch-up was verified functionally only (full suite plus real-model
-      and CLI checks on both 27B artifacts and the 35B-A3B).
+- [x] **End to end, the catch-up plus this retune is a wash on the published workloads -- no
+      regression from the merge, and no visible gain from the retune.** Pre-merge tip `42a24f21`
+      (reading the v2 artifacts) against the retuned branch (reading the v3 ones, identical weight
+      bytes), interleaved by `tools/bench/run_interleaved_ab.py` with the arm order swapped every
+      repetition, paired medians of 4 repetitions, `ninfer_bench -pg 2048,128 -r 2 --warmup 1
+      --kv-dtype int8 --max-ctx 4096`. Post-merge relative to pre-merge:
+
+      | configuration | median | min..max | positive |
+      |---|---:|---|---:|
+      | 27B plain decode | -0.05% | -0.66%..+0.72% | 2/4 |
+      | 27B MTP3 decode | +0.25% | +0.12%..+0.95% | 4/4 |
+      | 27B DFlash2 k=3 decode | +0.16% | -0.08%..+0.25% | 3/4 |
+      | 27B DFlash2 k=4 decode | +0.03% | -0.09%..+0.11% | 2/4 |
+      | 35B-A3B plain decode | +0.22% | -0.87%..+0.24% | 3/4 |
+      | 27B prefill (pp2048) | -0.14% | -0.58%..+0.25% | 2/4 |
+      | 35B-A3B prefill (pp2048) | +0.95% | -0.21%..+1.63% | 3/4 |
+
+      Every one of those is inside this box's own 3-5% between-process spread. **The merge cost
+      nothing measurable** -- which is the question that mattered, since the catch-up replaced a
+      great many kernels.
+- [x] **Quality is unchanged, to the digits the docs publish.** `ninfer-perplexity` on the quick
+      corpus (`ninfer-ppl-1m-v1`, 4,096/2,048 context/stride, INT8 KV, 261,167 tokens over 124
+      windows), both arms, 27B DFlash2:
+
+      | domain | pre-merge (v2) | post-merge + retune (v3) |
+      |---|---:|---:|
+      | chinese_reference | 5.003578 | 5.003578 |
+      | english_long_form | 6.892655 | 6.892655 |
+      | english_reference | 6.191690 | 6.191690 |
+      | ninfer_code | 1.652672 | 1.652672 |
+      | **overall** | **4.342425** | **4.342425** |
+
+      Identical in every domain, and `docs/performance.md` publishes 4.342425 for exactly this
+      configuration. The catch-up replaced a great many kernels and this retune moved thirty-odd
+      route bands; neither changed a digit.
+
+- [ ] **Why the retune does not show here, and what would show it.** `ops::linear` is not on the
+      27B or 35B hot path at these shapes. The dense FFN calls it **only on the MTP branch**
+      (`src/models/qwen3_5/execution/ffn.cpp`); the main path uses fused `linear_swiglu` and
+      `linear_add`, whose tables the catch-up left at this fork's own sm_86 values. What plain
+      `linear` does carry at decode is the vocabulary head (`248320x5120`), which is deliberately
+      outside this sweep, and the Vision `1152`-family, which is not exercised by these runs. So
+      the 1.2-3.8x the sweep measured is real at the widths it measured and simply is not reached
+      by `-pg 2048,128` on either model.
+
+      Three things would make it visible, in increasing order of effort: a **DFlash2 run at a
+      larger draft count or a serving cohort**, where the Q4 draft head (`131072x5120`) leaves the
+      capacity ladder and enters the 12..64 band that was 1.7-3.8x wrong; an **MTP configuration**,
+      which is the one path that routes the dense FFN through plain `linear`; and the **35B-A3B
+      prefill**, the only figure above that is positive at all (+0.95%) and the one whose shapes
+      (`2048x16384`, `5120x25600`, `5120x10240`) this sweep moved most. None of these has been
+      measured yet; the first is cheap and is the obvious next step.
 - [ ] **Re-measure the RTX 3090 context-cost presets.** They were re-keyed to v3 prefill signatures
       without re-running `ninfer_context_cost_bench`; the coefficients are the 2026-09-14 fits. The
       27B signatures are the ones this box reports for the upgraded artifacts, so a converted-from-
