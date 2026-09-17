@@ -9,8 +9,6 @@ namespace {
 // n6144_k5120.cu), so these add no compiled instance.
 using MmaR32C32 = Q4RowSplitMmaGemmSchedule<32, 32, 64, 16, 16, 3, 2, Q4FragmentPipeline::Serial,
                                             Cache::cg, Cache::cg, Q4ScaleLoad::Pair32>;
-using MmaR32C32Wide = Q4RowSplitMmaGemmSchedule<32, 32, 64, 16, 8, 4, 2, Q4FragmentPipeline::Serial,
-                                                Cache::cg, Cache::cg, Q4ScaleLoad::Pair32>;
 using MmaR32C64 = Q4RowSplitMmaGemmSchedule<32, 64, 64, 16, 32, 2, 2, Q4FragmentPipeline::Serial,
                                             Cache::cg, Cache::cg, Q4ScaleLoad::Pair32>;
 using MmaR64C64 = Q4RowSplitMmaGemmSchedule<64, 64, 64, 32, 16, 2, 2, Q4FragmentPipeline::Serial,
@@ -18,22 +16,33 @@ using MmaR64C64 = Q4RowSplitMmaGemmSchedule<64, 64, 64, 32, 16, 2, 2, Q4Fragment
 
 } // namespace
 
+// Re-measured on sm_86 2026-09-17 with bench/ops/linear_schedule_bench.cu (`q4:7168x5120`), cold,
+// median of 11 and confirmed at median of 25. This shape carried the most detailed 5090 table of
+// the group and almost none of it holds here; the 129..192 and 321..384 bands are the exceptions
+// and are kept unchanged. Measured (us, new vs the route that shipped):
+//
+//   T=1    ksplit4 31.7 vs gemv 37.9      (+19%)
+//   T=12   ksplit24 48.1 vs ksplit16 79.9 (+66%),  T=16 55.3 vs 74.8 (+35%)
+//   T=40   r32_c64 148.5 vs r32_c32w 196.6 (+32%), T=64 149.5 vs 193.5 (+29%)
+//   T=80   r64_c80 177.2 vs r32_c32 280.6 (+58%),  T=96 r64_c96 198.7 vs 272.4 (+37%)
+//   T=112  r64_c112 205.8 vs r32_c64 313.3 (+52%), T=128 r64_c64 210.9 vs r64_c48 318.5 (+51%)
+//   T=224  r64_c112 353.3 vs r64_c96 499.7 (+41%), T=256 r64_c128 387.1 vs 511.0 (+32%)
+//   T=320  r64_c64 482.3 vs r64_c128 615.4 (+28%), T=512 r64_c128 684.0 vs r64_c96 896.0 (+31%)
+//
+// The 25..32 move from the eight-warp 32x32 tile to the four-warp one is the one entry here below
+// the 10% bar this sweep used (93.2 vs 98.3, +5.5%); it is taken because it also merges a band.
 Q4Launch select_q4_n7168_k5120(std::int32_t tokens) {
-    if (tokens == 1) return launch_q4_gemv_r1_q8_direct;
     if (tokens <= 8) return launch_q4_ksplit<7168, 5120, 8>;
-    if (tokens <= 16) return launch_q4_ksplit<7168, 5120, 16>;
     if (tokens <= 24) return launch_q4_ksplit<7168, 5120, 24>;
-    if (tokens <= 64) return launch_q4_mma<MmaR32C32Wide>;
-    if (tokens <= 96) return launch_q4_mma<MmaR32C32>;
-    if (tokens <= 112) return launch_q4_mma<MmaR32C64>;
-    if (tokens <= 128) return launch_q4_mma_r64_c48;
-    // Measured windows above the hot interval: the 512 anchor and the tile-count bands around it
-    // prefer r64_c96, and the 129..192 and 385..448 bands prefer the 64x64 tile.
+    if (tokens <= 32) return launch_q4_mma<MmaR32C32>;
+    if (tokens <= 64) return launch_q4_mma<MmaR32C64>;
+    if (tokens <= 80) return launch_q4_mma_r64_c80;
+    if (tokens <= 96) return launch_q4_mma_r64_c96;
+    if (tokens <= 112) return launch_q4_mma_r64_c112;
     if (tokens <= 192) return launch_q4_mma<MmaR64C64>;
-    if (tokens <= 288) return launch_q4_mma_r64_c96;
-    if (tokens <= 384) return launch_q4_mma_r64_c128;
-    if (tokens <= 448) return launch_q4_mma<MmaR64C64>;
-    if (tokens <= 576) return launch_q4_mma_r64_c96;
+    if (tokens <= 224) return launch_q4_mma_r64_c112;
+    if (tokens <= 256) return launch_q4_mma_r64_c128;
+    if (tokens <= 320) return launch_q4_mma<MmaR64C64>;
     return launch_q4_mma_r64_c128;
 }
 
