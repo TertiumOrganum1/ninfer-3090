@@ -26,12 +26,15 @@ struct TextPrefillRoots {
     Tensor rope_positions;
     Tensor residual;
     Tensor scatter_indices;
+    // Overlay Vision residency only: the chunk's visual columns staged from the pinned item
+    // embeddings, plus the following column that a shifted MTP input may name.
+    Tensor visual_embeddings;
 };
 
 template <class Allocator>
 TextPrefillRoots text_prefill_roots(Allocator& allocator, const TextConfig& config,
                                     std::int32_t tokens, std::int32_t rope_axes,
-                                    std::int32_t scatter_tokens) {
+                                    std::int32_t scatter_tokens, bool overlay_staging = false) {
     TextPrefillRoots out;
     out.ids       = vector(allocator, DType::I32, tokens);
     out.positions = vector(allocator, DType::I32, tokens);
@@ -39,6 +42,10 @@ TextPrefillRoots text_prefill_roots(Allocator& allocator, const TextConfig& conf
     out.residual = matrix(allocator, DType::BF16, dimension(config.hidden_size), tokens);
     if (scatter_tokens != 0) {
         out.scatter_indices = vector(allocator, DType::I32, scatter_tokens);
+        if (overlay_staging) {
+            out.visual_embeddings =
+                matrix(allocator, DType::BF16, dimension(config.hidden_size), scatter_tokens + 1);
+        }
     }
     return out;
 }

@@ -344,11 +344,24 @@ ProgramImpl::reserve_materialization(AdmissionCandidate&& plan, PreparedPromptDa
             if (!workspace_plan.vision) {
                 throw std::logic_error("Vision prefill has no startup workspace plan");
             }
-            request.prefill->vision = std::make_unique<execution::VisionPrefillSession>(
-                device, parameters,
-                DeviceSpan{workspace_storage.base(), workspace_storage.capacity()},
-                *workspace_plan.vision, request.prefill->prompt, *request.prefill->vision_plan,
-                vision_handoff_peak_bytes);
+            if (vision_broker) {
+                request.prefill->vision = std::make_unique<execution::VisionPrefillSession>(
+                    device, parameters, *workspace_plan.vision, request.prefill->prompt,
+                    *request.prefill->vision_plan, vision_handoff_peak_bytes, *vision_broker,
+                    vision_results->acquire(),
+                    DeviceSpan{static_cast<std::byte*>(workspace_storage.base()) +
+                                   workspace_plan.vision_bridge_offset,
+                               workspace_plan.vision_bridge_bytes});
+                // Start the first item now so its window overlaps the decode rounds that run
+                // before this lane gets a prefill unit.
+                request.prefill->vision->submit_next_item();
+            } else {
+                request.prefill->vision = std::make_unique<execution::VisionPrefillSession>(
+                    device, parameters,
+                    DeviceSpan{workspace_storage.base(), workspace_storage.capacity()},
+                    *workspace_plan.vision, request.prefill->prompt, *request.prefill->vision_plan,
+                    vision_handoff_peak_bytes);
+            }
         }
         request.prefill->elapsed_seconds =
             std::chrono::duration<double>(Clock::now() - host_started).count();
@@ -2215,6 +2228,18 @@ void ProgramImpl::finalize_context_transaction() noexcept {
 
 bool ProgramImpl::has_context_transaction() const noexcept {
     return !std::holds_alternative<std::monostate>(context_transaction_);
+}
+
+bool ProgramImpl::vision_pending(SequenceHandle sequence) const noexcept {
+    if (!valid_sequence(sequence)) { return false; }
+    const RequestControl& request = requests[ContractAccess::lane(sequence).value];
+    if (!request.prefill || !request.prefill->vision) { return false; }
+    try {
+        return request.prefill->vision->vision_pending();
+    } catch (...) {
+        // A failed completion query surfaces when the prefill unit synchronizes the item.
+        return false;
+    }
 }
 
 

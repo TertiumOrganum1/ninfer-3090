@@ -131,7 +131,7 @@ void mtp_bridge_multimodal(PrefillContext& state, const PreparedPromptData& prom
             throw std::logic_error("visual MTP bridge does not match Vision scatter metadata");
         }
         visual_embedding =
-            chunk.embeddings.slice(1, static_cast<std::int32_t>(column - scatter.begin()), 1);
+            vision.bridge_column(chunk, static_cast<std::int32_t>(column - scatter.begin()));
         composed_embedding = &visual_embedding;
     }
 
@@ -1079,7 +1079,10 @@ runtime::PrefillStepResult ProgramImpl::advance_prefill(SequenceState& sequence,
                     if (!workspace_plan.vision) {
                         throw std::logic_error("active Vision prefill lost its workspace plan");
                     }
-                    mark_workspace_usage(workspace_plan.vision->capacity_bytes);
+                    // An overlay window borrows its encode workspace outside this allocation.
+                    if (workspace_plan.vision_resident) {
+                        mark_workspace_usage(workspace_plan.vision->capacity_bytes);
+                    }
                     result = execution::prefill_multimodal_chunk(schedule_state, staged.prompt,
                                                                  *staged.vision, remaining,
                                                                  split_frontier, final_candidate);
@@ -1212,6 +1215,16 @@ runtime::PrefillStepResult ProgramImpl::advance_prefill(SequenceState& sequence,
         sequence.tail_hidden_valid      = true;
         request.timings.vision_seconds  = vision_seconds;
         request.timings.prefill_seconds = std::max(0.0, staged.elapsed_seconds - vision_seconds);
+        if (staged.vision) {
+            const execution::VisionOverlayWindowStats overlay = staged.vision->overlay_stats();
+            request.timings.overlay_windows           = overlay.windows;
+            request.timings.overlay_exclusive_windows = overlay.exclusive_windows;
+            request.timings.overlay_window_seconds    = overlay.window_seconds;
+            request.timings.overlay_evict_seconds     = overlay.evict_seconds;
+            request.timings.overlay_restore_seconds   = overlay.restore_seconds;
+            request.timings.overlay_evicted_bytes     = overlay.evicted_bytes;
+            request.timings.overlay_staged_bytes      = overlay.staged_bytes;
+        }
         staged.prompt.release_all_media_payloads();
         if (staged.vision) { staged.vision->retire_handoff(); }
 

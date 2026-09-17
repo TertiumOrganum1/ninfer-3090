@@ -2566,8 +2566,9 @@ detail::PhysicalResources ProgramImpl::admission_capacity() const noexcept {
             {
                 .active_lanes     = max_concurrency,
                 .state_slots      = static_cast<std::uint32_t>(state_images->slot_count()),
-                .main_kv_pages    = decoder->text_kv.page_pool().capacity_pages(),
-                .backend_kv_pages = backend != nullptr ? backend->page_pool().capacity_pages() : 0U,
+                // Pages lent to an overlay Vision window leave admission capacity until returned.
+                .main_kv_pages    = decoder->text_kv.page_pool().usable_pages(),
+                .backend_kv_pages = backend != nullptr ? backend->page_pool().usable_pages() : 0U,
             },
         .host =
             {

@@ -2,9 +2,25 @@
 
 namespace ninfer::models::qwen3_5::loading {
 
-VisionWeights bind_vision(Bindings& b, const VisionConfig& config, const TextConfig& target) {
+VisionWeights bind_vision(Bindings& bindings, const VisionConfig& config,
+                          const TextConfig& target, artifact::Residency residency) {
     const auto h            = config.hidden_size;
     const auto intermediate = config.intermediate_size;
+    // Every Vision parameter shares one residency; binding order defines the pinned groups.
+    struct {
+        Bindings& bindings;
+        artifact::Residency residency;
+
+        WeightId parameter(std::string name, artifact::Shape shape,
+                           std::vector<std::string> inputs) const {
+            return bindings.parameter(std::move(name), std::move(shape), std::move(inputs), {},
+                                      residency);
+        }
+
+        WeightId direct(std::string name, artifact::Shape shape) const {
+            return bindings.direct(std::move(name), std::move(shape), QType::BF16, residency);
+        }
+    } const b{bindings, residency};
     VisionWeights out;
     out.patch_embedding =
         b.parameter("vision/patch_embedding", {h, config.patch_width()}, {"vision/patch_input"});

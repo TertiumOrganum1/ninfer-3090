@@ -172,6 +172,8 @@ ConstructedModel construct_model(const EngineOptions& options, DeviceContext& de
     auto instance = std::make_unique<ModelInstance>(std::move(model), options);
     frontend.complete();
     StartupPhaseScope planning(options.startup_observer, StartupPhase::TargetFinalize);
+    const std::size_t overlay_window_bytes =
+        models::qwen3_5::prepare_vision_overlay(instance->parameters, device, options);
     const auto signature = models::qwen3_5::prefill_signature(*instance->model);
     auto context_cost    = resolve_context_machine_cost(
         {.hardware_class =
@@ -211,6 +213,8 @@ ConstructedModel construct_model(const EngineOptions& options, DeviceContext& de
     summary.artifact_bytes_read  = stats.read_bytes;
     summary.host_to_device_bytes = stats.h2d_bytes;
     summary.peak_staging_bytes   = stats.peak_staging_bytes;
+    summary.pinned_weight_bytes  = stats.pinned_bytes;
+    summary.overlay_window_bytes = overlay_window_bytes;
     summary.device_object_count  = stats.device_object_count;
     summary.host_object_count    = stats.host_object_count;
     summary.context_cost         = std::move(context_cost.summary);

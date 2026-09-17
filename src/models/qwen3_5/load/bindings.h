@@ -26,9 +26,11 @@ public:
 
     [[nodiscard]] WeightId parameter(std::string name, artifact::Shape shape,
                                      std::vector<std::string> inputs   = {},
-                                     std::optional<QType> exact_format = {});
+                                     std::optional<QType> exact_format = {},
+                                     artifact::Residency residency = artifact::Residency::Device);
     [[nodiscard]] WeightId direct(std::string name, artifact::Shape shape,
-                                  QType format = QType::BF16);
+                                  QType format                  = QType::BF16,
+                                  artifact::Residency residency = artifact::Residency::Device);
 
     [[nodiscard]] const PendingWeight& at(WeightId id) const { return weights.at(id.index); }
 
@@ -38,6 +40,8 @@ public:
     // (see artifact/transcode.h). Returns false, leaving the objects alone, when they already
     // store `target`; throws std::invalid_argument when they are not transcodable Q8.
     bool transcode(WeightId id, QType target, std::string_view option);
+    // Places every stored object behind a device parameter in the evictable device tail.
+    void evict(WeightId id, std::uint32_t rank);
 
     artifact::Binder& binder;
     std::vector<PendingWeight> weights;
@@ -55,8 +59,10 @@ private:
                                       const std::string& prefix, MixerKind mixer);
 [[nodiscard]] TextWeights bind_text(Bindings& bindings, const TextConfig& config,
                                     const LoadOptions& options);
+// Pinned residency keeps the tower in the page-locked Host block, one contiguous group per stage
+// (patch/position embedding, each layer, merger) in binding order.
 [[nodiscard]] VisionWeights bind_vision(Bindings& bindings, const VisionConfig& config,
-                                        const TextConfig& target);
+                                        const TextConfig& target, artifact::Residency residency);
 [[nodiscard]] MtpWeights bind_mtp(Bindings& bindings, const TextConfig& config,
                                   const TextWeights& target);
 [[nodiscard]] DraftWeights bind_draft(Bindings& bindings, const DraftConfig& config,
@@ -71,6 +77,14 @@ void bind_dflash2(Bindings& bindings, DraftWeights& weights, const DraftConfig& 
 // the load-time transcodes on the selected parameters.
 void apply_storage_trades(Bindings& bindings, const Config& config, const ModelWeights& weights,
                           const LoadOptions& options);
+// --vision-residency overlay: rank the device weights an exclusive Vision window may borrow.
+// `mtp_parameters` is the half-open WeightId index range registered by bind_mtp.
+void apply_vision_overlay_placement(Bindings& bindings, const ModelWeights& weights,
+                                    std::pair<std::size_t, std::size_t> mtp_parameters);
+// Byte ranges of the Vision groups inside the materialized pinned block.
+[[nodiscard]] VisionOverlayLayout vision_overlay_layout(const VisionWeights& weights,
+                                                        std::span<const BoundWeight> bound,
+                                                        std::span<const std::byte> pinned_block);
 [[nodiscard]] std::vector<BoundWeight>
 resolve_weights(std::vector<PendingWeight>&& pending,
                 const artifact::MaterializedArtifact& materialized);

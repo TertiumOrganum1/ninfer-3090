@@ -266,6 +266,19 @@ PersistentLayout persistent_layout(const SequencePlanImpl& plan) {
     out.bytes = builder.finish(kArenaAlign, "persistent layout");
     out.kv_payload_bytes =
         out.decoder.kv_payload_bytes() + (out.dflash ? out.dflash->kv_payload_bytes() : 0);
+    const auto plane_end = [](const qwen3_5::PagedKVCacheLayout& cache) {
+        std::size_t end = 0;
+        if (cache.pages.spec.geometry.device_plane_order != PagedKVPlaneOrder::PageMajor) {
+            return end;
+        }
+        for (const DeviceKVPlaneLayout& plane : cache.pages.planes) {
+            end = std::max(end, plane.storage.region.offset + plane.storage.region.bytes);
+        }
+        return end;
+    };
+    out.lendable_kv_end_bytes =
+        std::max(plane_end(out.decoder.text_kv),
+                 out.decoder.mtp_kv ? plane_end(*out.decoder.mtp_kv) : std::size_t{0});
     return out;
 }
 
@@ -295,7 +308,8 @@ WorkspacePlan build_workspace_plan(const SequencePlanImpl& plan) {
 
     const auto text_common_root = [&](WorkspaceLayoutBuilder& layout, std::int32_t tokens) {
         (void)workspace::text_prefill_roots(layout, config, tokens, plan.features.vision ? 3 : 0,
-                                            plan.features.vision ? tokens : 0);
+                                            plan.features.vision ? tokens : 0,
+                                            plan.features.overlay_vision());
     };
     const auto linear_scratch = [&](WorkspaceLayoutBuilder& layout,
                                     const execution::LinearParameters& p, int first, int last) {
@@ -721,12 +735,23 @@ WorkspacePlan build_workspace_plan(const SequencePlanImpl& plan) {
                   out.dflash_context, out.dflash_round, out.causal_score});
     out.capacity = out.general_capacity;
     if (plan.features.vision) {
-        const std::uint32_t merged = static_cast<std::uint32_t>(std::min<std::uint64_t>(
-            {plan.capacity, kMaximumVisionItemTokens,
-             std::max<std::uint32_t>(1, plan.features.vision_max_merged_tokens)}));
-        out.vision = execution::VisionContext::plan_workspace(
-            *parameters.model.config().vision, *parameters.vision, merged, out.general_capacity);
-        out.capacity = std::max(out.capacity, out.vision->capacity_bytes);
+        const std::uint32_t merged = vision_item_token_bound(plan.capacity, plan.features);
+        if (plan.features.overlay_vision()) {
+            out.vision_resident      = false;
+            out.vision               = execution::plan_vision_window_workspace(parameters, merged);
+            out.vision_bridge_offset = checked_add(out.general_capacity, 255, "bridge offset") &
+                                       ~std::size_t{255};
+            out.vision_bridge_bytes =
+                checked_mul(static_cast<std::size_t>(out.vision->output_hidden), 2, "bridge column");
+            out.capacity = std::max(out.capacity, checked_add(out.vision_bridge_offset,
+                                                              out.vision_bridge_bytes,
+                                                              "bridge column extent"));
+        } else {
+            out.vision = execution::VisionContext::plan_workspace(
+                *parameters.model.config().vision, *parameters.vision, merged,
+                out.general_capacity);
+            out.capacity = std::max(out.capacity, out.vision->capacity_bytes);
+        }
     }
     return out;
 }
@@ -895,6 +920,12 @@ std::unique_ptr<SequencePlanImpl> build_sequence_candidate(const SequencePlannin
 }
 
 } // namespace
+
+std::uint32_t vision_item_token_bound(std::uint32_t capacity, const models::LoadOptions& features) {
+    return static_cast<std::uint32_t>(std::min<std::uint64_t>(
+        {capacity, kMaximumVisionItemTokens,
+         std::max<std::uint32_t>(1, features.vision_max_merged_tokens)}));
+}
 
 std::unique_ptr<qwen3_5::detail::SequencePlannerImpl>
 make_sequence_planner_impl(const execution::Parameters& parameters, DeviceContext& device,

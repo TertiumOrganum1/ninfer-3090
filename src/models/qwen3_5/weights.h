@@ -36,6 +36,23 @@ struct BoundWeight {
     std::vector<WeightUse> uses;
 };
 
+// Byte extent inside the pinned Host weight block.
+struct PinnedRange {
+    std::size_t offset = 0;
+    std::size_t bytes  = 0;
+};
+
+// Overlay Vision residency: the pinned groups a window stages through borrowed device memory. Each
+// range covers exactly its group's parents; staging_bytes is the prelude, the merger and two layer
+// slots of slot_bytes, each 256-aligned.
+struct VisionOverlayLayout {
+    PinnedRange prelude; // patch embedding, its bias, position embedding
+    std::vector<PinnedRange> layers;
+    PinnedRange merger; // merger norm, fc1, fc2 and biases
+    std::size_t slot_bytes    = 0;
+    std::size_t staging_bytes = 0;
+};
+
 struct AttentionWeights {
     WeightId query, key, gate, value;
     WeightId query_norm, key_norm, output;

@@ -878,6 +878,9 @@ public:
     progress_context_transaction(runtime::CancellationFlagView cancellation);
     void finalize_context_transaction() noexcept;
     [[nodiscard]] bool has_context_transaction() const noexcept;
+    // True while the sequence's next media item is still encoding in a concurrent overlay Vision
+    // window; the Engine gives that lane no prefill unit until it completes.
+    [[nodiscard]] bool vision_pending(SequenceHandle sequence) const noexcept;
     [[nodiscard]] PrefillProgress
     advance_prefill(SequenceHandle sequence, runtime::ExecutionTiming* failed_timing = nullptr);
     [[nodiscard]] CaptureAssessment
@@ -1098,6 +1101,14 @@ struct RuntimeContractAccess {
 [[nodiscard]] SequencePlanner make_sequence_planner(const execution::Parameters& parameters,
                                                     DeviceContext& device,
                                                     const EngineOptions& options);
+
+// Overlay Vision residency: sizes one encode window for these options, checks that the evictable
+// weight tail covers it and captures the weight pool's window mirror. Call once after load and
+// before sequence planning, so the pinned mirror is already charged when KV capacity resolves.
+// Returns the window capacity in bytes, or zero under resident residency.
+[[nodiscard]] std::size_t prepare_vision_overlay(const execution::Parameters& parameters,
+                                                 DeviceContext& device,
+                                                 const EngineOptions& options);
 
 [[nodiscard]] std::unique_ptr<Program> create_program(const execution::Parameters& parameters,
                                                       SequencePlan&& plan, DeviceContext& device,

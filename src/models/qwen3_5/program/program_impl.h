@@ -498,6 +498,9 @@ public:
     progress_context_transaction(runtime::CancellationFlagView cancellation);
     void finalize_context_transaction() noexcept;
     [[nodiscard]] bool has_context_transaction() const noexcept;
+    // True while this sequence waits for a media item submitted to a concurrent overlay window:
+    // the lane must not be given a prefill unit, and every other lane keeps running.
+    [[nodiscard]] bool vision_pending(SequenceHandle sequence) const noexcept;
     [[nodiscard]] PrefillProgress advance_prefill(SequenceHandle sequence,
                                                   runtime::ExecutionTiming* failed_timing);
     [[nodiscard]] CaptureAssessment
@@ -588,6 +591,9 @@ public:
     const std::size_t graph_allowance_bytes;
     const WorkspacePlan workspace_plan;
 
+    // Overlay Vision residency only: the persistent arena is VMM-backed so free KV granules can be
+    // lent to a Vision window. Null otherwise, where `persistent` owns a plain allocation.
+    std::unique_ptr<EvictableKVPool> kv_arena;
     DeviceArena persistent;
     DeviceArena workspace_storage;
     WorkspaceArena work;
@@ -617,6 +623,10 @@ public:
     std::vector<SharedPrefixState> shared_prefix_states;
     std::vector<SharedPrefixSlot> shared_prefix_slots;
     std::array<std::uint32_t, kMaximumConcurrency> active_continuations{};
+    // Overlay Vision residency only: the one-window broker and the per-lane pinned result slots.
+    // Declared before `requests`, whose Vision sessions borrow both.
+    std::optional<execution::VisionResidencyBroker> vision_broker;
+    std::optional<execution::PinnedResultPool> vision_results;
     std::array<RequestControl, kMaximumConcurrency> requests;
     std::array<std::uint64_t, kMaximumConcurrency> lane_epochs{};
 

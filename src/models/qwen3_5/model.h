@@ -8,6 +8,7 @@
 #include "ninfer/ops/weight_input.h"
 
 #include <memory>
+#include <optional>
 #include <span>
 #include <string>
 
@@ -51,11 +52,27 @@ public:
         return backing_.stats();
     }
 
+    // Overlay Vision residency only: the pinned tower groups, the pinned block that holds them and
+    // the eviction pool behind the weight arena. The pool is shared mutable device state; its
+    // single window is arbitrated by the one Program that executes this Model.
+    [[nodiscard]] const std::optional<VisionOverlayLayout>& vision_overlay() const noexcept {
+        return vision_overlay_;
+    }
+
+    [[nodiscard]] std::span<const std::byte> pinned_weights() const noexcept {
+        return backing_.pinned_block();
+    }
+
+    [[nodiscard]] EvictableWeightPool* weight_pool() const noexcept {
+        return backing_.weight_pool();
+    }
+
 private:
     friend std::unique_ptr<Model> materialize_model(LoadPlan&&, DeviceContext&,
                                                     const StartupObserver*);
     Model(Config config, LoadOptions options, ModelWeights weights, std::vector<BoundWeight> bound,
-          FrontendResources resources, InstanceInfo info, artifact::MaterializedArtifact backing);
+          FrontendResources resources, InstanceInfo info, artifact::MaterializedArtifact backing,
+          std::optional<VisionOverlayLayout> vision_overlay);
 
     // Destroy all borrowers before backing. The caller keeps DeviceContext alive through cleanup.
     artifact::MaterializedArtifact backing_;
@@ -65,6 +82,7 @@ private:
     std::vector<BoundWeight> bound_;
     FrontendResources resources_;
     InstanceInfo info_;
+    std::optional<VisionOverlayLayout> vision_overlay_;
 };
 
 } // namespace ninfer::models::qwen3_5

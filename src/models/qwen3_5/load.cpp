@@ -1,8 +1,10 @@
 #include "models/qwen3_5/load.h"
 
 #include "artifact/reader.h"
+#include "core/evictable_weight_pool.h"
 #include "models/qwen3_5/load/bindings.h"
 
+#include <stdexcept>
 #include <utility>
 
 namespace ninfer::models::qwen3_5 {
@@ -50,11 +52,19 @@ LoadPlan plan_load(const artifact::Reader& reader, LoadOptions options) {
     loading::Bindings bindings(binder);
     const auto& text  = out->config.text;
     out->weights.text = loading::bind_text(bindings, text, options);
-    if (out->config.vision) {
-        out->weights.vision = loading::bind_vision(bindings, *out->config.vision, text);
+    if (options.overlay_vision() && !out->config.vision) {
+        throw std::invalid_argument("--vision-residency overlay requires a Vision artifact");
     }
+    if (out->config.vision) {
+        out->weights.vision = loading::bind_vision(
+            bindings, *out->config.vision, text,
+            options.overlay_vision() ? artifact::Residency::Pinned : artifact::Residency::Device);
+    }
+    std::pair<std::size_t, std::size_t> mtp_parameters{bindings.weights.size(),
+                                                       bindings.weights.size()};
     if (out->config.mtp) {
-        out->weights.mtp = loading::bind_mtp(bindings, text, out->weights.text);
+        out->weights.mtp      = loading::bind_mtp(bindings, text, out->weights.text);
+        mtp_parameters.second = bindings.weights.size();
     }
     if (out->config.draft) {
         out->weights.draft =
@@ -80,6 +90,9 @@ LoadPlan plan_load(const artifact::Reader& reader, LoadOptions options) {
         if (out->weights.draft) { out->weights.draft->output_head = out->weights.proposal->head; }
     }
     loading::apply_storage_trades(bindings, out->config, out->weights, options);
+    if (options.overlay_vision()) {
+        loading::apply_vision_overlay_placement(bindings, out->weights, mtp_parameters);
+    }
     out->weights.text.output_head_use =
         bindings.use(out->weights.text.output_head, "text/final_hidden");
     if (out->weights.mtp) {
@@ -92,7 +105,8 @@ LoadPlan plan_load(const artifact::Reader& reader, LoadOptions options) {
                          std::string(options.speculative_component()) + "/final_hidden");
     }
     out->pending         = std::move(bindings.weights);
-    out->materialization = std::move(binder).finish();
+    out->materialization = std::move(binder).finish(
+        options.overlay_vision() ? EvictableWeightPool::kChunkBytes : 1);
     out->info.name       = reader.directory().metadata.value(
         "name", std::string(architecture_name(text.architecture)));
     out->info.metadata_json   = reader.directory().metadata.dump();
@@ -104,13 +118,40 @@ LoadPlan plan_load(const artifact::Reader& reader, LoadOptions options) {
 std::unique_ptr<Model> materialize_model(LoadPlan&& plan, DeviceContext& device,
                                          const StartupObserver* observer) {
     if (!plan.impl_) { throw artifact::ArtifactError("load plan was already consumed"); }
-    auto data    = std::move(plan.impl_);
+    auto data = std::move(plan.impl_);
+    std::unique_ptr<EvictableWeightPool> pool;
+    if (data->options.overlay_vision()) {
+        // The tail is sized against the encode window once execution planning knows it; the
+        // pool's mirror is captured then (see Model::weight_pool).
+        const auto& materialization = data->materialization;
+        if (materialization.evictable_tail_bytes == 0 || materialization.pinned_objects.empty()) {
+            throw std::logic_error("overlay Vision load plan has no evictable tail or pinned tower");
+        }
+        if (!EvictableWeightPool::supported(device)) {
+            throw std::invalid_argument(
+                "--vision-residency overlay requires CUDA virtual memory management support");
+        }
+        pool = std::make_unique<EvictableWeightPool>(
+            device, EvictableWeightPool::Config{
+                        .arena_bytes =
+                            static_cast<std::size_t>(materialization.device_capacity_bytes),
+                        .evictable_tail_bytes =
+                            static_cast<std::size_t>(materialization.evictable_tail_bytes),
+                    });
+    }
     auto backing = artifact::materialize(*data->materialization.source,
-                                         std::move(data->materialization), device, observer);
+                                         std::move(data->materialization), device, observer,
+                                         std::move(pool));
     auto bound   = loading::resolve_weights(std::move(data->pending), backing);
+    std::optional<VisionOverlayLayout> vision_overlay;
+    if (data->options.overlay_vision()) {
+        vision_overlay =
+            loading::vision_overlay_layout(*data->weights.vision, bound, backing.pinned_block());
+    }
     return std::unique_ptr<Model>(new Model(
         std::move(data->config), data->options, std::move(data->weights), std::move(bound),
-        std::move(data->resources), std::move(data->info), std::move(backing)));
+        std::move(data->resources), std::move(data->info), std::move(backing),
+        std::move(vision_overlay)));
 }
 
 std::unique_ptr<Model> load_model(const std::filesystem::path& path, LoadOptions options,

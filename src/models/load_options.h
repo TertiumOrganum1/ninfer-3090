@@ -28,11 +28,19 @@ struct LoadOptions {
     // Largest merged-token count one media item may occupy; larger media is downscaled at
     // preprocessing, and the Vision workspace is planned for this bound.
     std::uint32_t vision_max_merged_tokens = 16384;
+    // Overlay keeps the Vision tower in pinned Host memory and places the output head, token
+    // embedding, proposal head and MTP layer in an evictable device tail that one encode window
+    // may borrow. Resident whenever Vision is disabled.
+    VisionResidency vision_residency = VisionResidency::Resident;
 
     bool operator==(const LoadOptions&) const = default;
 
     [[nodiscard]] bool speculative_enabled() const noexcept {
         return speculative != SpeculativeBackend::None;
+    }
+
+    [[nodiscard]] bool overlay_vision() const noexcept {
+        return vision && vision_residency == VisionResidency::Overlay;
     }
 
     [[nodiscard]] bool mtp() const noexcept { return speculative == SpeculativeBackend::Mtp; }
@@ -81,7 +89,9 @@ struct LoadOptions {
             .mtp_experts_q4 = options.mtp_experts_q4,
             .mlp_a8_decode  = options.mlp_a8_decode,
             .gdn_state_fp16 = options.gdn_state_fp16,
-            .vision_max_merged_tokens = options.vision_max_merged_tokens};
+            .vision_max_merged_tokens = options.vision_max_merged_tokens,
+            .vision_residency         = options.enable_vision ? options.vision_residency
+                                                              : VisionResidency::Resident};
 }
 
 } // namespace ninfer::models

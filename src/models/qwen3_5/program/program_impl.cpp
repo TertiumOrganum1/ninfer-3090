@@ -2,6 +2,7 @@
 #include "models/qwen3_5/program/context_work.h"
 #include "models/qwen3_5/program/context.h"
 #include "models/qwen3_5/execution/linear.h"
+#include "core/evictable_kv_pool.h"
 #include "core/host_kv_clamp.h"
 #include "core/startup.h"
 #include "core/device.h"
@@ -37,6 +38,33 @@ std::uint32_t normalized_private_capacity(const ContextCacheOptions& options) {
     return *options.max_private_continuations;
 }
 
+// Overlay Vision residency backs the persistent arena with virtual memory so free KV granules can
+// fund a Vision window. The lendable prefix ends past the last page-major KV plane.
+std::unique_ptr<EvictableKVPool> make_kv_arena(DeviceContext& device,
+                                               const execution::Parameters& parameters,
+                                               const SequencePlanImpl& plan) {
+    if (!plan.features.overlay_vision()) { return nullptr; }
+    const EvictableWeightPool* const pool = parameters.model.weight_pool();
+    if (pool == nullptr || !pool->mirror_captured()) {
+        throw std::logic_error("overlay Vision weight pool has no captured window");
+    }
+    const std::size_t window      = pool->window_capacity_bytes();
+    const std::size_t granularity = EvictableKVPool::device_granularity(device);
+    if (window == 0 || granularity == 0 || plan.persistent.lendable_kv_end_bytes == 0) {
+        return nullptr;
+    }
+    // A KV cache smaller than one window can never fund a concurrent encode. The Engine still runs:
+    // every window then borrows the weight tail.
+    const std::size_t lendable = plan.persistent.lendable_kv_end_bytes / granularity * granularity;
+    if (window > lendable) { return nullptr; }
+    return std::make_unique<EvictableKVPool>(
+        device, EvictableKVPool::Config{
+                    .arena_bytes           = plan.persistent.bytes,
+                    .lendable_prefix_bytes = plan.persistent.lendable_kv_end_bytes,
+                    .window_capacity_bytes = window,
+                });
+}
+
 } // namespace
 
 ProgramImpl::ProgramImpl(const execution::Parameters& parameters_in, const SequencePlanImpl& plan,
@@ -52,7 +80,9 @@ ProgramImpl::ProgramImpl(const execution::Parameters& parameters_in, const Seque
       use_cuda_graph(plan.use_cuda_graph), causal_scoring(plan.causal_scoring),
       kv_payload_bytes(plan.persistent.kv_payload_bytes),
       graph_allowance_bytes(plan.graph_allowance_bytes), workspace_plan(plan.workspace),
-      persistent(plan.persistent.bytes), workspace_storage(plan.workspace.capacity),
+      kv_arena(make_kv_arena(device_in, parameters_in, plan)),
+      persistent(kv_arena ? DeviceArena(kv_arena->arena()) : DeviceArena(plan.persistent.bytes)),
+      workspace_storage(plan.workspace.capacity),
       work(DeviceSpan{workspace_storage.base(), plan.workspace.general_capacity}),
       continuation_states(continuation_capacity), continuation_slots(continuation_capacity),
       shared_prefix_states(shared_prefix_capacity), shared_prefix_slots(shared_prefix_capacity),
@@ -85,9 +115,21 @@ ProgramImpl::ProgramImpl(const execution::Parameters& parameters_in, const Seque
         workspace_plan.vision.has_value() != vision_enabled ||
         causal_scoring != plan.persistent.score_hidden.has_value() ||
         causal_scoring != (workspace_plan.causal_score != 0) ||
-        (workspace_plan.vision &&
+        workspace_plan.vision_resident == plan.features.overlay_vision() ||
+        (workspace_plan.vision && workspace_plan.vision_resident &&
          workspace_plan.vision->general_capacity_bytes != workspace_plan.general_capacity)) {
         throw std::invalid_argument("Qwen3.5 workspace plan does not match startup features");
+    }
+    if (plan.features.overlay_vision()) {
+        EvictableWeightPool* const pool = parameters.model.weight_pool();
+        if (pool == nullptr || !parameters.model.vision_overlay() || !workspace_plan.vision ||
+            workspace_plan.vision_bridge_bytes == 0 ||
+            workspace_plan.vision_bridge_offset + workspace_plan.vision_bridge_bytes >
+                workspace_storage.capacity()) {
+            throw std::invalid_argument("overlay Vision assets are incomplete");
+        }
+        vision_broker.emplace(device, *pool);
+        vision_results.emplace(max_concurrency, workspace_plan.vision->handoff_capacity_bytes);
     }
     const DeviceSpan backing = persistent.alloc_bytes(plan.persistent.bytes, 256);
     if (!plan.context_cache.max_private_continuations || !plan.context_cache.max_shared_prefixes) {
@@ -126,6 +168,15 @@ ProgramImpl::ProgramImpl(const execution::Parameters& parameters_in, const Seque
     text_kv_addresses = std::make_unique<KVAddressSpaceStore>(
         *text_kv_pages, decoder->text_kv.execution_tables(), address_capacity,
         decoder->text_kv.execution_tables().logical_page_capacity());
+    if (vision_broker && kv_arena) {
+        // A loan changes the admission capacity, so it may not race a sealed plan: refuse one while
+        // a context transaction or a pressure-planning session is in flight, and advance the
+        // resource revision whenever the capacity moves.
+        vision_broker->enable_kv_tier(
+            *kv_arena, decoder->text_kv.page_pool(),
+            [this] { return !has_context_transaction() && !pressure_planning_active_; },
+            [this] { advance_resource_revision(); });
+    }
     state_images =
         std::make_unique<qwen3_5::StateImageDevicePool>(backing, plan.persistent.state_images);
     if (plan.context_cache.host_state_slots != 0) {
@@ -597,7 +648,15 @@ MemorySummary ProgramImpl::memory_summary() const noexcept {
             .handoff_capacity_bytes = workspace_plan.vision->handoff_capacity_bytes,
             .handoff_active_bytes   = active_handoff_bytes,
             .handoff_peak_bytes     = vision_handoff_peak_bytes,
+            .residency              = workspace_plan.vision_resident ? VisionResidency::Resident
+                                                                     : VisionResidency::Overlay,
         };
+        if (const EvictableWeightPool* const pool = parameters.model.weight_pool();
+            !workspace_plan.vision_resident && pool != nullptr) {
+            out.vision_workspace->window_capacity_bytes = pool->window_capacity_bytes();
+            out.vision_workspace->pinned_weight_bytes   = parameters.model.pinned_weights().size();
+            out.vision_workspace->mirror_bytes          = pool->mirror_bytes();
+        }
     }
     out.workspace_logical_peak_bytes = workspace_logical_peak_bytes;
     out.cuda_graph_allowance_bytes   = graph_allowance_bytes;
