@@ -135,8 +135,21 @@ bool MaterializedArtifact::has_device(ObjectHandle handle) const noexcept {
     return handle.index < objects_.size() && objects_[handle.index].device.has_value();
 }
 
+const WeightParent& MaterializedArtifact::pinned_parent(ObjectHandle handle) const {
+    if (handle.index >= objects_.size() || !objects_[handle.index].pinned) {
+        throw ArtifactError("object has no pinned Host weight backing");
+    }
+    return *objects_[handle.index].pinned;
+}
+
+std::span<const std::byte> MaterializedArtifact::pinned_block() const noexcept {
+    if (!pinned_) { return {}; }
+    return {static_cast<const std::byte*>(pinned_->data()), pinned_->size()};
+}
+
 MaterializedArtifact materialize(const Reader& reader, MaterializationPlan&& plan,
-                                 DeviceContext& device, const StartupObserver* startup_observer) {
+                                 DeviceContext& device, const StartupObserver* startup_observer,
+                                 std::unique_ptr<EvictableWeightPool> backing) {
     if (plan.source != &reader || plan.object_count != reader.directory().objects.size()) {
         throw ArtifactError("materialization plan belongs to another load session");
     }
@@ -159,9 +172,52 @@ MaterializedArtifact materialize(const Reader& reader, MaterializationPlan&& pla
     if (plan.device_capacity_bytes > std::numeric_limits<std::size_t>::max()) {
         throw ArtifactError("device backing exceeds size_t");
     }
-    if (plan.device_capacity_bytes) {
+    if (backing) {
+        if (backing->arena().bytes < plan.device_capacity_bytes) {
+            throw ArtifactError("eviction pool arena is smaller than the materialization plan");
+        }
+        out.pool_  = std::move(backing);
+        out.arena_ = std::make_unique<DeviceArena>(out.pool_->arena());
+    } else if (plan.device_capacity_bytes) {
         out.arena_ =
             std::make_unique<DeviceArena>(static_cast<std::size_t>(plan.device_capacity_bytes));
+    }
+    // Plan offsets are authoritative: an evictable tail starts at an aligned boundary that a bump
+    // allocator would not reproduce. The arena accounts the whole planned extent.
+    if (out.arena_ && plan.device_capacity_bytes) {
+        (void)out.arena_->alloc_bytes(static_cast<std::size_t>(plan.device_capacity_bytes), 1);
+    }
+    if (plan.pinned_capacity_bytes > std::numeric_limits<std::size_t>::max()) {
+        throw ArtifactError("pinned Host backing exceeds size_t");
+    }
+    if (!plan.pinned_objects.empty()) {
+        out.pinned_ = std::make_unique<PinnedHostBuffer>(
+            static_cast<std::size_t>(plan.pinned_capacity_bytes));
+        auto* const block          = static_cast<std::byte*>(out.pinned_->data());
+        std::uint64_t previous_end = 0;
+        for (const auto& placement : plan.pinned_objects) {
+            reader.validate_object(placement.object);
+            const auto& geometry = reader.geometry(placement.object);
+            auto& storage        = out.objects_.at(placement.object.index);
+            if (storage.pinned || geometry.bytes != placement.bytes ||
+                placement.offset < previous_end || placement.alignment == 0 ||
+                placement.offset % placement.alignment != 0 ||
+                placement.offset > plan.pinned_capacity_bytes ||
+                placement.bytes > plan.pinned_capacity_bytes - placement.offset) {
+                throw ArtifactError("invalid or duplicate pinned Host placement");
+            }
+            previous_end = placement.offset + placement.bytes;
+            const std::span<std::byte> destination(block + placement.offset,
+                                                   static_cast<std::size_t>(placement.bytes));
+            reader.read_into(reader.directory().tensor(placement.object).offset, destination);
+            out.stats_.read_bytes =
+                checked_add(out.stats_.read_bytes, placement.bytes, "pinned read bytes");
+            const auto divisor =
+                read_divisor(reader, placement.object, geometry, destination, out.stats_);
+            storage.pinned = WeightParent{geometry, destination.data(), divisor};
+        }
+        out.stats_.pinned_bytes        = plan.pinned_capacity_bytes;
+        out.stats_.pinned_object_count = plan.pinned_objects.size();
     }
     for (auto& placement : plan.host_objects) {
         reader.validate_object(placement.object);
@@ -188,6 +244,7 @@ MaterializedArtifact materialize(const Reader& reader, MaterializationPlan&& pla
     }
     std::vector<CopyRange> ranges;
     std::vector<const DevicePlacement*> transcoded;
+    std::uint64_t previous_device_end = 0;
     for (const auto& placement : plan.device_objects) {
         const auto& stored_geometry = reader.geometry(placement.object);
         const auto geometry =
@@ -200,13 +257,15 @@ MaterializedArtifact materialize(const Reader& reader, MaterializationPlan&& pla
             (placement.transcode && object.host)) {
             throw ArtifactError("invalid or duplicate device placement");
         }
-        auto storage      = out.arena_->alloc_bytes(static_cast<std::size_t>(placement.bytes),
-                                                    static_cast<std::size_t>(placement.alignment));
-        const auto offset = static_cast<std::uint64_t>(static_cast<std::byte*>(storage.data) -
-                                                       static_cast<std::byte*>(out.arena_->base()));
-        if (offset != placement.offset) {
+        if (placement.offset < previous_device_end || placement.alignment == 0 ||
+            placement.offset % placement.alignment != 0 ||
+            placement.offset > plan.device_capacity_bytes ||
+            placement.bytes > plan.device_capacity_bytes - placement.offset) {
             throw ArtifactError("device offset differs from materialization plan");
         }
+        previous_device_end = placement.offset + placement.bytes;
+        const DeviceSpan storage{static_cast<std::byte*>(out.arena_->base()) + placement.offset,
+                                 static_cast<std::size_t>(placement.bytes)};
         const auto divisor = object.host
                                  ? object.host->weight_scale_divisor
                                  : read_divisor(reader, placement.object, geometry, {}, out.stats_);

@@ -23,9 +23,8 @@ public:
     static constexpr std::size_t kChunkBytes = 16ULL * 1024ULL * 1024ULL;
 
     struct Config {
-        std::size_t arena_bytes           = 0; // weights arena capacity
-        std::size_t evictable_tail_bytes  = 0; // arena suffix holding evict-ranked tensors
-        std::size_t window_capacity_bytes = 0; // largest extent one transaction may borrow
+        std::size_t arena_bytes          = 0; // weights arena capacity
+        std::size_t evictable_tail_bytes = 0; // arena suffix holding evict-ranked tensors
     };
 
     struct TransactionStats {
@@ -75,15 +74,18 @@ public:
     // Stable home mapping backing the weights arena for the process lifetime.
     [[nodiscard]] DeviceSpan arena() const noexcept;
     [[nodiscard]] std::size_t evictable_tail_bytes() const noexcept;
+    // Both zero until capture_window_mirror.
     [[nodiscard]] std::size_t window_capacity_bytes() const noexcept;
     [[nodiscard]] std::size_t mirror_bytes() const noexcept;
     [[nodiscard]] bool mirror_captured() const noexcept;
     [[nodiscard]] bool transaction_open() const noexcept;
     [[nodiscard]] bool poisoned() const noexcept;
 
-    // Pins a copy of every tail byte a window can dirty. Call exactly once after the weights
-    // landed and the upload stream drained.
-    void capture_window_mirror(cudaStream_t stream);
+    // Fixes the largest extent one transaction may borrow (rounded up to whole chunks), reserves
+    // its overlay range and pins a copy of every tail byte such a window can dirty. Call exactly
+    // once after the weights landed; the window is sized from execution planning, which needs the
+    // loaded weights. Rejects a window wider than the evictable tail.
+    void capture_window_mirror(std::size_t window_capacity_bytes, cudaStream_t stream);
 
     // Borrows ceil(bytes / kChunkBytes) chunks from the arena end, mapped contiguously at the
     // overlay range. Rejects requests beyond the window capacity and nested transactions.

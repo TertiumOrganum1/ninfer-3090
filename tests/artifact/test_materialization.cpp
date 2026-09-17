@@ -2,6 +2,7 @@
 #include "artifact/fixture.h"
 #include "artifact/views.h"
 #include "core/device.h"
+#include "core/evictable_weight_pool.h"
 
 #include <cuda_runtime.h>
 
@@ -9,7 +10,9 @@
 #include <cstring>
 #include <iostream>
 #include <map>
+#include <memory>
 #include <optional>
+#include <vector>
 
 namespace ninfer::test {
 void materialization_cuda_errors(DeviceContext& device);
@@ -69,6 +72,94 @@ void materialization(DeviceContext& device) {
     std::array<std::byte, 1> code{};
     CUDA_CHECK(cudaMemcpy(code.data(), native.qdata, 1, cudaMemcpyDeviceToHost));
     require(code[0] == std::byte{0x52}, "native row pointer addressed a different row");
+}
+
+// Overlay Vision residency plans: an evict-ranked object lands in a chunk-aligned arena tail that
+// an eviction pool can borrow whole, and a pinned object lands in the page-locked block instead of
+// device memory.
+void overlay_placement(DeviceContext& device) {
+    constexpr std::uint64_t kChunk = EvictableWeightPool::kChunkBytes;
+    Fixture fixture;
+    fixture.write(true);
+    {
+        Reader reader(fixture.entry);
+        Binder binder(reader);
+        const auto matrix   = binder.parameter("matrix", {2, 130});
+        const auto divisors = reader.find("divisors");
+        binder.require_device(divisors);
+        binder.evict_device(divisors, 700);
+        const auto plan = std::move(binder).finish(kChunk);
+        require(plan.device_objects.size() == 2 && plan.device_objects.front().offset == 0 &&
+                    plan.evictable_tail_offset == kChunk && plan.evictable_tail_bytes == 8 &&
+                    plan.device_objects.back().offset == kChunk &&
+                    plan.device_capacity_bytes == kChunk + 8,
+                "evict-ranked object was not planned into a chunk-aligned arena tail");
+        if (!EvictableWeightPool::supported(device)) {
+            std::cout << "note: VMM unsupported, overlay transaction not exercised\n";
+        } else {
+            auto pool = std::make_unique<EvictableWeightPool>(
+                device, EvictableWeightPool::Config{
+                            .arena_bytes = static_cast<std::size_t>(plan.device_capacity_bytes),
+                            .evictable_tail_bytes =
+                                static_cast<std::size_t>(plan.evictable_tail_bytes),
+                        });
+            auto backing = materialize(reader, MaterializationPlan(plan), device, nullptr,
+                                       std::move(pool));
+            EvictableWeightPool* const live = backing.weight_pool();
+            require(live != nullptr, "pool-backed materialization dropped its pool");
+            live->capture_window_mirror(kChunk, device.transfer_stream);
+            const std::byte* const resident  = backing.device_parent(reader.find("q5")).data;
+            const std::byte* const evictable = backing.device_parent(divisors).data;
+            std::array<std::byte, 8> before{};
+            CUDA_CHECK(cudaMemcpy(before.data(), evictable, before.size(),
+                                  cudaMemcpyDeviceToHost));
+            {
+                auto transaction = live->evict(kChunk, device.stream);
+                require(transaction.leased().bytes == kChunk,
+                        "overlay window borrowed an unexpected extent");
+                CUDA_CHECK(cudaMemsetAsync(transaction.leased().data, 0x5A, kChunk, device.stream));
+                CUDA_CHECK(cudaStreamSynchronize(device.stream));
+            }
+            require(!live->poisoned(), "closing the overlay window poisoned the pool");
+            require(backing.device_parent(divisors).data == evictable &&
+                        backing.device_parent(reader.find("q5")).data == resident,
+                    "weight addresses moved across an overlay window");
+            std::array<std::byte, 8> after{};
+            CUDA_CHECK(cudaMemcpy(after.data(), evictable, after.size(), cudaMemcpyDeviceToHost));
+            require(after == before, "evict-ranked bytes were not restored from the mirror");
+            std::array<std::byte, 4> head{};
+            CUDA_CHECK(cudaMemcpy(head.data(), resident, head.size(), cudaMemcpyDeviceToHost));
+            require(head[0] == std::byte{0x31}, "a resident object was inside the borrowed chunk");
+            (void)matrix;
+        }
+    }
+    {
+        Reader reader(fixture.entry);
+        Binder binder(reader);
+        const auto row = binder.parameter("row", {1, 130}, Residency::Pinned);
+        const auto plan = std::move(binder).finish();
+        require(plan.device_capacity_bytes == 0 && plan.pinned_objects.size() == 1 &&
+                    plan.pinned_capacity_bytes == 528,
+                "pinned residency did not plan the page-locked block");
+        auto backing = materialize(reader, MaterializationPlan(plan), device);
+        require(backing.stats().pinned_bytes == 528 && backing.pinned_block().size() == 528 &&
+                    !backing.has_device(reader.find("q5")),
+                "pinned object received device backing or was not accounted");
+        const auto view = bind_view(row, backing);
+        require(view.parts.front().parent->data == backing.pinned_block().data(),
+                "pinned view does not address the pinned block");
+        require(std::equal(backing.pinned_block().begin(), backing.pinned_block().end(),
+                           fixture.payload.begin() + 256),
+                "pinned block content differs from the artifact payload");
+    }
+    {
+        Reader reader(fixture.entry);
+        Binder binder(reader);
+        (void)binder.parameter("matrix", {2, 130});
+        binder.require_pinned(reader.find("q5"));
+        rejects([&] { (void)std::move(binder).finish(); },
+                "an object with both device and pinned placement was accepted");
+    }
 }
 
 void failure_and_host_only(DeviceContext& device) {
@@ -229,6 +320,7 @@ int main(int argc, char** argv) {
         }
         materialization(device);
         failure_and_host_only(device);
+        overlay_placement(device);
 #if defined(NINFER_TEST_LINK_WRAP)
         ninfer::test::materialization_cuda_errors(device);
 #else

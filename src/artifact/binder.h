@@ -10,7 +10,9 @@
 
 namespace ninfer::artifact {
 
-enum class Residency { Device, Host, Values };
+// Pinned: the object lives only in one page-locked Host block laid out by the plan (for weights
+// streamed to the device on demand); it never receives a device placement.
+enum class Residency { Device, Host, Values, Pinned };
 
 struct ParameterReference {
     std::string name;
@@ -50,10 +52,19 @@ public:
     // object must already have a device demand and be a row-split Q8_G32_FP16 tensor, and every
     // consumer must accept the target format; a repeated request must name the same target.
     void transcode_device(ObjectHandle object, QType target);
+    // Moves a device object into the arena's evictable tail. Ranked objects follow every resident
+    // object; ascending rank places the highest rank at the arena end, which an eviction pool
+    // borrows first. A repeated request keeps the highest rank.
+    void evict_device(ObjectHandle object, std::uint32_t rank);
+    // Places an object in the pinned Host block, in first-request order so a caller's logical
+    // groups stay contiguous. It excludes device and Host placements of the same object.
+    void require_pinned(ObjectHandle object);
     [[nodiscard]] std::span<const std::byte> host_object(ObjectHandle object);
     [[nodiscard]] ObjectHandle resource(std::string_view component, std::string_view role);
     [[nodiscard]] HostValues values(const Binding& binding, std::optional<QType> format = {});
-    [[nodiscard]] MaterializationPlan finish() &&;
+    // evictable_alignment aligns the start of the evictable tail (an eviction pool's chunk size)
+    // so borrowing whole chunks never touches a resident object.
+    [[nodiscard]] MaterializationPlan finish(std::uint64_t evictable_alignment = 1) &&;
 
 private:
     struct Demand {
@@ -61,6 +72,8 @@ private:
         bool host               = false;
         std::uint64_t alignment = 256;
         std::optional<QType> transcode;
+        std::uint32_t evict_rank = 0;
+        std::optional<std::uint64_t> pinned_order;
         std::vector<std::byte> host_data;
     };
 
@@ -68,6 +81,7 @@ private:
     std::vector<Demand> demands_;
     std::uint64_t read_bytes_        = 0;
     std::uint64_t owned_value_bytes_ = 0;
+    std::uint64_t next_pinned_order_ = 0;
 };
 
 } // namespace ninfer::artifact

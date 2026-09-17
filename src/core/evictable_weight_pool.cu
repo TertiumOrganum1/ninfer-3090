@@ -103,9 +103,6 @@ EvictableWeightPool::EvictableWeightPool(DeviceContext& device, const Config& co
     if (config.evictable_tail_bytes == 0 || config.evictable_tail_bytes > config.arena_bytes) {
         throw std::invalid_argument("evictable pool tail must be a nonempty arena suffix");
     }
-    if (config.window_capacity_bytes == 0) {
-        throw std::invalid_argument("evictable pool window capacity must be positive");
-    }
     ensure_driver_initialized();
     Impl& impl  = *impl_;
     impl.config = config;
@@ -122,18 +119,12 @@ EvictableWeightPool::EvictableWeightPool(DeviceContext& device, const Config& co
 
     impl.arena_reserved = align_up(config.arena_bytes, kChunkBytes);
     // Chunk-align into the evictable suffix so no chunk ever covers a resident object.
-    impl.tail_begin      = align_up(config.arena_bytes - config.evictable_tail_bytes, kChunkBytes);
-    impl.window_reserved = align_up(config.window_capacity_bytes, kChunkBytes);
-    if (impl.window_reserved > impl.arena_reserved - impl.tail_begin) {
-        throw std::invalid_argument("evictable pool window exceeds the evictable tail");
+    impl.tail_begin     = align_up(config.arena_bytes - config.evictable_tail_bytes, kChunkBytes);
+    if (impl.tail_begin >= impl.arena_reserved) {
+        throw std::invalid_argument("evictable pool tail covers no whole chunk");
     }
-    impl.mirror_begin  = impl.arena_reserved - impl.window_reserved;
-    impl.mirror_extent = config.arena_bytes > impl.mirror_begin
-                             ? config.arena_bytes - impl.mirror_begin
-                             : 0;
 
     NINFER_CU_CHECK(cuMemAddressReserve(&impl.home, impl.arena_reserved, kChunkBytes, 0, 0));
-    NINFER_CU_CHECK(cuMemAddressReserve(&impl.overlay, impl.window_reserved, kChunkBytes, 0, 0));
 
     constexpr std::size_t kPrefixPiece = 1024ULL * 1024ULL * 1024ULL;
     std::size_t offset                 = 0;
@@ -171,7 +162,7 @@ EvictableWeightPool::~EvictableWeightPool() {
         (void)cuMemRelease(impl.handles[piece]);
     }
     (void)cuMemAddressFree(impl.home, impl.arena_reserved);
-    (void)cuMemAddressFree(impl.overlay, impl.window_reserved);
+    if (impl.overlay != 0) { (void)cuMemAddressFree(impl.overlay, impl.window_reserved); }
 }
 
 DeviceSpan EvictableWeightPool::arena() const noexcept {
@@ -196,11 +187,24 @@ bool EvictableWeightPool::transaction_open() const noexcept {
 
 bool EvictableWeightPool::poisoned() const noexcept { return impl_->poisoned; }
 
-void EvictableWeightPool::capture_window_mirror(cudaStream_t stream) {
+void EvictableWeightPool::capture_window_mirror(std::size_t window_capacity_bytes,
+                                                cudaStream_t stream) {
     Impl& impl = *impl_;
     if (impl.mirror_captured) {
         throw std::logic_error("evictable pool window mirror was already captured");
     }
+    if (window_capacity_bytes == 0) {
+        throw std::invalid_argument("evictable pool window capacity must be positive");
+    }
+    const std::size_t window = align_up(window_capacity_bytes, kChunkBytes);
+    if (window > impl.arena_reserved - impl.tail_begin) {
+        throw std::invalid_argument("evictable pool window exceeds the evictable tail");
+    }
+    NINFER_CU_CHECK(cuMemAddressReserve(&impl.overlay, window, kChunkBytes, 0, 0));
+    impl.window_reserved = window;
+    impl.mirror_begin    = impl.arena_reserved - window;
+    impl.mirror_extent =
+        impl.config.arena_bytes > impl.mirror_begin ? impl.config.arena_bytes - impl.mirror_begin : 0;
     if (impl.mirror_extent != 0) {
         impl.mirror = std::make_unique<PinnedHostBuffer>(impl.mirror_extent);
         CUDA_CHECK(cudaMemcpyAsync(impl.mirror->data(),

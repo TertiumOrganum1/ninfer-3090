@@ -3,6 +3,7 @@
 #include "artifact/schema.h"
 #include "core/arena.h"
 #include "core/device.h"
+#include "core/evictable_weight_pool.h"
 #include "core/weight_view.h"
 #include "ninfer/types.h"
 
@@ -25,6 +26,14 @@ struct DevicePlacement {
     std::optional<QType> transcode;
 };
 
+// Offset inside the one page-locked Host block (Residency::Pinned).
+struct PinnedPlacement {
+    ObjectHandle object;
+    std::uint64_t offset    = 0;
+    std::uint64_t bytes     = 0;
+    std::uint64_t alignment = 256;
+};
+
 struct HostPlacement {
     ObjectHandle object;
     // Already-read resources move into final storage without invalidating their byte views.
@@ -37,7 +46,13 @@ struct MaterializationPlan {
     std::uint64_t device_capacity_bytes = 0;
     std::uint64_t prior_read_bytes      = 0;
     std::uint64_t owned_value_bytes     = 0;
+    // Evict-ranked objects occupy [evictable_tail_offset, device_capacity_bytes); the offset is
+    // aligned as Binder::finish was asked. Both are zero without ranked objects.
+    std::uint64_t evictable_tail_offset = 0;
+    std::uint64_t evictable_tail_bytes  = 0;
+    std::uint64_t pinned_capacity_bytes = 0;
     std::vector<DevicePlacement> device_objects;
+    std::vector<PinnedPlacement> pinned_objects;
     std::vector<HostPlacement> host_objects;
 };
 
@@ -48,8 +63,10 @@ struct MaterializationStats {
     std::uint64_t device_capacity_bytes = 0;
     std::uint64_t retained_host_bytes   = 0;
     std::uint64_t owned_value_bytes     = 0;
+    std::uint64_t pinned_bytes          = 0; // page-locked Host block (Residency::Pinned)
     std::uint64_t peak_staging_bytes    = 0;
     std::size_t device_object_count     = 0;
+    std::size_t pinned_object_count     = 0;
     std::size_t host_object_count       = 0;
     double upload_seconds               = 0;
 };
@@ -67,26 +84,38 @@ public:
     [[nodiscard]] const WeightParent& host_parent(ObjectHandle handle) const;
     [[nodiscard]] std::span<const std::byte> host_bytes(ObjectHandle handle) const;
     [[nodiscard]] bool has_device(ObjectHandle handle) const noexcept;
+    [[nodiscard]] const WeightParent& pinned_parent(ObjectHandle handle) const;
+    [[nodiscard]] std::span<const std::byte> pinned_block() const noexcept;
+    // Present when the device backing was supplied by an eviction pool.
+    [[nodiscard]] EvictableWeightPool* weight_pool() const noexcept { return pool_.get(); }
 
     [[nodiscard]] const MaterializationStats& stats() const noexcept { return stats_; }
 
 private:
     friend MaterializedArtifact materialize(const Reader&, MaterializationPlan&&, DeviceContext&,
-                                            const StartupObserver*);
+                                            const StartupObserver*,
+                                            std::unique_ptr<EvictableWeightPool>);
 
     struct ObjectStorage {
         std::optional<WeightParent> device;
+        std::optional<WeightParent> pinned;
         std::optional<WeightParent> host;
         std::vector<std::byte> host_data;
     };
 
+    // The pool owns the physical memory behind a pool-backed arena; destroy the arena first.
+    std::unique_ptr<EvictableWeightPool> pool_;
     std::unique_ptr<DeviceArena> arena_;
+    std::unique_ptr<PinnedHostBuffer> pinned_;
     std::vector<ObjectStorage> objects_;
     MaterializationStats stats_;
 };
 
-[[nodiscard]] MaterializedArtifact materialize(const Reader& reader, MaterializationPlan&& plan,
-                                               DeviceContext& device,
-                                               const StartupObserver* startup_observer = nullptr);
+// `backing`, when given, supplies the device arena (its arena must cover the plan) and is owned by
+// the result. Its window mirror is captured later by the owner, once the window is known.
+[[nodiscard]] MaterializedArtifact
+materialize(const Reader& reader, MaterializationPlan&& plan, DeviceContext& device,
+            const StartupObserver* startup_observer      = nullptr,
+            std::unique_ptr<EvictableWeightPool> backing = nullptr);
 
 } // namespace ninfer::artifact

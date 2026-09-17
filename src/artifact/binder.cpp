@@ -57,6 +57,8 @@ ParameterReference Binder::binding(std::string name, const Binding& binding, Sha
         }
         if (residency == Residency::Device) {
             require_device(part.object);
+        } else if (residency == Residency::Pinned) {
+            require_pinned(part.object);
         } else if (residency == Residency::Host) {
             (void)host_object(part.object);
         }
@@ -104,6 +106,23 @@ void Binder::transcode_device(ObjectHandle object, QType target) {
         throw ArtifactError(tensor.id + ": conflicting transcode targets");
     }
     demand.transcode = target;
+}
+
+void Binder::evict_device(ObjectHandle object, std::uint32_t rank) {
+    const auto& tensor = reader_.directory().tensor(object);
+    auto& demand       = demands_.at(object.index);
+    if (!demand.device) {
+        throw ArtifactError(tensor.id + ": an evictable placement requires a device placement");
+    }
+    if (rank == 0) { throw ArtifactError(tensor.id + ": evictable rank must be nonzero"); }
+    demand.evict_rank = std::max(demand.evict_rank, rank);
+}
+
+void Binder::require_pinned(ObjectHandle object) {
+    const auto& geometry = reader_.geometry(object);
+    auto& demand         = demands_.at(object.index);
+    demand.alignment     = std::max(demand.alignment, geometry.alignment);
+    if (!demand.pinned_order) { demand.pinned_order = next_pinned_order_++; }
 }
 
 std::span<const std::byte> Binder::host_object(ObjectHandle object) {
@@ -175,30 +194,69 @@ HostValues Binder::values(const Binding& binding, std::optional<QType> format) {
     return out;
 }
 
-MaterializationPlan Binder::finish() && {
+MaterializationPlan Binder::finish(std::uint64_t evictable_alignment) && {
     MaterializationPlan plan;
     plan.source            = &reader_;
     plan.object_count      = demands_.size();
     plan.prior_read_bytes  = read_bytes_;
     plan.owned_value_bytes = owned_value_bytes_;
+    const auto device_bytes = [&](std::size_t index) {
+        const ObjectHandle handle{index};
+        const auto& demand = demands_[index];
+        return demand.transcode ? weight_geometry(*demand.transcode, QuantLayout::RowSplit,
+                                                  reader_.directory().tensor(handle).shape)
+                                      .bytes
+                                : reader_.geometry(handle).bytes;
+    };
+    const auto place_device = [&](std::size_t index) {
+        const auto& demand = demands_[index];
+        const auto bytes   = device_bytes(index);
+        const auto offset  = align_up(plan.device_capacity_bytes, demand.alignment, "device offset");
+        plan.device_objects.push_back(
+            {ObjectHandle{index}, offset, bytes, demand.alignment, demand.transcode});
+        plan.device_capacity_bytes = checked_add(offset, bytes, "device capacity");
+    };
+    std::vector<std::size_t> evictable;
+    std::vector<std::size_t> pinned;
     for (std::size_t i = 0; i < demands_.size(); ++i) {
-        auto& demand = demands_[i];
-        if (demand.device) {
-            const ObjectHandle handle{i};
-            const auto& geometry = reader_.geometry(handle);
-            const auto bytes =
-                demand.transcode ? weight_geometry(*demand.transcode, QuantLayout::RowSplit,
-                                                   reader_.directory().tensor(handle).shape)
-                                       .bytes
-                                 : geometry.bytes;
-            const auto offset =
-                align_up(plan.device_capacity_bytes, demand.alignment, "device offset");
-            plan.device_objects.push_back(
-                {handle, offset, bytes, demand.alignment, demand.transcode});
-            plan.device_capacity_bytes = checked_add(offset, bytes, "device capacity");
+        const auto& demand = demands_[i];
+        if (demand.pinned_order && (demand.device || demand.host)) {
+            throw ArtifactError(reader_.directory().tensor(ObjectHandle{i}).id +
+                                ": a pinned object cannot also have device or Host placement");
         }
-        if (demand.host) {
-            plan.host_objects.push_back({ObjectHandle{i}, std::move(demand.host_data)});
+        if (demand.pinned_order) { pinned.push_back(i); }
+        if (!demand.device) { continue; }
+        if (demand.evict_rank != 0) {
+            evictable.push_back(i);
+        } else {
+            place_device(i);
+        }
+    }
+    if (!evictable.empty()) {
+        std::stable_sort(evictable.begin(), evictable.end(), [&](std::size_t a, std::size_t b) {
+            return demands_[a].evict_rank < demands_[b].evict_rank;
+        });
+        plan.evictable_tail_offset =
+            align_up(plan.device_capacity_bytes, evictable_alignment, "evictable tail offset");
+        plan.device_capacity_bytes = plan.evictable_tail_offset;
+        for (const std::size_t index : evictable) { place_device(index); }
+        plan.evictable_tail_bytes = plan.device_capacity_bytes - plan.evictable_tail_offset;
+    }
+    std::sort(pinned.begin(), pinned.end(), [&](std::size_t a, std::size_t b) {
+        return *demands_[a].pinned_order < *demands_[b].pinned_order;
+    });
+    for (const std::size_t index : pinned) {
+        const ObjectHandle handle{index};
+        const auto& demand = demands_[index];
+        const auto bytes   = reader_.geometry(handle).bytes;
+        const auto offset =
+            align_up(plan.pinned_capacity_bytes, demand.alignment, "pinned Host offset");
+        plan.pinned_objects.push_back({handle, offset, bytes, demand.alignment});
+        plan.pinned_capacity_bytes = checked_add(offset, bytes, "pinned Host capacity");
+    }
+    for (std::size_t i = 0; i < demands_.size(); ++i) {
+        if (demands_[i].host) {
+            plan.host_objects.push_back({ObjectHandle{i}, std::move(demands_[i].host_data)});
         }
     }
     return plan;
