@@ -153,19 +153,18 @@
           echo "Model ready: $model"
         '';
 
-      # Qwen3.8-27B (official artifact; validated at C1/C2/C4/C8 on RTX 3090), pinned to match
-      # scripts/download-qwen38-27b.{sh,bat}. Those two already pinned this revision in their URL
-      # while this entry tracked main, so the same `nix run` and shell script could fetch different
-      # artifacts -- and neither verified what arrived. 18dfc887 is the revision every published
-      # 27B measurement in this repository was taken against: the local artifact hashes to the
-      # sha256 below, which is also what HuggingFace reports for it.
+      # Qwen3.8-27B (official v3 artifact, with the DFlash2 bundle), pinned to match
+      # scripts/download-qwen38-27b.{sh,bat}. The size and sha256 are what the revision's
+      # artifact-manifest.json states. Published 27B measurements in this repository were taken
+      # against the v2 pin 18dfc887, whose weight bytes the v3 container preserves; a v2 file can
+      # be upgraded locally with tools/upgrade_ninfer_v2_to_v3.py instead of re-downloading.
       download-qwen38-27b = mkDownload {
         name = "download-qwen38-27b";
         filename = "qwen3_8_27b.ninfer";
-        revision = "18dfc887423fa5aabf3cb56fac41490e462b3fab";
-        url = "https://huggingface.co/neroued/Qwen3.8-27B-NInfer/resolve/18dfc887423fa5aabf3cb56fac41490e462b3fab/qwen3_8_27b.ninfer";
-        expectedSize = 18210531328;
-        expectedSha256 = "eec39564993d6e9c7d5e383382a760f093465c9d163ec9a1bd6b80199514bf3e";
+        revision = "1cbd84e7221e51186bd7f093a149912d2489625b";
+        url = "https://huggingface.co/neroued/Qwen3.8-27B-NInfer/resolve/1cbd84e7221e51186bd7f093a149912d2489625b/qwen3_8_27b.ninfer";
+        expectedSize = 20437521664;
+        expectedSha256 = "81f924d440c27261d820c19a9f8d45794c5aee410f8a68bd358133fa8c0375da";
         description = "Qwen3.8-27B NInfer model";
       };
 
@@ -173,26 +172,25 @@
       download-qwen36-27b = mkDownload {
         name = "download-qwen36-27b";
         filename = "qwen3_6_27b.ninfer";
-        revision = "faaa0c140d0a92743872256a8b78a954b3984018";
-        url = "https://huggingface.co/neroued/Qwen3.6-27B-NInfer/resolve/faaa0c140d0a92743872256a8b78a954b3984018/qwen3_6_27b.ninfer";
-        expectedSize = 17495365888;
-        expectedSha256 = "7b51600ffd10632b9660f56085efdd9b751d79733ad32036a652234b64bebe7b";
+        revision = "3e3d9a3951c452c1ca80bd7a2860c7f3bfc5a829";
+        url = "https://huggingface.co/neroued/Qwen3.6-27B-NInfer/resolve/3e3d9a3951c452c1ca80bd7a2860c7f3bfc5a829/qwen3_6_27b.ninfer";
+        expectedSize = 17495538688;
+        expectedSha256 = "9b610a7d051e7c4dbf89adb604bd269d248b643c8f6c7ef75bdb871af92c6f6b";
         description = "Qwen3.6-27B NInfer model";
       };
 
-      # Qwen3.6-35B-A3B, pinned to match scripts/download-qwen36-35b-a3b.sh. 560f227e carries the
-      # DFlash bundle; the older c8b8c1c0 pin predates DFlash, so an artifact fetched with it
-      # cannot run --spec dflash. Its extra 0.38 GiB on disk costs nothing in VRAM unless
-      # --spec dflash is actually selected (byte-identical 21,038,469,632-byte resident weights
-      # otherwise), so the published RTX 3090 concurrency measurements -- taken against
-      # c8b8c1c0 -- still apply. See README.md and docs/rtx-3090-windows.md.
+      # Qwen3.6-35B-A3B (official v3 artifact, with the DFlash bundle), pinned to match
+      # scripts/download-qwen36-35b-a3b.sh. The DFlash bundle costs nothing in VRAM unless
+      # --spec dflash is selected, so the published RTX 3090 concurrency measurements -- taken
+      # against the v2 pins c8b8c1c0/560f227e, whose weight bytes v3 preserves -- still apply.
+      # See README.md and docs/rtx-3090-windows.md.
       download-qwen36-35b = mkDownload {
         name = "download-qwen36-35b";
         filename = "qwen3_6_35b_a3b.ninfer";
-        revision = "560f227e5a7104756d1a108201a8aa75654ea688";
-        url = "https://huggingface.co/neroued/Qwen3.6-35B-A3B-NInfer/resolve/560f227e5a7104756d1a108201a8aa75654ea688/qwen3_6_35b_a3b.ninfer";
-        expectedSize = 22783246080;
-        expectedSha256 = "1fb9ea0b5b8561e49d9604115ec89e5d9f2b6f6434e32c37c57fffd480a325d2";
+        revision = "ee4495803bc4f8015b8a7e22d4cf9b67de8e27c6";
+        url = "https://huggingface.co/neroued/Qwen3.6-35B-A3B-NInfer/resolve/ee4495803bc4f8015b8a7e22d4cf9b67de8e27c6/qwen3_6_35b_a3b.ninfer";
+        expectedSize = 22790484480;
+        expectedSha256 = "3e33297645dc33557751be1a3c407a74ed7c00f34909b5d4e8cfdce91b3dbe84";
         description = "Qwen3.6-35B-A3B (pinned, with DFlash) model";
       };
 

@@ -1,15 +1,13 @@
 @echo off
 setlocal enabledelayedexpansion
 
-rem Revision 560f227e, not c8b8c1c0. The older pin predates the DFlash bundle: its
-rem artifact-manifest.json has no "dflash" source at all, so an artifact fetched with it cannot run
-rem --spec dflash and makes ninfer_qwen3_6_35b_a3b_dflash_load_plan_test skip with "this artifact
-rem carries no DFlash bundle". 560f227e adds it (from z-lab/Qwen3.6-35B-A3B-DFlash) for 0.38 GB
-rem more. If you repin this, check the manifest still lists a dflash source, and update the size
-rem and checksum below along with it.
-set "REVISION=560f227e5a7104756d1a108201a8aa75654ea688"
-set "EXPECTED_SIZE=22783246080"
-set "EXPECTED_SHA256=1fb9ea0b5b8561e49d9604115ec89e5d9f2b6f6434e32c37c57fffd480a325d2"
+rem The official v3 artifact revision. Its artifact-manifest.json lists the text, vision, mtp and
+rem dflash components; the DFlash bundle (from z-lab/Qwen3.6-35B-A3B-DFlash) is what --spec dflash
+rem needs. If you repin this, check the manifest still lists a dflash component, and update the size
+rem and checksum below from it.
+set "REVISION=ee4495803bc4f8015b8a7e22d4cf9b67de8e27c6"
+set "EXPECTED_SIZE=22790484480"
+set "EXPECTED_SHA256=3e33297645dc33557751be1a3c407a74ed7c00f34909b5d4e8cfdce91b3dbe84"
 
 set "ROOT=%~dp0"
 set "MODEL_DIR=%ROOT%models"
@@ -33,6 +31,8 @@ if exist "%MODEL%" (
     exit /b 0
   )
   echo Existing %MODEL% did not verify against revision %REVISION%; fetching the pinned one.
+  echo If it is the v2 file from an earlier release, you can upgrade it instead of downloading:
+  echo   python tools\upgrade_ninfer_v2_to_v3.py "%MODEL%" "%MODEL%.v3" ^&^& move /y "%MODEL%.v3" "%MODEL%"
 )
 
 echo Downloading the RTX 3090-compatible Qwen3.6-35B-A3B vision model (21.2 GiB)...

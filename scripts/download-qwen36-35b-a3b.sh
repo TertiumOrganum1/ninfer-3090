@@ -1,15 +1,13 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Revision 560f227e, not c8b8c1c0. The older pin predates the DFlash bundle: its
-# artifact-manifest.json has no "dflash" source at all, so an artifact fetched with it cannot run
-# --spec dflash and makes ninfer_qwen3_6_35b_a3b_dflash_load_plan_test skip with "this artifact
-# carries no DFlash bundle". 560f227e adds it (from z-lab/Qwen3.6-35B-A3B-DFlash) for 0.38 GB more.
-# If you repin this, check the manifest still lists a dflash source, and update the size and
-# checksum below along with it.
-revision='560f227e5a7104756d1a108201a8aa75654ea688'
-expected_size=22783246080
-expected_sha256='1fb9ea0b5b8561e49d9604115ec89e5d9f2b6f6434e32c37c57fffd480a325d2'
+# The official v3 artifact revision. Its artifact-manifest.json lists the text, vision, mtp and
+# dflash components; the DFlash bundle (from z-lab/Qwen3.6-35B-A3B-DFlash) is what --spec dflash
+# needs. If you repin this, check the manifest still lists a dflash component, and update the size
+# and checksum below from it.
+revision='ee4495803bc4f8015b8a7e22d4cf9b67de8e27c6'
+expected_size=22790484480
+expected_sha256='3e33297645dc33557751be1a3c407a74ed7c00f34909b5d4e8cfdce91b3dbe84'
 
 root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 model_dir="${NINFER_MODEL_DIR:-$root/models}"
@@ -55,6 +53,10 @@ if [ -f "$model" ]; then
     exit 0
   fi
   printf '%s\n' "Existing $model did not verify against revision $revision; fetching the pinned one." >&2
+  # A v2 file from an earlier release does not load any more, but it does not need to be fetched
+  # again either: tools/upgrade_ninfer_v2_to_v3.py rewrites it locally in a couple of minutes.
+  printf '%s\n' "If it is the v2 file from an earlier release, you can upgrade it instead of downloading:" \
+    "  python tools/upgrade_ninfer_v2_to_v3.py $model $model.v3 && mv $model.v3 $model" >&2
 fi
 
 printf '%s\n' 'Downloading the RTX 3090-compatible Qwen3.6-35B-A3B vision model (21.2 GiB)...'

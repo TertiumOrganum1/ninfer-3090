@@ -29,27 +29,27 @@ move:
 ```powershell
 hf download neroued/Qwen3.6-35B-A3B-NInfer `
   qwen3_6_35b_a3b.ninfer `
-  --revision 560f227e5a7104756d1a108201a8aa75654ea688 `
+  --revision ee4495803bc4f8015b8a7e22d4cf9b67de8e27c6 `
   --local-dir models
 
 Get-FileHash .\models\qwen3_6_35b_a3b.ninfer -Algorithm SHA256
 ```
 
 Expected SHA-256:
-`1fb9ea0b5b8561e49d9604115ec89e5d9f2b6f6434e32c37c57fffd480a325d2`.
+`3e33297645dc33557751be1a3c407a74ed7c00f34909b5d4e8cfdce91b3dbe84`.
 
-This is the 21.22 GiB container-v2 artifact, carrying the DFlash bundle needed for `--spec dflash`
-(the older `c8b8c1c0` pin predates it). The v0.5 runtime reader accepts both v1 and v2 containers.
-An error that says only `artifact magic is not NInfer version 1` comes from an older executable;
-replace it with the
-[v0.5.0 Windows release](https://github.com/Don-Chad/ninfer-3090/releases/tag/v0.5.0-rtx3090).
+This is the v3 container artifact, carrying the DFlash bundle needed for `--spec dflash`. The
+runtime reads only v3. A v2 file from an earlier release (for example the `560f227e` pin) is refused
+at load; upgrade it locally instead of downloading again:
 
-**The extra 0.38 GiB costs nothing in VRAM unless you ask for DFlash.** The published RTX 3090
-concurrency measurements were taken against the smaller `c8b8c1c0` artifact, so the obvious worry
-is that this pin eats into the profiles they established. Measured, it does not: loading either
-revision with `--spec` unset reports byte-identical resident weights of **21,038,469,632 bytes**.
-Selecting `--spec dflash` is what maps the additional 410,053,632 bytes, and only then. The
-concurrency table below therefore still applies.
+```powershell
+python tools\upgrade_ninfer_v2_to_v3.py models\qwen3_6_35b_a3b.ninfer models\qwen3_6_35b_a3b.v3.ninfer
+```
+
+**The DFlash bundle costs nothing in VRAM unless you ask for DFlash.** The published RTX 3090
+concurrency measurements were taken against the smaller v2 `c8b8c1c0` artifact; loading with
+`--spec` unset binds the same resident weights, and only `--spec dflash` maps the additional
+bundle. The concurrency table below therefore still applies.
 
 ## Run the concurrent server
 
@@ -69,8 +69,8 @@ Prefix reuse is enabled by default; `--no-prefix-reuse` disables it. The server 
 Responses, OpenAI Chat Completions, and Anthropic Messages-compatible endpoints. Run
 `.\ninfer-serve.exe --help` for the complete option list.
 
-`--spec dflash` needs the pinned `560f227e` artifact above. On the older compact `c8b8c1c0` one it
-is refused explicitly, with `DFlash was requested but this compact artifact has no DFlash weights`.
+`--spec dflash` needs an artifact with the DFlash bundle, such as the pinned v3 artifact above;
+without it startup refuses the selection explicitly.
 
 ## Qwen3.8-27B C8/8K profile
 

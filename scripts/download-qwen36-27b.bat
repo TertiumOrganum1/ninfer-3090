@@ -5,9 +5,9 @@ rem The Qwen3.6 27B groupwise-int artifact, target_key qwen3_6_27b. This is a di
 rem family from qwen3_8_27b, which is why having the latter does not satisfy the former: four
 rem real-model tests -- ninfer_qwen3_6_27b_prefix_real_test, _score_real_test, _load_plan_test and
 rem the Qwen3.6 27B half of the engine suite -- skip without it.
-set "REVISION=faaa0c140d0a92743872256a8b78a954b3984018"
-set "EXPECTED_SIZE=17495365888"
-set "EXPECTED_SHA256=7b51600ffd10632b9660f56085efdd9b751d79733ad32036a652234b64bebe7b"
+set "REVISION=3e3d9a3951c452c1ca80bd7a2860c7f3bfc5a829"
+set "EXPECTED_SIZE=17495538688"
+set "EXPECTED_SHA256=9b610a7d051e7c4dbf89adb604bd269d248b643c8f6c7ef75bdb871af92c6f6b"
 
 set "ROOT=%~dp0"
 set "MODEL_DIR=%ROOT%models"
@@ -30,6 +30,8 @@ if exist "%MODEL%" (
     exit /b 0
   )
   echo Existing %MODEL% did not verify against revision %REVISION%; fetching the pinned one.
+  echo If it is the v2 file from an earlier release, you can upgrade it instead of downloading:
+  echo   python tools\upgrade_ninfer_v2_to_v3.py "%MODEL%" "%MODEL%.v3" ^&^& move /y "%MODEL%.v3" "%MODEL%"
 )
 
 echo Downloading the Qwen3.6-27B model (16.3 GiB)...
