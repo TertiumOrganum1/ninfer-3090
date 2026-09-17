@@ -63,7 +63,49 @@ constexpr std::array<RouteSpec, 33> kK6144Routes{{
     {2049, kAnyCols, Q8LinearAddScheduleId::MmaR64C128},
 }};
 
-constexpr std::array<RouteSpec, 2> kN5120Routes{{
+// The dense (5120-row) tables. Upstream's was two entries -- K-split capacity to 64 columns, then
+// the grouped split-K for everything above -- where the 2048-row tables above are thirty-three.
+// Re-measured on sm_86 2026-09-17 with bench/ops/dense_linear_add_schedule_bench.cu, cold, median
+// of 11, and the grouped route is roughly **2x slower than a plain MMA tile at every width it
+// covers** on this card (us, chosen route vs what shipped):
+//
+//   k=6144   T=80  r32_c96 128.0 vs 222.2 (+74%)   T=96  139.3 vs 254.0 (+82%)
+//            T=112 r32_c128 152.6 vs 287.7 (+89%)  T=128 ~166 vs 321.5 (+94%)
+//            T=160 r64_c96 215.0 vs 449.5 (+109%)  T=192 206.8 vs 485.4 (+135%)
+//            T=224 r64_c112 262.1 vs 512.0 (+95%)  T=256 r64_c128 263.2 vs 551.9 (+110%)
+//            T=512 516.1 vs 1054.7 (+104%)         T=1024 1013.8 vs 2262.0 (+123%)
+//   k=17408  the same tiles measure 1.6-2.5x but do not pass the Op's oracle at that K; that table
+//            is unchanged and the note on it explains why.
+//
+// The K-split capacity route keeps the narrow end, where it is genuinely the best thing available,
+// but its ceiling is not 64 on this card: at k=6144 a 32x64 tile is already 19-62% faster from 33
+// columns up. The two k therefore get different tables, as the 2048-row side already does.
+//
+// Read the bench's own header before extending this: the decode, exact-T and medium split-K
+// launches are 2048-row kernels and produce a confident 2-8x "win" here by computing 2048 of the
+// 5120 rows. They are not candidates at this shape and are not offered by the bench.
+constexpr std::array<RouteSpec, 7> kN5120K6144Routes{{
+    {1, 32, Q8LinearAddScheduleId::SplitKMmaCapacity},
+    {33, 64, Q8LinearAddScheduleId::MmaR32C64},
+    {65, 96, Q8LinearAddScheduleId::MmaR32C96},
+    {97, 128, Q8LinearAddScheduleId::MmaR32C128},
+    {129, 192, Q8LinearAddScheduleId::MmaR64C96},
+    {193, 224, Q8LinearAddScheduleId::MmaR64C112},
+    {225, kAnyCols, Q8LinearAddScheduleId::MmaR64C128},
+}};
+
+// k=17408 keeps upstream's two-entry table, and the reason is correctness, not speed. Every MMA
+// tile measured 1.6-2.5x faster than the grouped route here, and every one of them is *wrong* at
+// this shape: tests/ops/linear_add/test_q8_a16.cpp reports the same element (index 297, actual
+// -33.25 against reference -33.5091) at every width from 49 up, for C64, C96, C112 and C128 alike,
+// while the identical schedules pass every width at k=6144. One element, wrong identically across
+// four tile shapes and every T, is a systematic defect in the tiled path at K=17408 -- not
+// accumulation noise, and not something a route table may tune around.
+//
+// So the shipped table is right here, for a reason that was not written down: the grouped split-K
+// route is the only correct one at this K. Fixing the tiled path is worth 1.6-2.5x on 65 columns
+// and up, and is the single largest unclaimed win this sweep found; it is written up in TODO.md.
+constexpr std::array<RouteSpec, 2> kN5120K17408Routes{{
     {1, 64, Q8LinearAddScheduleId::SplitKMmaCapacity},
     {65, kAnyCols, Q8LinearAddScheduleId::GroupedSplitK},
 }};
@@ -79,7 +121,8 @@ constexpr bool routes_are_closed(const std::array<RouteSpec, N>& routes) {
 }
 
 static_assert(routes_are_closed(kK4096Routes) && routes_are_closed(kK6144Routes) &&
-                  routes_are_closed(kN5120Routes),
+                  routes_are_closed(kN5120K6144Routes) &&
+                  routes_are_closed(kN5120K17408Routes),
               "Q8 LinearAdd routes must be exact, contiguous, and closed");
 
 std::int32_t schedule_rows(Q8LinearAddScheduleId schedule) {
@@ -223,7 +266,10 @@ Q8LinearAddPlan q8_linear_add_resolve_plan(const Q8LinearAddProblem& problem) {
         }
         throw std::logic_error("q8 linear_add: admitted problem has no covering route");
     };
-    if (problem.rows == 5120) { return resolve_from(kN5120Routes); }
+    if (problem.rows == 5120) {
+        if (problem.k == 6144) { return resolve_from(kN5120K6144Routes); }
+        return resolve_from(kN5120K17408Routes);
+    }
     return problem.k == 6144 ? resolve_from(kK6144Routes) : resolve_from(kK4096Routes);
 }
 

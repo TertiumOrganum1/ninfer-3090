@@ -92,10 +92,14 @@ int q8_a16_conformance() {
     failures += ninfer::test::linear_add::run_shape(
         "Q8_A16 LinearAdd", WeightFormat::Q8G32F16S,
         ShapeCase{2048, 6144, 421U, kK6144RouteStarts, kK6144RouteInteriors});
-    constexpr std::array<std::int32_t, 10> large_route_starts{5,  9,  17, 25, 33,
-                                                              41, 49, 57, 65, 129};
-    constexpr std::array<std::int32_t, 8> large_interiors{1, 4, 8, 96, 128, 512, 1024, 1025};
-    constexpr std::array<std::int32_t, 6> graph_tokens{1, 8, 64, 65, 129, 512};
+    // The dense tables are per-k since the 2026-09-17 sm_86 retune and their starts differ (33 vs
+    // 49), so the union is used for both; a start that is an interior point of the other table is
+    // still a point worth covering.
+    constexpr std::array<std::int32_t, 10> large_route_starts{5,  9,  17,  25,  33,
+                                                              49, 65, 97, 129, 193};
+    constexpr std::array<std::int32_t, 12> large_interiors{1,   4,   8,   32,  48,   64,
+                                                           96,  128, 192, 225, 512, 1024};
+    constexpr std::array<std::int32_t, 6> graph_tokens{1, 8, 64, 65, 129, 225};
     constexpr std::array<std::int32_t, 3> full_tokens{1, 4, 8};
     for (const auto k : {6144, 17408}) {
         failures += ninfer::test::linear_add::run_shape(

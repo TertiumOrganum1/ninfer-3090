@@ -132,14 +132,30 @@ Q4LinearAddLaunch select_q4_linear_add(std::int32_t rows, std::int32_t k, std::i
     if (rows != 5120 || k != 6144 || tokens <= 0) {
         throw std::invalid_argument("q4 linear_add: unsupported shape or token extent");
     }
-    if (tokens == 1) return q4_linear_add_gemv_launch;
+    // Re-measured on sm_86 2026-09-17 with bench/ops/dense_linear_add_schedule_bench.cu (--q4),
+    // cold, median of 11. The narrow end and 33..64 are upstream's and hold here; the 65..192 band
+    // repeats what the plain `linear` sweep found at this same geometry, that the 32-row tiles run
+    // more than a wave behind the 64-row ones as soon as the extent needs a second column tile
+    // (us, new vs shipped):
+    //
+    //   T=1   ksplit4 28.7 vs gemv 33.8 (+18%)
+    //   T=12  ksplit24 50.2 vs ksplit16 71.7 (+43%)   T=16 57.3 vs 63.5 (+11%)
+    //   T=80  r64_c80 144.4 vs r32_c32 205.8 (+43%)   T=72 153.6 vs 205.8 (+34%)
+    //   T=96  r64_c96 160.8 vs r32_c32 194.6 (+21%)
+    //   T=128 r64_c64 182.3 vs r32_c64 321.5 (+76%)   T=112 188.4 vs 322.6 (+71%)
+    //   T=160 r64_c80 218.1 vs r32_c64 330.8 (+52%)   T=192 r64_c96 241.7 vs 329.7 (+36%)
+    //
+    // 25..32 moves to the 32x32 tile for 9%, which is below the 10% bar the rest of this sweep
+    // used; it is taken because it merges a band rather than adding one.
     if (tokens <= 4) return q4_linear_add_ksplit4_launch;
     if (tokens <= 8) return q4_linear_add_ksplit8_launch;
-    if (tokens <= 16) return q4_linear_add_ksplit16_launch;
     if (tokens <= 24) return q4_linear_add_ksplit24_launch;
-    if (tokens <= 32) return q4_linear_add_ksplit32_launch;
-    if (tokens <= 96) return q4_linear_add_mma_r32_c32_launch;
-    if (tokens <= 192) return q4_linear_add_mma_r32_c64_launch;
+    if (tokens <= 64) return q4_linear_add_mma_r32_c32_launch;
+    if (tokens <= 80) return q4_linear_add_mma_r64_c80_launch;
+    if (tokens <= 96) return q4_linear_add_mma_r64_c96_launch;
+    if (tokens <= 128) return q4_linear_add_mma_r64_c64_launch;
+    if (tokens <= 160) return q4_linear_add_mma_r64_c80_launch;
+    if (tokens <= 192) return q4_linear_add_mma_r64_c96_launch;
     return q4_linear_add_mma_r64_c128_launch;
 }
 

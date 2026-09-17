@@ -12,8 +12,14 @@
 // same geometry the plain `linear` Q4 sweep found 1.7x on, using the same 32-row tiles that lost
 // there, so it is the first thing to check.
 //
-// Domains: the Q8 decode kernel is a one-column route and the exact-T split-K is registered
-// through 48 columns; both are capped rather than left to fault.
+// Domains. Only the routes that are actually defined at 5120 rows are offered here. The Q8 decode,
+// exact-T split-K and medium split-K launches are *not*: q8_linear_add_gemm_splitk.cu hardcodes
+// `kRows = 2048`, so at 5120 rows they compute the first 2048 and return, which the timer reads as
+// a 2-8x win. That is the same failure mode schedule_sweep.cuh's header records for column
+// domains, one level up, and the memory floor is what catches it -- a 5120x17408 Q8 weight is
+// 89 MB and cannot be streamed in the 19.5 us those kernels appeared to take. The K-split capacity
+// and grouped routes are 5120-row specific by construction; the MMA tiles take their extents from
+// the tensors and are defined at any registered shape.
 
 #include "ninfer/ops/linear_add.h"
 
@@ -70,10 +76,7 @@ void sweep_q8(std::int32_t hidden, const ninfer::bench::SweepOptions& base) {
     };
 
     std::vector<ninfer::bench::SweepEntry> schedules{
-        {"decode_r16", direct(&detail::q8_linear_add_decode_r16_launch), 1},
-        {"splitk_exact_t", direct(&detail::q8_linear_add_splitk_mma_launch), 48},
         {"splitk_capacity", direct(&detail::q8_linear_add_splitk_capacity_launch), 64},
-        {"medium_splitk", direct(&detail::q8_linear_add_medium_splitk_launch), 0},
         {"grouped_splitk", direct(&detail::q8_linear_add_grouped_launch), 0},
         {"mma_r32_c64", tiled(&detail::q8_linear_add_mma_r32_c64_launch, 64), 0},
         {"mma_r32_c96", tiled(&detail::q8_linear_add_mma_r32_c96_launch, 96), 0},

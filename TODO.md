@@ -67,6 +67,35 @@ what it says about kernels and measurements still holds except where this sectio
       **1.42x at 513 columns** on both k, 1.1-1.2x through 704, and 1.0-1.05x beyond. The two points
       where the composite is 1-2% behind (640 and k=17408's 1152) are inside the spread. This is the
       one inherited table in this pass that measured right as it shipped; do not re-sweep it.
+- [x] **The new dense (5120-row) `linear_add` Q8 and Q4 tables are swept; k=6144 is retuned and
+      k=17408 turns out to be right as it shipped, for a reason nobody had written down.** The Q8
+      table was two entries -- K-split capacity to 64 columns, then the grouped split-K for
+      everything above -- where the same Op's 2048-row tables are thirty-three. At **k=6144** the
+      grouped route is about 2x slower than a plain MMA tile at every width it covers: +74% at
+      T=80, +135% at T=192, +110% at T=256, +123% at T=1024; and the capacity route's ceiling is 32
+      columns, not 64. At **k=17408** the same tiles measure 1.6-2.5x faster and **every one of
+      them is numerically wrong**, so that table is unchanged. The Q4 dense table repeats the
+      plain-`linear` finding at the same geometry -- the 32-row tiles lose 21-76% from 65 columns
+      up, and 9..16 wants the capacity-24 rung (+43% at T=12). `bench/ops/dense_linear_add_schedule_bench.cu`
+      is the sweep.
+- [ ] **Defect: the Q8 `linear_add` tiled path is wrong at K=17408.** `tests/ops/linear_add/test_q8_a16.cpp`
+      reports the same output element (index 297, actual -33.25 against reference -33.5091) at every
+      width from 49 upward, identically for the C64, C96, C112 and C128 tiles, while those same
+      schedules pass every width at k=6144. One element, wrong identically across four tile shapes
+      and every T, is systematic rather than accumulation noise. It had never been seen because the
+      shipped table never routed 5120x17408 to a tile at any width -- the grouped split-K route was
+      covering for it. **This is the largest unclaimed win the whole sweep found: 1.6-2.5x on
+      65 columns and up at the 27B MLP down-projection's Q8 shape.** Start from the fact that
+      k=6144 is clean and 17408 is not; 17408 is 1024*17, so a K loop or scale-plane stride that
+      assumes a power-of-two group count is the first thing to check.
+- [ ] **Trap to know before extending a schedule sweep.** Three Q8 `linear_add` launches -- decode,
+      exact-T split-K, medium split-K -- hardcode `kRows = 2048` (`q8_linear_add_gemm_splitk.cu`),
+      so at 5120 rows they compute the first 2,048 and return. The first dense sweep read that as a
+      2-8x win and it was entirely fictional. What caught it was the memory floor, not the code: a
+      5120x17408 Q8 weight is 89 MB and cannot be streamed in the 19.5 us those kernels appeared to
+      take. `schedule_sweep.cuh` documents the same failure for column domains; this is the
+      shape-domain version, and the bench now excludes them explicitly. **Sanity-check any new
+      schedule-sweep winner against bytes / 854 GB/s before believing it.**
 - [ ] **Not yet swept: the wider Q8 K-split cross product.** The sweep offered each capacity with
       `ca`/`cg` activations, and eight K warps only at capacities 8 and 16. Eight warps also fit at
       24 and 32 and won wherever it was offered, and staging (`ActiveOnly` / `RuntimeActive` /
