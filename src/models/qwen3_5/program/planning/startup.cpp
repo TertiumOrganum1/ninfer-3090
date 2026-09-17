@@ -721,8 +721,9 @@ WorkspacePlan build_workspace_plan(const SequencePlanImpl& plan) {
                   out.dflash_context, out.dflash_round, out.causal_score});
     out.capacity = out.general_capacity;
     if (plan.features.vision) {
-        const std::uint32_t merged = static_cast<std::uint32_t>(
-            std::min<std::uint64_t>(plan.capacity, kMaximumVisionItemTokens));
+        const std::uint32_t merged = static_cast<std::uint32_t>(std::min<std::uint64_t>(
+            {plan.capacity, kMaximumVisionItemTokens,
+             std::max<std::uint32_t>(1, plan.features.vision_max_merged_tokens)}));
         out.vision = execution::VisionContext::plan_workspace(
             *parameters.model.config().vision, *parameters.vision, merged, out.general_capacity);
         out.capacity = std::max(out.capacity, out.vision->capacity_bytes);

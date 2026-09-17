@@ -25,6 +25,9 @@ struct LoadOptions {
     // Free within measurement noise for a ~2% C8 decode gain and a halved per-slot host state
     // image (docs/maintainer/quality-trade-experiments.md).
     bool gdn_state_fp16 = false;
+    // Largest merged-token count one media item may occupy; larger media is downscaled at
+    // preprocessing, and the Vision workspace is planned for this bound.
+    std::uint32_t vision_max_merged_tokens = 16384;
 
     bool operator==(const LoadOptions&) const = default;
 
@@ -77,7 +80,8 @@ struct LoadOptions {
             .embedding_q6   = options.embedding_q6,
             .mtp_experts_q4 = options.mtp_experts_q4,
             .mlp_a8_decode  = options.mlp_a8_decode,
-            .gdn_state_fp16 = options.gdn_state_fp16};
+            .gdn_state_fp16 = options.gdn_state_fp16,
+            .vision_max_merged_tokens = options.vision_max_merged_tokens};
 }
 
 } // namespace ninfer::models

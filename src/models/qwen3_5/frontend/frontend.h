@@ -25,6 +25,9 @@ struct FrontendOptions {
     std::size_t media_cache_bytes          = kDefaultMediaCacheBytes;
     std::size_t media_live_bytes           = kDefaultMediaLiveBytes;
     std::uint32_t media_preprocess_threads = 0;
+    // Largest merged-token count one media item may occupy; larger media is downscaled at
+    // preprocessing instead of being rejected. Zero leaves the artifact's pixel ceilings.
+    std::uint32_t vision_max_merged_tokens = 16384;
 };
 
 struct FrontendResources;

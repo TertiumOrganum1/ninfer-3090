@@ -492,7 +492,7 @@ PreparedContextCache prepare_context_cache(
         }
     }
 
-    out.opportunities.reserve(7U);
+    out.opportunities.reserve(7U + (hints.allow_engine_prefix_grid ? kPrefixGridCandidates : 0U));
     const auto add_opportunity = [&](PromptCacheMarkerKind kind, SharedCandidateEvidence evidence,
                                      std::uint32_t frontier, std::uint32_t input_order) {
         if (frontier == 0 || !exact_vision_frontier(frontier, vision_items)) { return; }
@@ -540,7 +540,32 @@ PreparedContextCache prepare_context_cache(
         }
         add_opportunity(PromptCacheMarkerKind::SharedStablePrefix,
                         SharedCandidateEvidence::EngineObserved, full_prompt_frontier,
-                        engine_order);
+                        engine_order++);
+    }
+    if (hints.allow_engine_prefix_grid) {
+        // Structural boundaries only expose a prefix where the prompt's own shape happens to put
+        // one. Two requests that merely start with the same long span - the same pasted document,
+        // the same few-shot preamble inside a single user message - share no boundary at all, so
+        // neither ever proposes a frontier the other could match.
+        //
+        // The grid supplies that missing agreement. Frontiers are placed at absolute multiples of a
+        // page-sized stride rather than at positions measured from the end of the prompt, so two
+        // prompts of unrelated lengths still name the same frontier wherever they still agree. The
+        // stride doubles until the grid fits in kPrefixGridCandidates points, which keeps the count
+        // bounded and keeps a coarser grid a subset of a finer one - prompts that pick different
+        // strides still meet on the multiples of the larger.
+        //
+        // Every grid point carries EngineObserved and nothing else. That evidence is neither
+        // "declared" nor "surplus", so the resource manager will not spend a vacant shared slot on
+        // one speculatively; a grid frontier is only ever materialized once two distinct reuse
+        // domains have independently proposed it, which is exactly the signal that two callers
+        // share that prefix.
+        std::uint32_t stride = kPrefixGridPageTokens;
+        while (full_prompt_frontier / stride > kPrefixGridCandidates) { stride *= 2U; }
+        for (std::uint32_t frontier = stride; frontier <= full_prompt_frontier; frontier += stride) {
+            add_opportunity(PromptCacheMarkerKind::SharedStablePrefix,
+                            SharedCandidateEvidence::EngineObserved, frontier, engine_order++);
+        }
     }
     return out;
 }
@@ -571,6 +596,7 @@ public:
           tokenizer(resources.tokenizer),
           processor(options.vision_enabled ? processor_options(resources) : fi::ProcessorOptions{}),
           vision_enabled(options.vision_enabled), max_context(options.max_context) {
+        fi::bound_merged_tokens(processor, options.vision_max_merged_tokens);
         if (options.max_context == 0) {
             throw std::invalid_argument("frontend max_context must be nonzero");
         }

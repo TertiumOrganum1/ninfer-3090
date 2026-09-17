@@ -308,8 +308,9 @@ ProgramImpl::ProgramImpl(const execution::Parameters& parameters_in, const Seque
         sequence.prefix_identity.reserve(static_cast<std::size_t>(capacity) + 1ULL);
         sequence.prefix_digests.reserve(static_cast<std::size_t>(capacity) + 1ULL);
         sequence.long_anchors.reserve(context_cache.max_long_anchors_per_continuation.value_or(0));
-        // One retained shared resume source can coexist with every fixed per-request candidate.
-        sequence.shared_prefix_references.reserve(8U);
+        // One retained shared resume source can coexist with every fixed per-request candidate
+        // and, when a request asks for it, every prefix-grid candidate.
+        sequence.shared_prefix_references.reserve(8U + kPrefixGridCandidates);
     }
     materialization_ledger_.reserve(static_cast<std::size_t>(capacity) + 1ULL);
     materialization_identity_.reserve(static_cast<std::size_t>(capacity) + 1ULL);

@@ -20,6 +20,10 @@ using TokenId = std::int32_t;
 inline constexpr std::uint32_t kMaximumConcurrency               = 8;
 inline constexpr std::size_t kMaximumContextCacheSessionKeyBytes = 256;
 inline constexpr std::size_t kMaximumExplicitPromptCacheMarkers  = 4;
+// ContextCacheHints::allow_engine_prefix_grid proposes at most this many shared candidates, at
+// multiples of a stride that starts at one grid page and doubles until the count fits.
+inline constexpr std::uint32_t kPrefixGridCandidates = 8;
+inline constexpr std::uint32_t kPrefixGridPageTokens = 256;
 // Aggregate encoded image/video payload retained by one prompt, independent of item count.
 inline constexpr std::size_t kMaximumPromptMediaBytes    = 256ULL << 20;
 inline constexpr std::size_t kDefaultMediaCacheBytes     = 1ULL << 30;
