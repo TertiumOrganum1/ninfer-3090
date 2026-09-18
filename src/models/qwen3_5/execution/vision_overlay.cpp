@@ -241,31 +241,46 @@ VisionWeightStream::VisionWeightStream(DeviceContext& device, const VisionOverla
     merger_  = prelude_ + staging_align(layout.prelude.bytes);
     slot_[0] = merger_ + staging_align(layout.merger.bytes);
     slot_[1] = slot_[0] + staging_align(layout.slot_bytes);
-    for (cudaEvent_t& event : uploaded_) {
-        CUDA_CHECK(cudaEventCreateWithFlags(&event, cudaEventDisableTiming));
-    }
-    CUDA_CHECK(cudaEventCreateWithFlags(&prelude_event_, cudaEventDisableTiming));
-    CUDA_CHECK(cudaEventCreateWithFlags(&merger_event_, cudaEventDisableTiming));
-    CUDA_CHECK(cudaEventCreateWithFlags(&compute_fence_, cudaEventDisableTiming));
+    // Nothing below may escape without releasing what it already created: construction that throws
+    // runs no destructor for this object, so each failed setup would strand its events until the
+    // driver runs out. The caller drains the transfer stream before it returns the staging, which
+    // covers the copies this constructor may already have enqueued.
+    try {
+        for (cudaEvent_t& event : uploaded_) {
+            CUDA_CHECK(cudaEventCreateWithFlags(&event, cudaEventDisableTiming));
+        }
+        CUDA_CHECK(cudaEventCreateWithFlags(&prelude_event_, cudaEventDisableTiming));
+        CUDA_CHECK(cudaEventCreateWithFlags(&merger_event_, cudaEventDisableTiming));
+        CUDA_CHECK(cudaEventCreateWithFlags(&compute_fence_, cudaEventDisableTiming));
 
-    const cudaStream_t copy = device_.transfer_stream;
-    CUDA_CHECK(cudaMemcpyAsync(prelude_, block_.data() + layout.prelude.offset,
-                               layout.prelude.bytes, cudaMemcpyHostToDevice, copy));
-    CUDA_CHECK(cudaEventRecord(prelude_event_, copy));
-    CUDA_CHECK(cudaMemcpyAsync(merger_, block_.data() + layout.merger.offset, layout.merger.bytes,
-                               cudaMemcpyHostToDevice, copy));
-    CUDA_CHECK(cudaEventRecord(merger_event_, copy));
+        const cudaStream_t copy = device_.transfer_stream;
+        CUDA_CHECK(cudaMemcpyAsync(prelude_, block_.data() + layout.prelude.offset,
+                                   layout.prelude.bytes, cudaMemcpyHostToDevice, copy));
+        CUDA_CHECK(cudaEventRecord(prelude_event_, copy));
+        CUDA_CHECK(cudaMemcpyAsync(merger_, block_.data() + layout.merger.offset,
+                                   layout.merger.bytes, cudaMemcpyHostToDevice, copy));
+        CUDA_CHECK(cudaEventRecord(merger_event_, copy));
+    } catch (...) {
+        destroy_events();
+        throw;
+    }
     upload_bytes_ = layout.prelude.bytes + layout.merger.bytes;
 }
 
 VisionWeightStream::~VisionWeightStream() {
     // The owning session drains both streams first; the events are idle here.
-    for (cudaEvent_t event : uploaded_) {
+    destroy_events();
+}
+
+void VisionWeightStream::destroy_events() noexcept {
+    for (cudaEvent_t& event : uploaded_) {
         if (event != nullptr) { (void)cudaEventDestroy(event); }
+        event = nullptr;
     }
-    if (prelude_event_ != nullptr) { (void)cudaEventDestroy(prelude_event_); }
-    if (merger_event_ != nullptr) { (void)cudaEventDestroy(merger_event_); }
-    if (compute_fence_ != nullptr) { (void)cudaEventDestroy(compute_fence_); }
+    for (cudaEvent_t* event : {&prelude_event_, &merger_event_, &compute_fence_}) {
+        if (*event != nullptr) { (void)cudaEventDestroy(*event); }
+        *event = nullptr;
+    }
 }
 
 VisionParameters VisionWeightStream::window_parameters(const VisionParameters& host) const {
@@ -433,6 +448,11 @@ bool VisionOverlaySession::submit_item(std::span<const std::uint16_t> patches,
 
 std::span<const std::byte> VisionOverlaySession::complete_item() {
     if (!pending_) { throw std::logic_error("no Vision item is in flight"); }
+    // Both producers into the borrowed extent are drained before it is handed back: the encode on
+    // `encode_stream_`, whose completion event is recorded after the result copy, and the layer
+    // uploads on the transfer stream. Nothing below enqueues again -- `weights_.reset()` is
+    // std::optional's, so it destroys idle events rather than re-entering the member reset() that
+    // issues the first two layer copies.
     completion_.synchronize();
     CUDA_CHECK(cudaStreamSynchronize(device_.transfer_stream));
     stats_.staged_bytes += weights_->uploaded_bytes();

@@ -207,6 +207,8 @@ public:
 
 private:
     void upload_next_layer();
+    // Releases every event this object created, whether or not construction finished.
+    void destroy_events() noexcept;
 
     DeviceContext& device_;
     const VisionOverlayLayout& layout_;
