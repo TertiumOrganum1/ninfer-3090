@@ -40,8 +40,10 @@ void launch(const Tensor& x, const Weight& down, Tensor& residual, std::int32_t 
     const dim3 grid(kRows / Rows::kRowsPerBlock, tokens / BN);
     auto* kernel = a8::a8_mma_kernel<a8::Q5Codec, kCols, 1, NT, Rows, a8::ResidualAddEpilogue>;
     if (smem > 48 * 1024) {
-        CUDA_CHECK(cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize,
-                                        static_cast<int>(smem)));
+        configure_cuda_device_once([&] {
+            return cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize,
+                                        static_cast<int>(smem));
+        });
     }
     kernel<<<grid, a8::kThreads, smem, stream>>>(
         static_cast<const std::uint8_t*>(down.qdata), static_cast<const std::uint8_t*>(down.qhigh),

@@ -200,10 +200,6 @@ void linear_add(const Tensor& x, const Weight& w, Tensor& residual_out, LinearPo
     }
 
     if (w.qtype == QType::Q5_G64_FP16) {
-        if (allows_a8_int(policy) && detail::q5a8_add_supported(w, t)) {
-            detail::q5a8_add_launch(x, w, residual_out, ws, stream);
-            return;
-        }
         require_q5(w);
         const bool supported_shape = (w.n == 5120 && w.k == 17408) || (w.n == 5120 && w.k == 6144);
         if (!supported_shape) { throw std::invalid_argument("linear_add: unsupported Q5 shape"); }
@@ -211,6 +207,10 @@ void linear_add(const Tensor& x, const Weight& w, Tensor& residual_out, LinearPo
             !aligned_to(w.qdata, 16) || !aligned_to(w.qhigh, 16) || !aligned_to(w.scales, 16)) {
             throw std::invalid_argument(
                 "linear_add: Q5 requires 16-byte x/residual/code/high/scale alignment");
+        }
+        if (allows_a8_int(policy) && detail::q5a8_add_supported(w, t)) {
+            detail::q5a8_add_launch(x, w, residual_out, ws, stream);
+            return;
         }
         detail::q5_linear_add_dispatch(x, w, residual_out, ws, stream);
         return;
