@@ -922,9 +922,15 @@ std::unique_ptr<SequencePlanImpl> build_sequence_candidate(const SequencePlannin
 } // namespace
 
 std::uint32_t vision_item_token_bound(std::uint32_t capacity, const models::LoadOptions& features) {
-    return static_cast<std::uint32_t>(std::min<std::uint64_t>(
-        {capacity, kMaximumVisionItemTokens,
-         std::max<std::uint32_t>(1, features.vision_max_merged_tokens)}));
+    // Zero means "no caller-imposed bound", the same meaning FrontendOptions gives it (its
+    // bound_merged_tokens helper returns without clamping). Treating it as one token instead sized
+    // the Vision workspace for a single merged token, after which request planning rejected every
+    // ordinary image.
+    const std::uint32_t requested = features.vision_max_merged_tokens == 0
+                                        ? kMaximumVisionItemTokens
+                                        : features.vision_max_merged_tokens;
+    return static_cast<std::uint32_t>(
+        std::min<std::uint64_t>({capacity, kMaximumVisionItemTokens, requested}));
 }
 
 std::unique_ptr<qwen3_5::detail::SequencePlannerImpl>

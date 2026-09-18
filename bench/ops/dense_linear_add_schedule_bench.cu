@@ -66,9 +66,14 @@ void sweep_q8(std::int32_t hidden, const ninfer::bench::SweepOptions& base) {
             launch(x, packed.weight, out, stream);
         };
     };
-    const auto tiled = [&](Q8Mma launch, std::int32_t tile_cols) {
-        return [&, launch, tile_cols](std::int32_t tokens, cudaStream_t stream) {
-            const bool full = (kRows % 64) == 0 && (tokens % tile_cols) == 0;
+    // `full` is the production contract from q8_linear_add_plan.cpp's use_full(): the kernel may
+    // drop its row and column predicates only when BOTH the row extent and the token count divide
+    // that schedule's own tile. Hard-coding 64 here marked the 48-row kernels full for a 5120-row
+    // matrix (5120 % 48 != 0), which lets the final partial row block run unpredicated -- reading
+    // and writing past the matrix, and reporting a route winner measured on corrupt buffers.
+    const auto tiled = [&](Q8Mma launch, std::int32_t tile_rows, std::int32_t tile_cols) {
+        return [&, launch, tile_rows, tile_cols](std::int32_t tokens, cudaStream_t stream) {
+            const bool full = (kRows % tile_rows) == 0 && (tokens % tile_cols) == 0;
             Tensor x, out;
             tensors(tokens, x, out);
             launch(full, x, packed.weight, out, stream);
@@ -78,17 +83,17 @@ void sweep_q8(std::int32_t hidden, const ninfer::bench::SweepOptions& base) {
     std::vector<ninfer::bench::SweepEntry> schedules{
         {"splitk_capacity", direct(&detail::q8_linear_add_splitk_capacity_launch), 64},
         {"grouped_splitk", direct(&detail::q8_linear_add_grouped_launch), 0},
-        {"mma_r32_c64", tiled(&detail::q8_linear_add_mma_r32_c64_launch, 64), 0},
-        {"mma_r32_c96", tiled(&detail::q8_linear_add_mma_r32_c96_launch, 96), 0},
-        {"mma_r32_c128", tiled(&detail::q8_linear_add_mma_r32_c128_launch, 128), 0},
-        {"mma_r48_c64", tiled(&detail::q8_linear_add_mma_r48_c64_launch, 64), 0},
-        {"mma_r48_c96", tiled(&detail::q8_linear_add_mma_r48_c96_launch, 96), 0},
-        {"mma_r64_c64", tiled(&detail::q8_linear_add_mma_r64_c64_launch, 64), 0},
-        {"mma_r64_c96", tiled(&detail::q8_linear_add_mma_r64_c96_launch, 96), 0},
-        {"mma_r64_c112", tiled(&detail::q8_linear_add_mma_r64_c112_launch, 112), 0},
-        {"mma_r64_c128", tiled(&detail::q8_linear_add_mma_r64_c128_launch, 128), 0},
-        {"mma_r128_c64", tiled(&detail::q8_linear_add_mma_r128_c64_launch, 64), 0},
-        {"mma_r128_c80", tiled(&detail::q8_linear_add_mma_r128_c80_launch, 80), 0},
+        {"mma_r32_c64", tiled(&detail::q8_linear_add_mma_r32_c64_launch, 32, 64), 0},
+        {"mma_r32_c96", tiled(&detail::q8_linear_add_mma_r32_c96_launch, 32, 96), 0},
+        {"mma_r32_c128", tiled(&detail::q8_linear_add_mma_r32_c128_launch, 32, 128), 0},
+        {"mma_r48_c64", tiled(&detail::q8_linear_add_mma_r48_c64_launch, 48, 64), 0},
+        {"mma_r48_c96", tiled(&detail::q8_linear_add_mma_r48_c96_launch, 48, 96), 0},
+        {"mma_r64_c64", tiled(&detail::q8_linear_add_mma_r64_c64_launch, 64, 64), 0},
+        {"mma_r64_c96", tiled(&detail::q8_linear_add_mma_r64_c96_launch, 64, 96), 0},
+        {"mma_r64_c112", tiled(&detail::q8_linear_add_mma_r64_c112_launch, 64, 112), 0},
+        {"mma_r64_c128", tiled(&detail::q8_linear_add_mma_r64_c128_launch, 64, 128), 0},
+        {"mma_r128_c64", tiled(&detail::q8_linear_add_mma_r128_c64_launch, 128, 64), 0},
+        {"mma_r128_c80", tiled(&detail::q8_linear_add_mma_r128_c80_launch, 128, 80), 0},
     };
 
     const std::string title = "q8 dense linear_add n=5120 k=" + std::to_string(hidden);
