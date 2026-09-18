@@ -164,4 +164,81 @@ void q8_linear_add_mma_r128_c80_launch(bool full, const Tensor& x, const Weight&
     launch_variant<Schedule>(full, x, w, residual_out, stream);
 }
 
+// Exact-group-scale twins. `with_exact_group_scale` restates the tile above it, so the pair can
+// never drift apart in anything but where the Q8G32 scale is applied -- and, where it is spelled,
+// MIN_BLOCKS. The exact body holds an FP32 group partial and this tile's row scales, and left at
+// the default tile's MIN_BLOCKS ptxas spends the slack on registers and drops a resident block
+// (`cuobjdump -res-usage`, sm_86): r32_c64 92 -> 136 registers and 4 blocks -> 3, r32_c96 90 ->
+// 136 and 3 -> 2, r64_c64 120 -> 209 and 3 -> 2. The three below are raised to the block count
+// the shared-memory footprint allows, which is the one their default twin already runs at; every
+// other tile here keeps its own because it was already at that count. None of them spill.
+void q8_linear_add_mma_exact_r32_c64_launch(bool full, const Tensor& x, const Weight& w,
+                                            Tensor& residual_out, cudaStream_t stream) {
+    using Schedule =
+        Q8RowSplitMmaGemmSchedule<32, 64, 32, 16, 3>::with_exact_group_scale::with_min_blocks<4>;
+    launch_variant<Schedule>(full, x, w, residual_out, stream);
+}
+
+void q8_linear_add_mma_exact_r32_c96_launch(bool full, const Tensor& x, const Weight& w,
+                                            Tensor& residual_out, cudaStream_t stream) {
+    using Schedule =
+        Q8RowSplitMmaGemmSchedule<32, 96, 32, 16, 2>::with_exact_group_scale::with_min_blocks<3>;
+    launch_variant<Schedule>(full, x, w, residual_out, stream);
+}
+
+void q8_linear_add_mma_exact_r32_c128_launch(bool full, const Tensor& x, const Weight& w,
+                                             Tensor& residual_out, cudaStream_t stream) {
+    using Schedule = Q8RowSplitMmaGemmSchedule<32, 128, 32, 16, 2>::with_exact_group_scale;
+    launch_variant<Schedule>(full, x, w, residual_out, stream);
+}
+
+void q8_linear_add_mma_exact_r48_c64_launch(bool full, const Tensor& x, const Weight& w,
+                                            Tensor& residual_out, cudaStream_t stream) {
+    using Schedule = Q8RowSplitMmaGemmSchedule<48, 64, 48, 16, 3>::with_exact_group_scale;
+    launch_variant<Schedule>(full, x, w, residual_out, stream);
+}
+
+void q8_linear_add_mma_exact_r48_c96_launch(bool full, const Tensor& x, const Weight& w,
+                                            Tensor& residual_out, cudaStream_t stream) {
+    using Schedule = Q8RowSplitMmaGemmSchedule<48, 96, 48, 16, 2>::with_exact_group_scale;
+    launch_variant<Schedule>(full, x, w, residual_out, stream);
+}
+
+void q8_linear_add_mma_exact_r64_c64_launch(bool full, const Tensor& x, const Weight& w,
+                                            Tensor& residual_out, cudaStream_t stream) {
+    using Schedule =
+        Q8RowSplitMmaGemmSchedule<64, 64, 64, 16, 2>::with_exact_group_scale::with_min_blocks<3>;
+    launch_variant<Schedule>(full, x, w, residual_out, stream);
+}
+
+void q8_linear_add_mma_exact_r64_c96_launch(bool full, const Tensor& x, const Weight& w,
+                                            Tensor& residual_out, cudaStream_t stream) {
+    using Schedule = Q8RowSplitMmaGemmSchedule<64, 96, 64, 16, 2>::with_exact_group_scale;
+    launch_variant<Schedule>(full, x, w, residual_out, stream);
+}
+
+void q8_linear_add_mma_exact_r64_c112_launch(bool full, const Tensor& x, const Weight& w,
+                                             Tensor& residual_out, cudaStream_t stream) {
+    using Schedule = Q8RowSplitMmaGemmSchedule<64, 112, 64, 16, 2>::with_exact_group_scale;
+    launch_variant<Schedule>(full, x, w, residual_out, stream);
+}
+
+void q8_linear_add_mma_exact_r64_c128_launch(bool full, const Tensor& x, const Weight& w,
+                                             Tensor& residual_out, cudaStream_t stream) {
+    using Schedule = Q8RowSplitMmaGemmSchedule<64, 128, 64, 16, 2, 2>::with_exact_group_scale;
+    launch_variant<Schedule>(full, x, w, residual_out, stream);
+}
+
+void q8_linear_add_mma_exact_r128_c64_launch(bool full, const Tensor& x, const Weight& w,
+                                             Tensor& residual_out, cudaStream_t stream) {
+    using Schedule = Q8RowSplitMmaGemmSchedule<128, 64, 64, 16, 2>::with_exact_group_scale;
+    launch_variant<Schedule>(full, x, w, residual_out, stream);
+}
+
+void q8_linear_add_mma_exact_r128_c80_launch(bool full, const Tensor& x, const Weight& w,
+                                             Tensor& residual_out, cudaStream_t stream) {
+    using Schedule = Q8RowSplitMmaGemmSchedule<128, 80, 64, 16, 2>::with_exact_group_scale;
+    launch_variant<Schedule>(full, x, w, residual_out, stream);
+}
+
 } // namespace ninfer::ops::detail

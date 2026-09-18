@@ -74,8 +74,8 @@ constexpr std::array<RouteSpec, 33> kK6144Routes{{
 //            T=160 r64_c96 215.0 vs 449.5 (+109%)  T=192 206.8 vs 485.4 (+135%)
 //            T=224 r64_c112 262.1 vs 512.0 (+95%)  T=256 r64_c128 263.2 vs 551.9 (+110%)
 //            T=512 516.1 vs 1054.7 (+104%)         T=1024 1013.8 vs 2262.0 (+123%)
-//   k=17408  the same tiles measure 1.6-2.5x but do not pass the Op's oracle at that K; that table
-//            is unchanged and the note on it explains why.
+//   k=17408  the same tiles measure 1.6-2.5x and did not pass the Op's oracle at that K until the
+//            scale moved off the weight; the note on that table has the reason and the retune.
 //
 // The K-split capacity route keeps the narrow end, where it is genuinely the best thing available,
 // but its ceiling is not 64 on this card: at k=6144 a 32x64 tile is already 19-62% faster from 33
@@ -84,30 +84,57 @@ constexpr std::array<RouteSpec, 33> kK6144Routes{{
 // Read the bench's own header before extending this: the decode, exact-T and medium split-K
 // launches are 2048-row kernels and produce a confident 2-8x "win" here by computing 2048 of the
 // 5120 rows. They are not candidates at this shape and are not offered by the bench.
-constexpr std::array<RouteSpec, 7> kN5120K6144Routes{{
+//
+// T=128 is its own entry because the 128-wide tile loses there and only there: re-measured
+// 2026-09-18 with the row-tile predicate fixed, `mma_r32_c128` 170-173 us against `mma_r64_c64`
+// 150 us, twice, while at 112..124 the order is the other way round (154 vs 160, 162 vs 163) and
+// the two are inside each other's spread from 116 up. Single-width entries are how the 2048-row
+// table above already spells this shape of boundary.
+constexpr std::array<RouteSpec, 8> kN5120K6144Routes{{
     {1, 32, Q8LinearAddScheduleId::SplitKMmaCapacity},
     {33, 64, Q8LinearAddScheduleId::MmaR32C64},
     {65, 96, Q8LinearAddScheduleId::MmaR32C96},
-    {97, 128, Q8LinearAddScheduleId::MmaR32C128},
+    {97, 127, Q8LinearAddScheduleId::MmaR32C128},
+    {128, 128, Q8LinearAddScheduleId::MmaR64C64},
     {129, 192, Q8LinearAddScheduleId::MmaR64C96},
     {193, 224, Q8LinearAddScheduleId::MmaR64C112},
     {225, kAnyCols, Q8LinearAddScheduleId::MmaR64C128},
 }};
 
-// k=17408 keeps upstream's two-entry table, and the reason is correctness, not speed. Every MMA
-// tile measured 1.6-2.5x faster than the grouped route here, and every one of them is *wrong* at
-// this shape: tests/ops/linear_add/test_q8_a16.cpp reports the same element (index 297, actual
-// -33.25 against reference -33.5091) at every width from 49 up, for C64, C96, C112 and C128 alike,
-// while the identical schedules pass every width at k=6144. One element, wrong identically across
-// four tile shapes and every T, is a systematic defect in the tiled path at K=17408 -- not
-// accumulation noise, and not something a route table may tune around.
+// k=17408 shipped as two entries -- K-split capacity to 64 columns, the grouped split-K above --
+// and the 2026-09-17 sweep found every MMA tile 1.6-2.5x faster here and every one of them failing
+// the Op's oracle. The failure was real and it was the default tile's dequantization, not a bug in
+// the tiling: `q8_rowsplit_gemm_mma.cuh` folded the Q8G32 scale into the BF16 weight, and
+// `round_bf16(code * scale)` throws away up to eleven bits of every weight. That error does not
+// average out over K, so at K = 17408 it spends 1.15 of the relative-L2 criterion where K = 6144
+// spends 0.57. The K-split and grouped routes never had it: they hold the bare code, which BF16
+// represents exactly, and scale the FP32 group partial. That is why this table was right as it
+// shipped, and it is the whole reason.
 //
-// So the shipped table is right here, for a reason that was not written down: the grouped split-K
-// route is the only correct one at this K. Fixing the tiled path is worth 1.6-2.5x on 65 columns
-// and up, and is the single largest unclaimed win this sweep found; it is written up in TODO.md.
-constexpr std::array<RouteSpec, 2> kN5120K17408Routes{{
-    {1, 64, Q8LinearAddScheduleId::SplitKMmaCapacity},
-    {65, kAnyCols, Q8LinearAddScheduleId::GroupedSplitK},
+// The tiles now offer the same arrangement (`with_exact_group_scale`), which puts them at 0.42 of
+// the criterion -- the K-split routes' own accuracy -- so this table can finally take them.
+//
+// Swept 2026-09-18 on sm_86 with bench/ops/dense_linear_add_schedule_bench.cu, cold, median of 15,
+// against the grouped route this replaces (us):
+//
+//   T=65    398 vs  681 (1.71x)   T=128   445 vs  829 (1.86x)   T=192   578 vs 1317 (2.28x)
+//   T=224   801 vs 1419 (1.77x)   T=256   887 vs 1551 (1.75x)   T=512  1755 vs 3227 (1.84x)
+//   T=1024 3648 vs 6913 (1.89x)
+//
+// The capacity route keeps 1..40, not 1..64: it is 286 us at T=40 against the tile's 324, and 335
+// against 326 at T=41, crossing between them. Above 256 the pick is `r64_c64` because it is the
+// one candidate that never loses badly across 320/448/512/1024 (best at three of the four, +12 %
+// at T=768 where `r64_c96` lands on a whole number of column tiles); `r64_c96` is +41 % at T=256
+// and +17 % at T=320, so it is not the safer default it looks like at T=384.
+constexpr std::array<RouteSpec, 8> kN5120K17408Routes{{
+    {1, 40, Q8LinearAddScheduleId::SplitKMmaCapacity},
+    {41, 64, Q8LinearAddScheduleId::MmaExactR32C64},
+    {65, 96, Q8LinearAddScheduleId::MmaExactR32C96},
+    {97, 128, Q8LinearAddScheduleId::MmaExactR64C64},
+    {129, 192, Q8LinearAddScheduleId::MmaExactR64C96},
+    {193, 224, Q8LinearAddScheduleId::MmaExactR64C112},
+    {225, 256, Q8LinearAddScheduleId::MmaExactR64C128},
+    {257, kAnyCols, Q8LinearAddScheduleId::MmaExactR64C64},
 }};
 
 template <std::size_t N>
@@ -136,18 +163,30 @@ std::int32_t schedule_rows(Q8LinearAddScheduleId schedule) {
     case Q8LinearAddScheduleId::MmaR32C80:
     case Q8LinearAddScheduleId::MmaR32C96:
     case Q8LinearAddScheduleId::MmaR32C128:
+    case Q8LinearAddScheduleId::MmaExactR32C64:
+    case Q8LinearAddScheduleId::MmaExactR32C96:
+    case Q8LinearAddScheduleId::MmaExactR32C128:
         return 32;
     case Q8LinearAddScheduleId::MmaR48C64:
     case Q8LinearAddScheduleId::MmaR48C96:
     case Q8LinearAddScheduleId::MmaR48C112:
     case Q8LinearAddScheduleId::MmaR48C128:
+    case Q8LinearAddScheduleId::MmaExactR48C64:
+    case Q8LinearAddScheduleId::MmaExactR48C96:
         return 48;
+    case Q8LinearAddScheduleId::MmaR64C64:
     case Q8LinearAddScheduleId::MmaR64C96:
     case Q8LinearAddScheduleId::MmaR64C112:
     case Q8LinearAddScheduleId::MmaR64C128:
+    case Q8LinearAddScheduleId::MmaExactR64C64:
+    case Q8LinearAddScheduleId::MmaExactR64C96:
+    case Q8LinearAddScheduleId::MmaExactR64C112:
+    case Q8LinearAddScheduleId::MmaExactR64C128:
         return 64;
     case Q8LinearAddScheduleId::MmaR128C64:
     case Q8LinearAddScheduleId::MmaR128C80:
+    case Q8LinearAddScheduleId::MmaExactR128C64:
+    case Q8LinearAddScheduleId::MmaExactR128C80:
         return 128;
     case Q8LinearAddScheduleId::SplitKMmaExactT:
     case Q8LinearAddScheduleId::SplitKMmaCapacity:
@@ -173,21 +212,33 @@ std::int32_t schedule_cols(Q8LinearAddScheduleId schedule) {
         return 4;
     case Q8LinearAddScheduleId::MmaR32C64:
     case Q8LinearAddScheduleId::MmaR48C64:
+    case Q8LinearAddScheduleId::MmaR64C64:
     case Q8LinearAddScheduleId::MmaR128C64:
+    case Q8LinearAddScheduleId::MmaExactR32C64:
+    case Q8LinearAddScheduleId::MmaExactR48C64:
+    case Q8LinearAddScheduleId::MmaExactR64C64:
+    case Q8LinearAddScheduleId::MmaExactR128C64:
         return 64;
     case Q8LinearAddScheduleId::MmaR32C80:
     case Q8LinearAddScheduleId::MmaR128C80:
+    case Q8LinearAddScheduleId::MmaExactR128C80:
         return 80;
     case Q8LinearAddScheduleId::MmaR32C96:
     case Q8LinearAddScheduleId::MmaR48C96:
     case Q8LinearAddScheduleId::MmaR64C96:
+    case Q8LinearAddScheduleId::MmaExactR32C96:
+    case Q8LinearAddScheduleId::MmaExactR48C96:
+    case Q8LinearAddScheduleId::MmaExactR64C96:
         return 96;
     case Q8LinearAddScheduleId::MmaR48C112:
     case Q8LinearAddScheduleId::MmaR64C112:
+    case Q8LinearAddScheduleId::MmaExactR64C112:
         return 112;
     case Q8LinearAddScheduleId::MmaR32C128:
     case Q8LinearAddScheduleId::MmaR48C128:
     case Q8LinearAddScheduleId::MmaR64C128:
+    case Q8LinearAddScheduleId::MmaExactR32C128:
+    case Q8LinearAddScheduleId::MmaExactR64C128:
         return 128;
     case Q8LinearAddScheduleId::SplitKMmaExactT:
     case Q8LinearAddScheduleId::SplitKMmaCapacity:
@@ -229,6 +280,8 @@ const char* q8_linear_add_schedule_name(Q8LinearAddScheduleId schedule) noexcept
         return "linear_add.q8.mma.r48.c112.residual";
     case Q8LinearAddScheduleId::MmaR48C128:
         return "linear_add.q8.mma.r48.c128.residual";
+    case Q8LinearAddScheduleId::MmaR64C64:
+        return "linear_add.q8.mma.r64.c64.residual";
     case Q8LinearAddScheduleId::MmaR64C96:
         return "linear_add.q8.mma.r64.c96.residual";
     case Q8LinearAddScheduleId::MmaR64C112:
@@ -239,6 +292,28 @@ const char* q8_linear_add_schedule_name(Q8LinearAddScheduleId schedule) noexcept
         return "linear_add.q8.mma.r128.c64.residual";
     case Q8LinearAddScheduleId::MmaR128C80:
         return "linear_add.q8.mma.r128.c80.residual";
+    case Q8LinearAddScheduleId::MmaExactR32C64:
+        return "linear_add.q8.mma.exact.r32.c64.residual";
+    case Q8LinearAddScheduleId::MmaExactR32C96:
+        return "linear_add.q8.mma.exact.r32.c96.residual";
+    case Q8LinearAddScheduleId::MmaExactR32C128:
+        return "linear_add.q8.mma.exact.r32.c128.residual";
+    case Q8LinearAddScheduleId::MmaExactR48C64:
+        return "linear_add.q8.mma.exact.r48.c64.residual";
+    case Q8LinearAddScheduleId::MmaExactR48C96:
+        return "linear_add.q8.mma.exact.r48.c96.residual";
+    case Q8LinearAddScheduleId::MmaExactR64C64:
+        return "linear_add.q8.mma.exact.r64.c64.residual";
+    case Q8LinearAddScheduleId::MmaExactR64C96:
+        return "linear_add.q8.mma.exact.r64.c96.residual";
+    case Q8LinearAddScheduleId::MmaExactR64C112:
+        return "linear_add.q8.mma.exact.r64.c112.residual";
+    case Q8LinearAddScheduleId::MmaExactR64C128:
+        return "linear_add.q8.mma.exact.r64.c128.residual";
+    case Q8LinearAddScheduleId::MmaExactR128C64:
+        return "linear_add.q8.mma.exact.r128.c64.residual";
+    case Q8LinearAddScheduleId::MmaExactR128C80:
+        return "linear_add.q8.mma.exact.r128.c80.residual";
     }
     return "linear_add.q8.unknown";
 }
@@ -336,6 +411,9 @@ void q8_linear_add_execute_plan(const Q8LinearAddPlan& plan, const Tensor& x, co
             case Q8LinearAddScheduleId::MmaR48C128:
                 q8_linear_add_mma_r48_c128_launch(full, x_slice, w, residual_slice, stream);
                 return;
+            case Q8LinearAddScheduleId::MmaR64C64:
+                q8_linear_add_mma_r64_c64_launch(full, x_slice, w, residual_slice, stream);
+                return;
             case Q8LinearAddScheduleId::MmaR64C96:
                 q8_linear_add_mma_r64_c96_launch(full, x_slice, w, residual_slice, stream);
                 return;
@@ -350,6 +428,50 @@ void q8_linear_add_execute_plan(const Q8LinearAddPlan& plan, const Tensor& x, co
                 return;
             case Q8LinearAddScheduleId::MmaR128C80:
                 q8_linear_add_mma_r128_c80_launch(full, x_slice, w, residual_slice, stream);
+                return;
+            case Q8LinearAddScheduleId::MmaExactR32C64:
+                q8_linear_add_mma_exact_r32_c64_launch(full, x_slice, w, residual_slice,
+                                                      stream);
+                return;
+            case Q8LinearAddScheduleId::MmaExactR32C96:
+                q8_linear_add_mma_exact_r32_c96_launch(full, x_slice, w, residual_slice,
+                                                      stream);
+                return;
+            case Q8LinearAddScheduleId::MmaExactR32C128:
+                q8_linear_add_mma_exact_r32_c128_launch(full, x_slice, w, residual_slice,
+                                                      stream);
+                return;
+            case Q8LinearAddScheduleId::MmaExactR48C64:
+                q8_linear_add_mma_exact_r48_c64_launch(full, x_slice, w, residual_slice,
+                                                      stream);
+                return;
+            case Q8LinearAddScheduleId::MmaExactR48C96:
+                q8_linear_add_mma_exact_r48_c96_launch(full, x_slice, w, residual_slice,
+                                                      stream);
+                return;
+            case Q8LinearAddScheduleId::MmaExactR64C64:
+                q8_linear_add_mma_exact_r64_c64_launch(full, x_slice, w, residual_slice,
+                                                      stream);
+                return;
+            case Q8LinearAddScheduleId::MmaExactR64C96:
+                q8_linear_add_mma_exact_r64_c96_launch(full, x_slice, w, residual_slice,
+                                                      stream);
+                return;
+            case Q8LinearAddScheduleId::MmaExactR64C112:
+                q8_linear_add_mma_exact_r64_c112_launch(full, x_slice, w, residual_slice,
+                                                      stream);
+                return;
+            case Q8LinearAddScheduleId::MmaExactR64C128:
+                q8_linear_add_mma_exact_r64_c128_launch(full, x_slice, w, residual_slice,
+                                                      stream);
+                return;
+            case Q8LinearAddScheduleId::MmaExactR128C64:
+                q8_linear_add_mma_exact_r128_c64_launch(full, x_slice, w, residual_slice,
+                                                      stream);
+                return;
+            case Q8LinearAddScheduleId::MmaExactR128C80:
+                q8_linear_add_mma_exact_r128_c80_launch(full, x_slice, w, residual_slice,
+                                                      stream);
                 return;
             case Q8LinearAddScheduleId::GroupedSplitK:
             case Q8LinearAddScheduleId::SplitKMmaCapacity:

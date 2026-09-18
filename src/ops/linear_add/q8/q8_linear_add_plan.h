@@ -24,11 +24,24 @@ enum class Q8LinearAddScheduleId {
     MmaR48C96,
     MmaR48C112,
     MmaR48C128,
+    MmaR64C64,
     MmaR64C96,
     MmaR64C112,
     MmaR64C128,
     MmaR128C64,
     MmaR128C80,
+    // Exact-group-scale tiles; see q8_rowsplit_gemm_mma.cuh's EXACT_GROUP_SCALE_ note.
+    MmaExactR32C64,
+    MmaExactR32C96,
+    MmaExactR32C128,
+    MmaExactR48C64,
+    MmaExactR48C96,
+    MmaExactR64C64,
+    MmaExactR64C96,
+    MmaExactR64C112,
+    MmaExactR64C128,
+    MmaExactR128C64,
+    MmaExactR128C80,
 };
 
 struct Q8LinearAddPlan {

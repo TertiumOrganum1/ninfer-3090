@@ -94,6 +94,22 @@ void sweep_q8(std::int32_t hidden, const ninfer::bench::SweepOptions& base) {
         {"mma_r64_c128", tiled(&detail::q8_linear_add_mma_r64_c128_launch, 64, 128), 0},
         {"mma_r128_c64", tiled(&detail::q8_linear_add_mma_r128_c64_launch, 128, 64), 0},
         {"mma_r128_c80", tiled(&detail::q8_linear_add_mma_r128_c80_launch, 128, 80), 0},
+        // The same tiles with the Q8G32 scale on the FP32 group partial instead of on the BF16
+        // weight. They are the only tiled candidates that meet the Op's oracle at k=17408, so at
+        // that k the `mma_*` rows above are timing a route the table may not take; compare
+        // `mma_exact_*` against the grouped route there, and `mma_*` against `mma_exact_*` to price
+        // the accuracy.
+        {"mma_exact_r32_c64", tiled(&detail::q8_linear_add_mma_exact_r32_c64_launch, 32, 64), 0},
+        {"mma_exact_r32_c96", tiled(&detail::q8_linear_add_mma_exact_r32_c96_launch, 32, 96), 0},
+        {"mma_exact_r32_c128", tiled(&detail::q8_linear_add_mma_exact_r32_c128_launch, 32, 128), 0},
+        {"mma_exact_r48_c64", tiled(&detail::q8_linear_add_mma_exact_r48_c64_launch, 48, 64), 0},
+        {"mma_exact_r48_c96", tiled(&detail::q8_linear_add_mma_exact_r48_c96_launch, 48, 96), 0},
+        {"mma_exact_r64_c64", tiled(&detail::q8_linear_add_mma_exact_r64_c64_launch, 64, 64), 0},
+        {"mma_exact_r64_c96", tiled(&detail::q8_linear_add_mma_exact_r64_c96_launch, 64, 96), 0},
+        {"mma_exact_r64_c112", tiled(&detail::q8_linear_add_mma_exact_r64_c112_launch, 64, 112), 0},
+        {"mma_exact_r64_c128", tiled(&detail::q8_linear_add_mma_exact_r64_c128_launch, 64, 128), 0},
+        {"mma_exact_r128_c64", tiled(&detail::q8_linear_add_mma_exact_r128_c64_launch, 128, 64), 0},
+        {"mma_exact_r128_c80", tiled(&detail::q8_linear_add_mma_exact_r128_c80_launch, 128, 80), 0},
     };
 
     const std::string title = "q8 dense linear_add n=5120 k=" + std::to_string(hidden);

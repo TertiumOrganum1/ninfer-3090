@@ -64,6 +64,32 @@ void q8_linear_add_mma_r128_c64_launch(bool full, const Tensor& x, const Weight&
 void q8_linear_add_mma_r128_c80_launch(bool full, const Tensor& x, const Weight& w,
                                        Tensor& residual_out, cudaStream_t stream);
 
+
+// Exact-group-scale twins of the tiles above: same schedule, the Q8G32 scale applied to the FP32
+// group partial instead of to the BF16 weight. See q8_rowsplit_gemm_mma.cuh for when that matters.
+void q8_linear_add_mma_exact_r32_c64_launch(bool full, const Tensor& x, const Weight& w,
+                                            Tensor& residual_out, cudaStream_t stream);
+void q8_linear_add_mma_exact_r32_c96_launch(bool full, const Tensor& x, const Weight& w,
+                                            Tensor& residual_out, cudaStream_t stream);
+void q8_linear_add_mma_exact_r32_c128_launch(bool full, const Tensor& x, const Weight& w,
+                                             Tensor& residual_out, cudaStream_t stream);
+void q8_linear_add_mma_exact_r48_c64_launch(bool full, const Tensor& x, const Weight& w,
+                                            Tensor& residual_out, cudaStream_t stream);
+void q8_linear_add_mma_exact_r48_c96_launch(bool full, const Tensor& x, const Weight& w,
+                                            Tensor& residual_out, cudaStream_t stream);
+void q8_linear_add_mma_exact_r64_c64_launch(bool full, const Tensor& x, const Weight& w,
+                                            Tensor& residual_out, cudaStream_t stream);
+void q8_linear_add_mma_exact_r64_c96_launch(bool full, const Tensor& x, const Weight& w,
+                                            Tensor& residual_out, cudaStream_t stream);
+void q8_linear_add_mma_exact_r64_c112_launch(bool full, const Tensor& x, const Weight& w,
+                                             Tensor& residual_out, cudaStream_t stream);
+void q8_linear_add_mma_exact_r64_c128_launch(bool full, const Tensor& x, const Weight& w,
+                                             Tensor& residual_out, cudaStream_t stream);
+void q8_linear_add_mma_exact_r128_c64_launch(bool full, const Tensor& x, const Weight& w,
+                                             Tensor& residual_out, cudaStream_t stream);
+void q8_linear_add_mma_exact_r128_c80_launch(bool full, const Tensor& x, const Weight& w,
+                                             Tensor& residual_out, cudaStream_t stream);
+
 void q8_linear_add_splitk_capacity_launch(const Tensor& x, const Weight& w, Tensor& residual,
                                           cudaStream_t stream);
 

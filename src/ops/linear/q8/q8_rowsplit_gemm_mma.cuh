@@ -37,8 +37,26 @@ static_assert(sizeof(Q8Bf16x8Bits) == 16);
 // property of BM either: MmaR64x16C48K128A1, a BM = 64 tile, gains 3.3 % on [34816, 5120] and loses
 // 1.1 % on [248320, 5120]. So the policy is set per schedule, and only where it has been measured
 // across the shapes that reach it.
+//
+// EXACT_GROUP_SCALE_ picks how the Q8G32 scale enters the product, and it is an accuracy choice,
+// not a speed one. The default folds it into the dequantized weight, so the BF16 operand carries
+// `round_bf16(code * scale)`: the code needs eight significand bits and an FP16 scale up to eleven,
+// so BF16's eight throw away up to eleven bits of every weight. Set, the operand is the bare code -
+// an integer in [-128, 127], which BF16 holds exactly - the MMA accumulates one quantization group
+// at a time, and the FP32 group partial is scaled on the way into the running accumulator. No
+// weight rounding remains; this is what the Q8 K-split family has always done
+// (`q8_ksplit_bf16_pair_from_s8` plus an FP32 `fmaf` per group) and why it is the accurate route.
+//
+// The dequant error does not average out over K on structured weights: measured on the Op's own
+// fixture it grows about linearly in K while the dot product grows like sqrt(K), so the relative
+// error grows like sqrt(K). Against `tests/ops/linear_add/test_q8_a16.cpp`'s relative-L2 criterion
+// (2^-8) at n = 5120, the default costs 0.57 of the limit at K = 6144 and 1.15 - a failure - at
+// K = 17408, where the exact path sits at 0.42, the same as the K-split routes. So the default
+// stays wherever a table has been measured against it, and K large enough to spend the criterion on
+// rounding needs this set.
 template <int BM_, int BN_, int WM_, int WN_, int MIN_BLOCKS_, int STAGES_ = 2, int BK_ = 64,
-          int ACTIVATION_STAGES_ = STAGES_, Cache PredicatedCache_ = Cache::ca>
+          int ACTIVATION_STAGES_ = STAGES_, Cache PredicatedCache_ = Cache::ca,
+          bool EXACT_GROUP_SCALE_ = false>
 struct Q8RowSplitMmaGemmSchedule {
     static constexpr int BM                = BM_;
     static constexpr int BN                = BN_;
@@ -62,13 +80,32 @@ struct Q8RowSplitMmaGemmSchedule {
     // Cache policy for the predicated loads only; see the note above the template.
     static constexpr Cache kPredicatedCache = PredicatedCache_;
 
+    // Scale placement; see the note above the template.
+    static constexpr bool kExactGroupScale = EXACT_GROUP_SCALE_;
+
     // Restate this schedule with a different predicated policy, leaving every other parameter where
     // it is rather than respelling it - and its default with it - at the point of use.
     template <Cache Policy>
     using with_predicated_cache =
         Q8RowSplitMmaGemmSchedule<BM_, BN_, WM_, WN_, MIN_BLOCKS_, STAGES_, BK_, ACTIVATION_STAGES_,
-                                  Policy>;
+                                  Policy, EXACT_GROUP_SCALE_>;
 
+    // The same tile with the scale moved out of the weight and onto the FP32 group partial.
+    using with_exact_group_scale =
+        Q8RowSplitMmaGemmSchedule<BM_, BN_, WM_, WN_, MIN_BLOCKS_, STAGES_, BK_, ACTIVATION_STAGES_,
+                                  PredicatedCache_, true>;
+
+    // MIN_BLOCKS is what hands ptxas its register budget, so it is the knob that keeps a variant
+    // at the occupancy its tile was tuned for. The exact-group-scale body needs more live state -
+    // the FP32 group partial and this tile's row scales - and left alone ptxas spends it on
+    // registers and loses a block.
+    template <int Blocks>
+    using with_min_blocks =
+        Q8RowSplitMmaGemmSchedule<BM_, BN_, WM_, WN_, Blocks, STAGES_, BK_, ACTIVATION_STAGES_,
+                                  PredicatedCache_, EXACT_GROUP_SCALE_>;
+
+    static_assert(!kExactGroupScale || (KSUB % 2) == 0,
+                  "an exact group scale folds two m16n8k16 steps, one Q8G32 group, at a time");
     static_assert(BM % WM == 0 && BN % WN == 0);
     static_assert(WM % 16 == 0 && WN % 8 == 0);
     static_assert(THREADS <= 1024);
@@ -231,9 +268,13 @@ __global__ __launch_bounds__(Cfg::THREADS, Cfg::MIN_BLOCKS) void q8_rowsplit_gem
             const int chunk = item - row * kChunksPerRow;
             const int col   = chunk * 8;
             const int gg    = col >> 5;
+            // Exact-scale tiles carry the bare code, whose integer range BF16 holds exactly, and
+            // meet the scale again in FP32 once the group's MMA partial is complete.
             const float scale =
-                __half2float(__ushort_as_half(*reinterpret_cast<const std::uint16_t*>(
-                    &Sr[row * Cfg::SCALE_CACHE_BYTES + scale_tile_offset + gg * 2])));
+                Cfg::kExactGroupScale
+                    ? 1.0f
+                    : __half2float(__ushort_as_half(*reinterpret_cast<const std::uint16_t*>(
+                          &Sr[row * Cfg::SCALE_CACHE_BYTES + scale_tile_offset + gg * 2])));
             const uint2 packed = *reinterpret_cast<const uint2*>(&Cr[row * BK + col]);
             Q8Bf16x8Bits decoded;
 #pragma unroll
@@ -260,6 +301,31 @@ __global__ __launch_bounds__(Cfg::THREADS, Cfg::MIN_BLOCKS) void q8_rowsplit_gem
         __syncthreads();
 
         dequant_w(kt);
+
+        // Take this tile's group scales before the next tile's prefetch is issued: `stage_w` below
+        // refills `Sr` every SCALE_CACHE_TILES tiles, and an exact-scale tile still needs them
+        // after the MMA. Each thread wants only the two accumulator rows the m16n8k16 C fragment
+        // gives it, so this is MT * 2 * GROUPS registers, not a second copy of the cache.
+        constexpr int kTileGroups = BK / 32;
+        constexpr int kScaleRows  = Cfg::kExactGroupScale ? MT * 2 : 1;
+        constexpr int kScaleSlots = Cfg::kExactGroupScale ? kTileGroups : 1;
+        float group_scale[kScaleRows][kScaleSlots];
+        if constexpr (Cfg::kExactGroupScale) {
+            const int scale_row_bytes = (kt % (8 / kTileGroups)) * kTileGroups * 2;
+#pragma unroll
+            for (int mi = 0; mi < MT; ++mi) {
+#pragma unroll
+                for (int half = 0; half < 2; ++half) {
+                    const int row = wm * WM + mi * 16 + gid + half * 8;
+#pragma unroll
+                    for (int g = 0; g < kTileGroups; ++g) {
+                        group_scale[mi * 2 + half][g] =
+                            __half2float(__ushort_as_half(*reinterpret_cast<const std::uint16_t*>(
+                                &Sr[row * Cfg::SCALE_CACHE_BYTES + scale_row_bytes + g * 2])));
+                    }
+                }
+            }
+        }
         __syncthreads();
 
         const int next = kt + 1;
@@ -291,18 +357,62 @@ __global__ __launch_bounds__(Cfg::THREADS, Cfg::MIN_BLOCKS) void q8_rowsplit_gem
             }
         };
 
-        load_fragments(0, 0);
+        if constexpr (Cfg::kExactGroupScale) {
+            // One Q8G32 group is two m16n8k16 steps, so the two fragment slots hold exactly the
+            // group the FP32 partial below belongs to. `mi` runs outermost so the partial is one
+            // warp tile column strip, NT * 4 registers, instead of a second full accumulator.
+            load_fragments(0, 0);
+            load_fragments(1, 1);
 #pragma unroll
-        for (int ks = 0; ks < KSUB; ++ks) {
-            const int slot = ks & 1;
-            if (ks + 1 < KSUB) { load_fragments(slot ^ 1, ks + 1); }
+            for (int g = 0; g < kTileGroups; ++g) {
 #pragma unroll
-            for (int mi = 0; mi < MT; ++mi) {
+                for (int mi = 0; mi < MT; ++mi) {
+                    float group[NT][4];
 #pragma unroll
-                for (int ni = 0; ni < NT; ++ni) {
-                    mma_bf16(acc[mi][ni][0], acc[mi][ni][1], acc[mi][ni][2], acc[mi][ni][3],
-                             af[slot][mi][0], af[slot][mi][1], af[slot][mi][2], af[slot][mi][3],
-                             bf[slot][ni][0], bf[slot][ni][1]);
+                    for (int ni = 0; ni < NT; ++ni) {
+                        group[ni][0] = 0.0f;
+                        group[ni][1] = 0.0f;
+                        group[ni][2] = 0.0f;
+                        group[ni][3] = 0.0f;
+                        mma_bf16(group[ni][0], group[ni][1], group[ni][2], group[ni][3],
+                                 af[0][mi][0], af[0][mi][1], af[0][mi][2], af[0][mi][3],
+                                 bf[0][ni][0], bf[0][ni][1]);
+                        mma_bf16(group[ni][0], group[ni][1], group[ni][2], group[ni][3],
+                                 af[1][mi][0], af[1][mi][1], af[1][mi][2], af[1][mi][3],
+                                 bf[1][ni][0], bf[1][ni][1]);
+                    }
+                    // The m16n8k16 C fragment puts this thread's first accumulator pair on row
+                    // `gid` of the 16-row block and its second on row `gid + 8`, which is the
+                    // pairing the epilogues already spell as r0 and r1.
+                    const float scale0 = group_scale[mi * 2][g];
+                    const float scale1 = group_scale[mi * 2 + 1][g];
+#pragma unroll
+                    for (int ni = 0; ni < NT; ++ni) {
+                        acc[mi][ni][0] = fmaf(group[ni][0], scale0, acc[mi][ni][0]);
+                        acc[mi][ni][1] = fmaf(group[ni][1], scale0, acc[mi][ni][1]);
+                        acc[mi][ni][2] = fmaf(group[ni][2], scale1, acc[mi][ni][2]);
+                        acc[mi][ni][3] = fmaf(group[ni][3], scale1, acc[mi][ni][3]);
+                    }
+                }
+                if (2 * g + 2 < KSUB) {
+                    load_fragments(0, 2 * g + 2);
+                    load_fragments(1, 2 * g + 3);
+                }
+            }
+        } else {
+            load_fragments(0, 0);
+#pragma unroll
+            for (int ks = 0; ks < KSUB; ++ks) {
+                const int slot = ks & 1;
+                if (ks + 1 < KSUB) { load_fragments(slot ^ 1, ks + 1); }
+#pragma unroll
+                for (int mi = 0; mi < MT; ++mi) {
+#pragma unroll
+                    for (int ni = 0; ni < NT; ++ni) {
+                        mma_bf16(acc[mi][ni][0], acc[mi][ni][1], acc[mi][ni][2], acc[mi][ni][3],
+                                 af[slot][mi][0], af[slot][mi][1], af[slot][mi][2], af[slot][mi][3],
+                                 bf[slot][ni][0], bf[slot][ni][1]);
+                    }
                 }
             }
         }

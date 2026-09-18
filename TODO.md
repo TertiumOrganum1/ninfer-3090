@@ -78,16 +78,50 @@ what it says about kernels and measurements still holds except where this sectio
       plain-`linear` finding at the same geometry -- the 32-row tiles lose 21-76% from 65 columns
       up, and 9..16 wants the capacity-24 rung (+43% at T=12). `bench/ops/dense_linear_add_schedule_bench.cu`
       is the sweep.
-- [ ] **Defect: the Q8 `linear_add` tiled path is wrong at K=17408.** `tests/ops/linear_add/test_q8_a16.cpp`
-      reports the same output element (index 297, actual -33.25 against reference -33.5091) at every
-      width from 49 upward, identically for the C64, C96, C112 and C128 tiles, while those same
-      schedules pass every width at k=6144. One element, wrong identically across four tile shapes
-      and every T, is systematic rather than accumulation noise. It had never been seen because the
-      shipped table never routed 5120x17408 to a tile at any width -- the grouped split-K route was
-      covering for it. **This is the largest unclaimed win the whole sweep found: 1.6-2.5x on
-      65 columns and up at the 27B MLP down-projection's Q8 shape.** Start from the fact that
-      k=6144 is clean and 17408 is not; 17408 is 1024*17, so a K loop or scale-plane stride that
-      assumes a power-of-two group count is the first thing to check.
+- [x] **The Q8 tiled path at K=17408 was not wrong; it was rounding the dequantized weight, and the
+      tiles now have the option not to.** The failure was real and reproducible -- index 297,
+      actual -33.25 against reference -33.5091, at every width from 33 up, identically for C64,
+      C96, C112 and C128 -- but the criterion it broke is `relative_l2`, at 1.15 of the limit, with
+      the gross bound never above 0.56. That is the shape of a precision budget, not of a dropped
+      K-tile or a wrapped offset, either of which lands on the gross bound first.
+
+      **Root cause.** `src/ops/linear/q8/q8_rowsplit_gemm_mma.cuh`, `dequant_w`:
+      `__floats2bfloat162_rn(q0 * scale, q1 * scale)` stores `round_bf16(code * scale)` as the MMA
+      operand. The code needs eight significand bits and an FP16 group scale up to eleven; BF16 has
+      eight, so up to eleven bits of every weight are discarded. That error does not average out
+      over K on this weight population -- it grows about linearly in K while the dot product grows
+      like sqrt(K) -- so the relative error grows like sqrt(K): 0.57 of the criterion at k=6144,
+      1.15 at k=17408. Every other Q8 route decodes exactly instead (`q8_ksplit_bf16_pair_from_s8`
+      holds the bare code, which BF16 represents exactly, and `fmaf`s the FP32 group partial by the
+      scale), which is why the K-split and grouped routes sit at 0.43 at the same K and why the
+      shipped table was right. **Confirmed** by rounding the oracle's weights to BF16: the tiles
+      fall from 1.15 to 0.42 and the K-split routes rise from 0.43 to 1.15, an exact mirror.
+
+      **Fix.** `EXACT_GROUP_SCALE_`, a new schedule parameter, defaults off, so no existing
+      instantiation changes by a bit. Set, the tile carries the bare code, accumulates one Q8G32
+      group (two m16n8k16 steps) into an FP32 partial and `fmaf`s it into the accumulator by the
+      row's group scale, exactly as the K-split family does. The k=17408 dense `linear_add` table
+      takes the exact tiles and measures 0.42 across every width, continuous with the K-split
+      routes below it -- no step at the route boundary.
+
+      **Cost.** The exact body holds an FP32 group partial and this tile's row scales, so ptxas
+      wants more registers; `with_min_blocks` pins the three tiles that would otherwise lose a
+      resident block (r32_c64, r32_c96, r64_c64) back to their default twin's occupancy. Nothing
+      spills (`cuobjdump -res-usage`).
+- [ ] **The same BF16 dequantization is live in plain `linear` at the two largest K, and its suite
+      cannot see it.** `src/ops/linear/q8/shapes/n5120_k17408.cu` routes T=56..64 to
+      `launch_q8_mma_r32_c64`, 65..128 to `r32_c128`, 129..192 to `r64_c96` and above to
+      `r64_c128` -- the default, inexact tile, at the same K where `linear_add` spends 1.15 of its
+      relative-L2 criterion. `n5120_k25600.cu` is the same story one K further out. The suite does
+      not catch it because `tests/ops/linear/linear_test_common.cpp` compares `Comparison::Sampled`,
+      which is seven rows against **seven sampled columns** per invocation, where the `linear_add`
+      suite compares seven rows against *every* column -- two orders of magnitude more elements, and
+      that is the whole reason one saw it and the other did not. Before changing any route: widen
+      that comparison (or add a relative-L2-only full-column pass) and read the ratio with
+      `NINFER_OP_REPORT_STATS=1`; `linear`'s criterion is the same `{2^-8, 2^-8, 2^-7}`. The fix, if
+      it is needed, is already built: `::with_exact_group_scale`, plus a `with_min_blocks` to hold
+      the occupancy. Do not assume it is needed -- `linear` has no residual and a different seed, so
+      measure first.
 - [ ] **Trap to know before extending a schedule sweep.** Three Q8 `linear_add` launches -- decode,
       exact-T split-K, medium split-K -- hardcode `kRows = 2048` (`q8_linear_add_gemm_splitk.cu`),
       so at 5120 rows they compute the first 2,048 and return. The first dense sweep read that as a

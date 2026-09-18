@@ -95,10 +95,17 @@ int q8_a16_conformance() {
     // The dense tables are per-k since the 2026-09-17 sm_86 retune and their starts differ (33 vs
     // 49), so the union is used for both; a start that is an interior point of the other table is
     // still a point worth covering.
-    constexpr std::array<std::int32_t, 10> large_route_starts{5,  9,  17,  25,  33,
-                                                              49, 65, 97, 129, 193};
-    constexpr std::array<std::int32_t, 12> large_interiors{1,   4,   8,   32,  48,   64,
-                                                           96,  128, 192, 225, 512, 1024};
+    //
+    // These widths are what qualifies the MMA tiles at k=17408, which nothing exercised until the
+    // exact-group-scale tiles landed: the table sent every width there to the K-split routes, and
+    // the default tile's BF16 dequantization spends 1.15 of this suite's relative-L2 criterion at
+    // that K (0.57 at k=6144, 0.42 for the exact tile). Every band of both dense tables has a
+    // start, a start-1, a start+1 and an interior here, and 64/128/192 make `use_full` true so the
+    // tile's unpredicated path runs too. Narrowing this set un-qualifies a shipped route.
+    constexpr std::array<std::int32_t, 14> large_route_starts{5,  9,  17,  25,  33,  41,  49,
+                                                              65, 97, 128, 129, 193, 225, 257};
+    constexpr std::array<std::int32_t, 14> large_interiors{1,   4,   8,   32,  48,  64,  96,
+                                                           128, 192, 225, 256, 512, 800, 1024};
     constexpr std::array<std::int32_t, 6> graph_tokens{1, 8, 64, 65, 129, 225};
     constexpr std::array<std::int32_t, 3> full_tokens{1, 4, 8};
     for (const auto k : {6144, 17408}) {
