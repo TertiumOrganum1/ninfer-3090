@@ -63,7 +63,10 @@ def compressed_matrix_source(
                 .view(torch.uint8)
                 .reshape(end - begin, k // 16)
             )
-            if bool((scales > 0x7E).any()):
+            # Same set as the codec's check in tools/artifact/codecs/nvfp4.py: the words are
+            # unsigned here, so 0x80..0xFF (E4M3 negatives and -NaN) already exceed 0x7E. Spelled
+            # the codec's way so the two stay legibly identical.
+            if bool((((scales & 0x80) != 0) | (scales == 0x7F)).any()):
                 raise ValueError(f"{scale}: expected nonnegative finite E4M3FN scales")
             return EncodedRows(format, codes, scales, divisor("weight_global_scale"))
         weight, scale = f"{prefix}.weight", f"{prefix}.weight_scale"
