@@ -292,7 +292,15 @@ what it says about kernels and measurements still holds except where this sectio
       future preset needs to distinguish them, the signature is the place to say so.
 - [ ] **The multi-GPU split has only been run with `--devices 0,0` on this single-GPU box.** The
       pinned-host crossing path, the compute-capability rejection and the actual capacity win need a
-      real second card (`scripts/multi-gpu-testing/`).
+      real second card (`scripts/multi-gpu-testing/`). `tests/test_cross_rank_staging.cu` now drives
+      that path directly with both ranks on device 0 -- byte integrity, capturability, and the
+      consumed-fence dependency read off the captured graph -- so what is left for a second card is
+      the PCIe cost and the device-to-device branch, not the protocol.
+- [ ] **A runtime race harness for the crossing buffer has no power on Windows.** Holding the
+      destination stream, with a spinning kernel or a blocking host function, also stops the driver
+      submitting the source stream's copies, so the source stalls whether or not the fence is
+      there (measured both ways). The graph assertion replaces it. On Linux the same test could
+      also be run as a real race; worth doing if this ever runs there.
 
 State as of 2026-09-09. Four passes: a profiling pass that closed six items and refuted five of its
 own hypotheses, a measurement-hygiene pass that closed three more, a counter pass that put a *cause*

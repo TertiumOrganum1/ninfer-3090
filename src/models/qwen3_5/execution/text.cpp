@@ -1099,56 +1099,7 @@ void TextContext::cross_rank_copy(const void* source, std::size_t from_rank, voi
         return;
     }
 
-    void* staging = ctx_.crossing_staging();
-    if (staging == nullptr || bytes > ctx_.crossing_staging_bytes()) {
-        throw std::runtime_error("cross-rank staging buffer is too small: need " +
-                                 std::to_string(bytes) + " bytes, have " +
-                                 std::to_string(ctx_.crossing_staging_bytes()));
-    }
-
-    // Split the byte range so the two halves of the crossing overlap. Done as one copy, D2H must
-    // finish before H2D starts and a 4 MB residual stream costs ~0.765 ms -- roughly twice what its
-    // bandwidth implies. In pieces, piece i+1 streams out of the source while piece i streams into
-    // the destination.
-    //
-    // Small transfers skip this: a decode crossing is ~4 KiB, where the per-piece launch and fence
-    // overhead would cost more than the overlap saves.
-    constexpr std::size_t kMinimumPipelinedBytes = 256U << 10;
-    const std::size_t pieces =
-        bytes >= kMinimumPipelinedBytes ? kCrossingPipelineDepth : std::size_t{1};
-    const std::size_t piece_bytes = (bytes + pieces - 1) / pieces;
-
-    for (std::size_t piece = 0; piece < pieces; ++piece) {
-        const std::size_t offset = piece * piece_bytes;
-        const std::size_t length = std::min(piece_bytes, bytes - offset);
-        if (length == 0) { break; }
-        auto* staged            = static_cast<std::byte*>(staging) + offset;
-        const auto* src         = static_cast<const std::byte*>(source) + offset;
-        auto* dst               = static_cast<std::byte*>(destination) + offset;
-        const cudaEvent_t fence = ctx_.piece_fence(from_rank, piece);
-        {
-            ScopedDeviceRank guard(ctx_, from_rank);
-            // Every crossing stages through the same pinned buffer, and this D2H overwrites the
-            // piece the *previous* crossing's H2D may still be reading -- that copy is only
-            // enqueued here, never waited for. Wait on each rank's consumed fence for this piece
-            // (an unrecorded event is satisfied, so the first crossing is free) rather than
-            // tracking which rank consumed it last; with two ranks this is two no-op waits.
-            for (std::size_t rank = 0; rank < ctx_.size(); ++rank) {
-                CUDA_CHECK(
-                    cudaStreamWaitEvent(from_stream, ctx_.piece_consumed_fence(rank, piece), 0));
-            }
-            CUDA_CHECK(cudaMemcpyAsync(staged, src, length, cudaMemcpyDeviceToHost, from_stream));
-            CUDA_CHECK(cudaEventRecord(fence, from_stream));
-        }
-        {
-            ScopedDeviceRank guard(ctx_, to_rank);
-            CUDA_CHECK(cudaStreamWaitEvent(to_stream, fence, 0));
-            CUDA_CHECK(cudaMemcpyAsync(dst, staged, length, cudaMemcpyHostToDevice, to_stream));
-            // Publishes "this piece has been read out of staging"; the event belongs to the
-            // destination device, which is the one recording it.
-            CUDA_CHECK(cudaEventRecord(ctx_.piece_consumed_fence(to_rank, piece), to_stream));
-        }
-    }
+    stage_cross_rank_copy(ctx_, source, from_rank, destination, to_rank, bytes);
 }
 
 void TextContext::run_mlp_tail(const BlockParameters& weights, Tensor& x, Phase phase,

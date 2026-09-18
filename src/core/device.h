@@ -133,6 +133,21 @@ struct DeviceContext {
     // crossing buffer. The next crossing waits on it before overwriting that piece, which is what
     // keeps one pinned buffer safe across back-to-back crossings.
     [[nodiscard]] cudaEvent_t piece_consumed_fence(std::size_t rank, std::size_t piece) const;
+    // Whether that fence may be waited on from work whose capture id is `capture_id` (0 for work
+    // outside any capture). During capture, a wait on an event whose last record was not part of
+    // the same capture fails with cudaErrorStreamCaptureIsolation -- and the crossing path exists
+    // to be captured -- so the first crossing inside a graph has nothing to wait for and says so
+    // here. Its safety comes from the graph instead: the captured crossings join back into the
+    // origin stream, so one launch's H2Ds all complete before the next launch's D2Hs begin.
+    //
+    // The one thing this cannot express is an eager crossing still in flight when a graph holding
+    // crossings is launched, since a launch cannot wait on an eager fence without breaking the
+    // capture. Callers capture while the decoder is idle and launch afterwards, which is the only
+    // order this path is used in.
+    [[nodiscard]] bool piece_consumed_visible(std::size_t rank, std::size_t piece,
+                                              unsigned long long capture_id) const;
+    // Records that the fence for this piece has just been recorded by work with that capture id.
+    void note_piece_consumed(std::size_t rank, std::size_t piece, unsigned long long capture_id);
     [[nodiscard]] std::size_t crossing_staging_bytes() const noexcept;
     void activate_rank(std::size_t rank);
     void synchronize_rank(std::size_t rank) const;
@@ -150,6 +165,11 @@ private:
         // cannot be created during CUDA graph capture.
         std::array<cudaEvent_t, kCrossingPipelineDepth> piece_fences{};
         std::array<cudaEvent_t, kCrossingPipelineDepth> piece_consumed{};
+        // Where each consumed fence was last recorded: outside any capture, and the capture it
+        // belonged to. Both are kept because a graph's event-record node only takes effect when
+        // the graph is launched, so an earlier eager record remains the event's real state.
+        std::array<bool, kCrossingPipelineDepth> piece_consumed_eager{};
+        std::array<unsigned long long, kCrossingPipelineDepth> piece_consumed_capture{};
         cudaDeviceProp props{};
     };
 
@@ -178,6 +198,16 @@ private:
     DeviceContext& context_;
     std::size_t previous_rank_ = 0;
 };
+
+// Moves `bytes` from `source` on `from_rank` to `destination` on `to_rank` through the shared
+// pinned crossing buffer, pipelined over `kCrossingPipelineDepth` pieces and ordered entirely by
+// events, so the whole transfer stays capturable into a CUDA graph.
+//
+// Callers with both ranks on one physical device should copy device-to-device instead; this path
+// exists for a genuine two-card crossing. It lives here rather than in the decoder so a test can
+// drive it with two ranks pinned to one device and check the fence protocol without a second card.
+void stage_cross_rank_copy(DeviceContext& context, const void* source, std::size_t from_rank,
+                           void* destination, std::size_t to_rank, std::size_t bytes);
 
 class CudaEventTimer {
 public:
