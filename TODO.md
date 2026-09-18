@@ -3109,13 +3109,54 @@ ceiling, and neither has had any optimisation attempted.
       gate_up in 1,537 us, less than the 1,711 us our schedule spends streaming alone, so the
       streaming is ours rather than the hardware's.
 
-      Every cheap lever against it is now spent: pipeline depth 2 -> 4 is +3.9%, interleaving the B
-      loads with the MMAs is -1.9%, occupancy +6%, grid swizzle +0.5%, operand layout ~17% behind a
-      repack this engine does not allow. Closing 1.8-2.5x means a mainloop rather than a knob --
-      register double buffering, `ldmatrix`, a swizzled shared layout -- i.e. adopting a
-      CUTLASS-class kernel or porting Marlin, with the weight layout that implies. That is a
-      product decision, not a tuning task, and it is the only thing between this fork and the
-      patched-vLLM stacks on prefill.
+      **And the deficit is specific to the integer path, which the bf16 control settles.** The same
+      probe runs cuBLAS's bf16 GEMM over the same shapes: 66.4 TFLOP/s at gate_up against this
+      fork's A16 route at 59.4, so the 16-bit path is at **89% of a tuned kernel** while the integer
+      path is at **40%** of one. This fork does not write slow GEMMs; it writes one slow *integer*
+      GEMM, because that mainloop does two things extra -- unpacking 4-bit codes and applying a
+      per-group scale -- and under MMAs four times faster than bf16 those stop hiding.
+
+      **Every knob this structure has is now priced** (gate_up, T=1024, against 3,113 us for the
+      shipped 64x512 schedule):
+
+      | knob | worth |
+      |---|---:|
+      | token tile 128 -> 512 (shipped) | **+39%** |
+      | occupancy, 16 -> 32 warps | +6% |
+      | cp.async pipeline depth 2 -> 4 | +3.9% |
+      | grid swizzle for L2 reuse | +0.5% |
+      | L2 `evict_first` on the weight stream (Marlin's hint) | -0.8% |
+      | interleaving the B loads with the MMAs | -1.9% |
+      | operand layout in MMA-fragment order | ~17%, behind a repack |
+
+      Nothing left is worth more than a few percent, so **stop tuning this kernel**.
+
+      **What Marlin has instead, read from `IST-DASLab/marlin` and summarised so the next person
+      does not have to:** four cp.async stages rather than two; register fragments double-buffered
+      across k-steps (`frag_a[2]`, `frag_b_quant[2]`, indexed `k % 2`); `ldmatrix` (`ldsm4`) for the
+      fragments rather than per-lane loads; the quantised operand held *packed* in registers and
+      dequantised immediately before its MMA with LOP3 bit tricks (~6-7 instructions per 8 values);
+      an XOR-swizzled shared layout rather than padding; 256 threads (8 warps) rather than 512; and
+      a striped split-K with an L2 global reduce. The one that makes the rest possible is that
+      **its weights are permuted into fragment order before the kernel ever runs** -- which is why
+      its fragment loads are single instructions and ours are four.
+
+      **The other direction is priced too, and it is worse.** `tools/w4_dequant_cublas_probe.cu`
+      materialises the weights as int8 and calls cuBLAS. It cannot be done once and kept -- int8
+      weights for this model are ~24 GB against a 24 GB card, so neither VRAM nor a different
+      on-disk format rescues it -- so it measures a per-chunk materialisation. At T=1024: gate_up
+      324 us to dequantise plus 1,540 in cuBLAS against our 3,825 (2.05x), mlp/down 1.51x, out_proj
+      1.60x. Deduct an epilogue pass over cuBLAS's int32 output that the probe does not charge for
+      (~360 us on gate_up) and it is ~1.7x, bought with a coarser weight quantisation (one scale per
+      row rather than per 64), per-token activation scales, and ~320 MB of scratch. Strictly worse
+      than the layout change, which keeps 4-bit weights.
+
+      **So the decision is to port Marlin's design, with its weight permutation produced at
+      conversion time rather than repacked at runtime.** That is the artifact change this entry
+      spent months avoiding, and the measurements above are why it is now the right one. Open
+      question for that work: whether to adopt Marlin's per-token activation scales or keep this
+      fork's per-group ones, which are its quality advantage (per-token measures 1.2e-2 relative L2
+      rising to 1.29e-1 on outlier-heavy inputs, against 9e-3 to 2.0e-2 per group).
 
       The projections that had no integer route at all were the larger win and are done: see
       `docs/performance.md`, +13-17% prefill at every length.
