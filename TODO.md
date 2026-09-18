@@ -165,7 +165,7 @@ what it says about kernels and measurements still holds except where this sectio
       `Comparison::SampledRows` -- the same rows against *every* column, up to 32,768 elements --
       and it is *cheaper* than what it replaced, because the oracle is evaluated once per shape at
       the widest invocation and sliced by the narrower ones instead of being recomputed per call.
-      The whole `linear` suite is 47 s and every qtype in it stays green.
+      `ctest -R linear -j2` is 63 s for twenty-five tests and every qtype in it stays green.
 
       **Sampling columns was not, in the end, what hid this.** Widening it moved the k=17408 tile
       ratio from a scattered 0.60-0.66 to a flat 0.61; the step at the route boundary -- 0.42 on the
@@ -199,7 +199,7 @@ what it says about kernels and measurements still holds except where this sectio
       | [5120, 6144] | `mtp/layer/attention/output` | 0.43 | 0.52 | 0.29 |
       | [5120, 4608] | `vision/merger/fc2` | 0.44 | 0.53 | 0.29 |
 
-      Worst gross ratio anywhere: 0.52. The centered fixture is within 0.02 of these everywhere
+      Worst gross ratio across these shapes: 0.52. The centered fixture is within 0.02 of these everywhere
       except [14336, 5120], where it reads 0.60 against the biased 0.75.
 
       **The excess does not grow with K**, which is the part of `linear_add`'s write-up that does
@@ -211,8 +211,9 @@ what it says about kernels and measurements still holds except where this sectio
 
       **So the entry closes with the routes as they shipped.** Nothing changed, so there was nothing
       to weigh against DFlash2 or MTP acceptance -- and it would have measured nothing anyway: at
-      `--draft-tokens 3` or 4 every one of these tensors runs at T<=5, which every table routes to
-      the K-split rung that decodes exactly. The tiles are reached only during prefill. What is
+      `--draft-tokens 3` or 4 every one of these tensors runs at T<=5 per decode step, which every
+      table routes to the K-split rung that decodes exactly. The tiles are reached only by prefill.
+      What is
       worth knowing is that [14336, 5120] leaves only a quarter of the criterion in hand, and that
       `text/output_head` is the one Q8 tensor on the target's own output path, where an error is not
       absorbed by draft verification. If either moves, `::with_exact_group_scale` plus a
