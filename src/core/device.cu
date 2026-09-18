@@ -113,6 +113,13 @@ DeviceContext::DeviceContext(std::span<const int> device_ids,
                         cuda_error_message("cudaEventCreateWithFlags(piece fence) failed", err));
                 }
             }
+            for (cudaEvent_t& piece : endpoint.piece_consumed) {
+                err = cudaEventCreateWithFlags(&piece, cudaEventDisableTiming);
+                if (err != cudaSuccess) {
+                    throw std::runtime_error(
+                        cuda_error_message("cudaEventCreateWithFlags(piece consumed) failed", err));
+                }
+            }
         }
 
         // Two ranks on the same card need no peer setup: copies between them are ordinary
@@ -211,6 +218,7 @@ void DeviceContext::release() noexcept {
             log_cuda_error("cudaSetDevice", cudaSetDevice(endpoint.device));
         }
         for (cudaEvent_t& piece : endpoint.piece_fences) { destroy_event(piece); }
+        for (cudaEvent_t& piece : endpoint.piece_consumed) { destroy_event(piece); }
         destroy_event(endpoint.fence);
         destroy_stream(endpoint.vision_stream);
         destroy_stream(endpoint.transfer_stream);
@@ -315,6 +323,13 @@ bool DeviceContext::model_parallel() const noexcept { return endpoints_.size() =
 bool DeviceContext::peer_access() const noexcept { return peer_access_; }
 
 void* DeviceContext::crossing_staging() const noexcept { return crossing_staging_; }
+
+cudaEvent_t DeviceContext::piece_consumed_fence(std::size_t rank, std::size_t piece) const {
+    if (rank >= endpoints_.size() || piece >= kCrossingPipelineDepth) {
+        throw std::out_of_range("cross-rank piece fence is out of range");
+    }
+    return endpoints_[rank].piece_consumed[piece];
+}
 
 cudaEvent_t DeviceContext::piece_fence(std::size_t rank, std::size_t piece) const {
     if (rank >= endpoints_.size() || piece >= kCrossingPipelineDepth) {

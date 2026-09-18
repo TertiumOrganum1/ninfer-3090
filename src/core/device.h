@@ -129,6 +129,10 @@ struct DeviceContext {
     [[nodiscard]] void* crossing_staging() const noexcept;
     // Fence for one piece of a pipelined cross-rank transfer.
     [[nodiscard]] cudaEvent_t piece_fence(std::size_t rank, std::size_t piece) const;
+    // Recorded on the destination stream once a staged piece has been read out of the shared
+    // crossing buffer. The next crossing waits on it before overwriting that piece, which is what
+    // keeps one pinned buffer safe across back-to-back crossings.
+    [[nodiscard]] cudaEvent_t piece_consumed_fence(std::size_t rank, std::size_t piece) const;
     [[nodiscard]] std::size_t crossing_staging_bytes() const noexcept;
     void activate_rank(std::size_t rank);
     void synchronize_rank(std::size_t rank) const;
@@ -145,6 +149,7 @@ private:
         // Fences for pipelining one cross-rank transfer in pieces. Pre-allocated because events
         // cannot be created during CUDA graph capture.
         std::array<cudaEvent_t, kCrossingPipelineDepth> piece_fences{};
+        std::array<cudaEvent_t, kCrossingPipelineDepth> piece_consumed{};
         cudaDeviceProp props{};
     };
 

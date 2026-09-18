@@ -1128,6 +1128,15 @@ void TextContext::cross_rank_copy(const void* source, std::size_t from_rank, voi
         const cudaEvent_t fence = ctx_.piece_fence(from_rank, piece);
         {
             ScopedDeviceRank guard(ctx_, from_rank);
+            // Every crossing stages through the same pinned buffer, and this D2H overwrites the
+            // piece the *previous* crossing's H2D may still be reading -- that copy is only
+            // enqueued here, never waited for. Wait on each rank's consumed fence for this piece
+            // (an unrecorded event is satisfied, so the first crossing is free) rather than
+            // tracking which rank consumed it last; with two ranks this is two no-op waits.
+            for (std::size_t rank = 0; rank < ctx_.size(); ++rank) {
+                CUDA_CHECK(
+                    cudaStreamWaitEvent(from_stream, ctx_.piece_consumed_fence(rank, piece), 0));
+            }
             CUDA_CHECK(cudaMemcpyAsync(staged, src, length, cudaMemcpyDeviceToHost, from_stream));
             CUDA_CHECK(cudaEventRecord(fence, from_stream));
         }
@@ -1135,6 +1144,9 @@ void TextContext::cross_rank_copy(const void* source, std::size_t from_rank, voi
             ScopedDeviceRank guard(ctx_, to_rank);
             CUDA_CHECK(cudaStreamWaitEvent(to_stream, fence, 0));
             CUDA_CHECK(cudaMemcpyAsync(dst, staged, length, cudaMemcpyHostToDevice, to_stream));
+            // Publishes "this piece has been read out of staging"; the event belongs to the
+            // destination device, which is the one recording it.
+            CUDA_CHECK(cudaEventRecord(ctx_.piece_consumed_fence(to_rank, piece), to_stream));
         }
     }
 }
