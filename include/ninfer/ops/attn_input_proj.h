@@ -35,6 +35,21 @@ void attn_input_proj(const Tensor& x, const Weight& query_key_weight,
                      cudaStream_t stream);
 
 /**
+ * Policy-bearing split form. AllowA8Int admits the integer-activation route for the registered
+ * Q4 plus Q5 [7168,5120] pair at full prefill tiles (T a positive multiple of 128); every other
+ * width, shape or policy takes the A16 schedules and needs no transient bytes. Size the transient
+ * storage with attn_input_proj_split_workspace_capacity_bytes().
+ */
+void attn_input_proj(const Tensor& x, const Weight& query_key_weight,
+                     const Weight& gate_value_weight, Tensor& q, Tensor& gate, Tensor& k, Tensor& v,
+                     LinearPolicy policy, WorkspaceArena& workspace, cudaStream_t stream);
+
+[[nodiscard]] std::size_t attn_input_proj_split_workspace_capacity_bytes(
+    QType query_key_qtype, std::int32_t query_key_rows, QType gate_value_qtype,
+    std::int32_t gate_value_rows, std::int32_t input_rows, LinearPolicy policy,
+    std::int32_t min_tokens, std::int32_t max_tokens);
+
+/**
  * Computes the single-parent Q/K/output-gate/V projection.
  *
  * The parent stores rows in physical order query, key, output gate, value while the public output

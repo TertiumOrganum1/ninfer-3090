@@ -282,14 +282,25 @@ void validate_policy(LinearPolicy policy) {
     case LinearPolicy::A16Only:
     case LinearPolicy::AllowA8:
     case LinearPolicy::AllowA4:
+    // The split Q4/Q5 pair has an integer-activation route; the single-parent forms decline it
+    // below, where no such route is registered for their qtypes.
+    case LinearPolicy::AllowA8Int:
+    case LinearPolicy::AllowA8IntDecode:
         return;
     }
     throw std::invalid_argument("gdn_input_proj: invalid compute policy");
 }
 
+// No single-parent qtype registers an integer-activation route, and their resolvers reject a
+// policy they do not know, so the integer policies read as A16Only here.
+LinearPolicy without_integer(LinearPolicy policy) {
+    return allows_a8_int(policy) ? LinearPolicy::A16Only : policy;
+}
+
 void dispatch_single_parent(const Tensor& x, const Weight& weight, Tensor& qkv, Tensor& z,
                             LinearPolicy policy, WorkspaceArena* workspace, cudaStream_t stream) {
     validate_policy(policy);
+    policy = without_integer(policy);
     const std::int32_t cols = x.ne[1];
     if (cols <= 0) { throw std::invalid_argument("gdn_input_proj: T must be positive"); }
 
@@ -706,6 +717,56 @@ void dispatch_single_parent_record(const Tensor& x, const Weight& weight, const 
 }
 
 } // namespace
+
+namespace {
+
+// Shared shape checks for the split form, which both overloads owe their callers.
+void require_split_profile(const Tensor& x, const Weight& qk_weight, const Weight& value_z_weight,
+                           Tensor& qkv, Tensor& z) {
+    constexpr std::int32_t kHidden     = 5120;
+    constexpr std::int32_t kQkRows     = 4096;
+    constexpr std::int32_t kValueRows  = 6144;
+    constexpr std::int32_t kZRows      = 6144;
+    constexpr std::int32_t kQkvRows    = kQkRows + kValueRows;
+    constexpr std::int32_t kParentRows = kValueRows + kZRows;
+    const std::int32_t cols            = x.ne[1];
+    if (cols <= 0) { throw std::invalid_argument("gdn_input_proj: T must be positive"); }
+    require_matrix(x, kHidden, cols, "x");
+    require_matrix(qkv, kQkvRows, cols, "qkv");
+    require_matrix(z, kZRows, cols, "z");
+    require_rowsplit(qk_weight, QType::Q4_G64_FP16, kQkRows, "qk weight");
+    require_rowsplit(value_z_weight, QType::Q5_G64_FP16, kParentRows, "value/z weight");
+}
+
+} // namespace
+
+void gdn_input_proj(const Tensor& x, const Weight& qk_weight, const Weight& value_z_weight,
+                    Tensor& qkv, Tensor& z, LinearPolicy policy, WorkspaceArena& workspace,
+                    cudaStream_t stream) {
+    validate_policy(policy);
+    require_split_profile(x, qk_weight, value_z_weight, qkv, z);
+    if (allows_a8_int(policy) &&
+        detail::q4_q5_gdn_input_a8_supported(qk_weight, value_z_weight, x.ne[1])) {
+        detail::q4_q5_gdn_input_a8_launch(x, qk_weight, value_z_weight, qkv, z, workspace, stream);
+        return;
+    }
+    detail::q4_q5_gdn_input_dispatch(x, qk_weight, value_z_weight, qkv, z, stream);
+}
+
+std::size_t gdn_input_proj_split_workspace_capacity_bytes(
+    QType qk_qtype, std::int32_t qk_rows, QType value_z_qtype, std::int32_t value_z_rows,
+    std::int32_t input_rows, LinearPolicy policy, std::int32_t min_tokens,
+    std::int32_t max_tokens) {
+    validate_policy(policy);
+    if (min_tokens <= 0 || max_tokens < min_tokens) {
+        throw std::invalid_argument("gdn_input_proj workspace: invalid token interval");
+    }
+    const bool registered = qk_qtype == QType::Q4_G64_FP16 && qk_rows == 4096 &&
+                            value_z_qtype == QType::Q5_G64_FP16 && value_z_rows == 12288 &&
+                            input_rows == 5120;
+    if (!allows_a8_int(policy) || !registered) { return 0; }
+    return detail::q4_q5_gdn_input_a8_workspace_capacity_bytes(min_tokens, max_tokens);
+}
 
 void gdn_input_proj(const Tensor& x, const Weight& qk_weight, const Weight& value_z_weight,
                     Tensor& qkv, Tensor& z, cudaStream_t stream) {

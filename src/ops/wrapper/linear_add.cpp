@@ -119,13 +119,17 @@ std::size_t linear_add_workspace_capacity_bytes(QType qtype, std::int32_t output
     if (qtype == QType::Q5_G64_FP16) {
         const std::size_t a16 = detail::q5_linear_add_capacity_workspace_bytes(
             output_rows, input_rows, input_rows, min_tokens, max_tokens);
-        if (!allows_a8_int(policy) || output_rows != 5120 || input_rows != 17408) { return a16; }
+        const bool integer_shape =
+            output_rows == 5120 && (input_rows == 17408 || input_rows == 6144);
+        if (!allows_a8_int(policy) || !integer_shape) { return a16; }
         if (min_tokens == max_tokens) {
             return detail::q5a8_tokens_supported(min_tokens)
-                       ? detail::q5a8_add_workspace_capacity_bytes(min_tokens, max_tokens)
+                       ? detail::q5a8_add_workspace_capacity_bytes(input_rows, min_tokens,
+                                                                   max_tokens)
                        : a16;
         }
-        return std::max(a16, detail::q5a8_add_workspace_capacity_bytes(min_tokens, max_tokens));
+        return std::max(a16, detail::q5a8_add_workspace_capacity_bytes(input_rows, min_tokens,
+                                                                       max_tokens));
     }
     if (qtype == QType::NVFP4) {
         const bool supported = (output_rows == detail::Nvfp4N5120K6144::kOutputRows &&
@@ -196,10 +200,6 @@ void linear_add(const Tensor& x, const Weight& w, Tensor& residual_out, LinearPo
     }
 
     if (w.qtype == QType::Q5_G64_FP16) {
-        if (allows_a8_int(policy) && detail::q5a8_add_supported(w, t)) {
-            detail::q5a8_add_launch(x, w, residual_out, ws, stream);
-            return;
-        }
         require_q5(w);
         const bool supported_shape = (w.n == 5120 && w.k == 17408) || (w.n == 5120 && w.k == 6144);
         if (!supported_shape) { throw std::invalid_argument("linear_add: unsupported Q5 shape"); }
@@ -207,6 +207,10 @@ void linear_add(const Tensor& x, const Weight& w, Tensor& residual_out, LinearPo
             !aligned_to(w.qdata, 16) || !aligned_to(w.qhigh, 16) || !aligned_to(w.scales, 16)) {
             throw std::invalid_argument(
                 "linear_add: Q5 requires 16-byte x/residual/code/high/scale alignment");
+        }
+        if (allows_a8_int(policy) && detail::q5a8_add_supported(w, t)) {
+            detail::q5a8_add_launch(x, w, residual_out, ws, stream);
+            return;
         }
         detail::q5_linear_add_dispatch(x, w, residual_out, ws, stream);
         return;

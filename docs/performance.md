@@ -92,6 +92,111 @@ added to the findings in this section: only single-prompt smoke numbers exist on
 far, and pasting another architecture's corpus results beside them would read as agreement that
 has not been measured. DFlash2 rows will be added here once measured on a 3090.
 
+### Integer activations for every registered prefill projection
+
+**Result.** Prompt processing is 22-29% faster than the previous state at every context length:
+the attention and GDN projections now reach the s8 tensor cores that only the MLP pair used, and
+the schedule they share stopped re-streaming the weight matrix once per 128 tokens. Measured on one RTX 3090 at 315 W, Qwen3.8-27B groupwise-int, `--kv-dtype int8`,
+`ninfer_bench -r 3 --warmup 1`, all three arms on the same build and card:
+
+| prefill tok/s | 1k | 4k | 16k | 51k |
+|---|---:|---:|---:|---:|
+| `--no-prefill-a8` (every projection A16) | 1,008.5 | 995.4 | 946.9 | 836.4 |
+| previous state (integer MLP only, 128-token tile) | 1,303.2 | 1,277.5 | 1,195.1 | 1,022.9 |
+| every registered projection, 128-token tile | 1,529.8 | 1,493.3 | 1,382.3 | 1,153.3 |
+| **every registered projection, widened tile** | **1,684.9** | **1,648.5** | **1,521.8** | **1,242.7** |
+| change against the previous state | +29.3% | +29.0% | +27.3% | +21.5% |
+
+Three routes were added, in the order their Nsight share justified — a 4,096-token prefill spends
+749 ms of 3,280 ms in the GDN input projection, 346 ms in the two output projections and 209 ms in
+the attention input projection:
+
+| route | shape | per-Op, T=1024 | end to end, pp4096 |
+|---|---|---|---|
+| attention o_proj and GDN out_proj | Q5 [5120,6144] LinearAdd | 1,097.7 → 827.4 us | +3.0% |
+| GDN input projection | Q4 [4096,5120] + Q5 [12288,5120] | — | +10.1% |
+| attention input projection | Q4 + Q5 [7168,5120] | — | +1.6% |
+
+They share one schedule (`src/ops/common/rowsplit_a8_mma.cuh`): the 128x128 tile the MLP routes
+measured, with the codec and the output mapping as template parameters. Both input projections are
+two parents over one activation, so each quantises its input once for all its launches — O(K*T)
+against the GEMMs' O(N*K*T).
+
+**Quality.** Quick corpus, same build: 4.342982 with `--no-prefill-a8` against **4.343155** with
+every integer route on, **+0.004%** — inside run-to-run noise, and inside the +0.05% this fork
+requires before a lossy route is default-on. Relative L2 against the FP64 oracle is 0.010-0.020
+across every destination range, against the 0.04 allowance A8 activation compute is held to.
+Decode is untouched (45.8 against 45.6 tok/s at tg128): the routes admit only full 128-column
+prefill tiles, so decode and partial chunks stay on A16.
+
+**The token tile, and why it was hiding.** Ablating the probe at the gate_up shape, T=512, gives
+the decomposition that explains the whole schedule -- each row removes one cost and keeps the MMA
+count identical:
+
+| | us | |
+|---|---:|---|
+| complete kernel | 2,068 | |
+| minus the activation and weight scale reads | 1,918 | the rescale's loads are ~7% |
+| minus the per-group rescale entirely | 1,856 | the rescale is ~10% |
+| minus the A-fragment shared reads | 1,423 | **assembling A is ~21%** |
+| minus the B-fragment reads as well | 1,424 | B is free: one 128-bit load per n-tile |
+| minus the MMAs, keeping every load | 1,377 | |
+| minus the MMAs *and* every shared read | 1,378 | **streaming alone is 67% of the kernel** |
+
+So these kernels were never compute-bound, and what generates the traffic is the token tile: a
+block covering BN tokens re-streams the entire weight matrix once per column block, eight times
+over at the production chunk of 1,024. Widening it is worth more than everything else attempted:
+
+| tile (rows x tokens) | us at T=1024 | TOP/s |
+|---|---:|---:|
+| 128 x 128 | 4,265 | 85.6 |
+| 128 x 256 | 3,702 | 98.6 |
+| **64 x 512** | **3,060** | **119.3** |
+
+A grid swizzle to let L2 serve the repeated passes measured within 0.5% of nothing: the passes have
+to be removed, not cached. gate_up is the exception that proves the rule -- its gate/up pairing
+fixes the row tile at 128 and so caps it at 256 tokens, where the tile it gains does not pay for
+the operand assembly it would lose, so it keeps its own kernel.
+
+**What is still missing, measured against a tuned kernel rather than against a microbenchmark.**
+`tools/int8_gemm_reference_probe.cu` runs cuBLAS's own int8 GEMM (IMMA, TN, s32 accumulate) over
+these shapes on this card. It solves a strictly easier problem -- 8-bit weights, no unpack, no
+per-group scale, no fused epilogue -- and it reads *twice* the weight bytes our int4 codes do, so
+it is an upper bound rather than a like-for-like rival. At T=1024:
+
+| shape | cuBLAS int8 | this fork's W4A8 | ratio |
+|---|---:|---:|---:|
+| gate_up 34816x5120 | 237.5 TOP/s | 95.5 | 2.5x |
+| down 5120x17408 | 176.1 TOP/s | 100.1 | 1.8x |
+| out_proj 5120x6144 | 176.7 TOP/s | 93.3 | 1.9x |
+
+That reading also corrects the ablation above: cuBLAS finishes the entire gate_up GEMM in 1,537 us,
+less than the 1,711 us our schedule spends on streaming *alone* at the same shape and tile. The
+streaming is not a hardware floor, it is our streaming -- a 2-stage pipeline over 16 warps with the
+A fragments assembled from per-lane 2-byte loads. Everything cheap has now been tried against it:
+pipeline depth 2 -> 4 is worth 3.9%, interleaving the B loads with the MMAs -1.9%, occupancy 6%,
+grid swizzle 0.5%, operand layout ~17% (and that one needs a repack this engine does not allow).
+What is left is not a knob but a mainloop: register-level double buffering, `ldmatrix`, and a
+swizzled shared layout, which is what CUTLASS-class kernels -- and the Marlin kernel the vLLM
+stacks use -- are built out of.
+
+**What did not pay, so nobody re-walks it.** `TODO.md`'s long-standing explanation for these
+kernels running at ~30% of the INT8 ceiling — 124 registers holding the SM to 16 of 48 warps — is
+not what costs the time. `tools/w4a8_rowsplit_probe.cu` measures the alternatives at the gate_up
+shape, T=512:
+
+- **Doubling occupancy buys 6%.** A 64x128 tile compiles to 55 registers and genuinely runs 2
+  blocks per SM (32 of 48 warps, confirmed with `cudaOccupancyMaxActiveBlocksPerMultiprocessor`):
+  1,890 → 1,785 us, against the 40% `ncu` estimated.
+- **Smaller tiles past that lose badly**: 128x64 at 63 registers measures 2,844 us, 1.5x worse.
+- **Layout is worth nothing without a repack.** Streaming the weights with `cp.async` in their
+  RowSplit order, packed nibbles in shared and the scales as an async ring — everything the
+  fragment-order probe won except permuting the weights — measures 1,726 us against production's
+  1,701. `tools/w4a8_real_weight_probe.cu` puts the fully repacked layout at 1,566 us with
+  per-group scales, so the whole layout lever is ~8%, and a permuted copy of the 27B's two MLP
+  matrices is ~9.7 GB on a 24 GB card. The 1,415 us headline needs per-token activation scales,
+  whose relative L2 reaches 12.9% on outlier-heavy inputs against 0.9-2.0% per group.
+
 ### Small-T tensor-core kernels for verify and cohort decode
 
 **Result.** Qwen3.8-27B MTP3 decode is 1.5x faster at C1 and 1.7x at C8 than v0.9.1, with

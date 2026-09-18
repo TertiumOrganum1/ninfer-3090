@@ -120,7 +120,7 @@ std::string usage_text(const char* argv0) {
            "       [--device N] [--devices N,M]\n"
            "       [--kv-dtype bf16|int8|fp8|rk8v4|nvfp4|k8v4] [--spec mtp|dflash|dflash2 --draft-tokens N]\n"
            "       [--lm-head-draft] [--lm-head-q4|--lm-head-q6] [--embedding-q4|--embedding-q6] [--mtp-experts-q4]\n"
-           "       [--gdn-state-fp16] [--mlp-a8-decode]\n"
+           "       [--gdn-state-fp16] [--mlp-a8-decode] [--no-prefill-a8]\n"
            "       [--temperature F] [--top-p F] [--top-k N] [--min-p F]\n"
            "       [--presence-penalty F] [--frequency-penalty F] [--seed N] [--greedy]\n"
            "       [--stop-token-id N]... [--stop <text>]... [--reasoning-stop <text>]...\n"
@@ -146,6 +146,8 @@ std::string usage_text(const char* argv0) {
            "speed- or memory-for-quality trades, off by "
            "default; see "
            "docs/maintainer/quality-trade-experiments.md for the measured cost of each.\n"
+           "--no-prefill-a8 returns full prefill tiles to their A16 routes, which is how the "
+           "integer routes are measured on a whole request.\n"
            "--kv-capacity auto leaves " +
            std::to_string(kDefaultKvCapacityHeadroomBytes / (1024ULL * 1024ULL)) +
            " MiB of sizing headroom.\n"
@@ -213,6 +215,8 @@ Options parse_options(int argc, char** argv) {
             options.gdn_state_fp16 = true;
         } else if (arg == "--mlp-a8-decode") {
             options.mlp_a8_decode = true;
+        } else if (arg == "--no-prefill-a8") {
+            options.prefill_a8 = false;
         } else if (arg == "--raw-output") {
             options.raw_output = true;
         } else if (arg == "--print-token-ids") {

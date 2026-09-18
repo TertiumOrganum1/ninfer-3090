@@ -88,7 +88,7 @@ std::string serve_usage_text(const char* argv0) {
            "[--chat-template FILE] "
            "[--lm-head-draft] [--lm-head-q4|--lm-head-q6] [--embedding-q4|--embedding-q6] [--mtp-experts-q4] "
            "[--gdn-state-fp16] "
-           "[--mlp-a8-decode] "
+           "[--mlp-a8-decode] [--no-prefill-a8] "
            "[--no-thinking] [--preserve-thinking] [--cors] "
            "[--temperature F] [--top-p F] [--top-k N] [--min-p F] [--presence-penalty F] "
            "[--frequency-penalty F] [--seed N] [--greedy]\n"
@@ -370,6 +370,8 @@ ServeOptions parse_serve_options(int argc, char** argv) {
             options.gdn_state_fp16 = true;
         } else if (arg == "--mlp-a8-decode") {
             options.mlp_a8_decode = true;
+        } else if (arg == "--no-prefill-a8") {
+            options.prefill_a8 = false;
         } else if (arg == "--chat-template") {
             options.chat_template_path = require_value("--chat-template");
         } else if (arg == "--no-thinking") {

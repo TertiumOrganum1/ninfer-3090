@@ -698,6 +698,7 @@ std::string format_server_start_json(
              {"mtp_experts_q4", engine_options.mtp_experts_q4},
              {"gdn_state_fp16", engine_options.gdn_state_fp16},
              {"mlp_a8_decode", engine_options.mlp_a8_decode},
+             {"prefill_a8", engine_options.prefill_a8},
              {"prefix_reuse", options.allow_prefix_reuse},
              {"speculative_backend",
               product::speculative_backend_name(engine_options.speculative.backend)},

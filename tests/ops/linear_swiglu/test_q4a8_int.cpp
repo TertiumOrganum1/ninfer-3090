@@ -12,6 +12,8 @@
 // about 0.009 on the real 27B weight, so a four-fold regression would still pass the gate but be
 // obvious in the output.
 
+#include "ops/attn_input_proj/q4_q5/q4_q5_attn_input_plan.h"
+#include "ops/gdn_input_proj/q4_q5/q4_q5_gdn_input_plan.h"
 #include "ops/linear_swiglu/q4a8/q4a8_linear_swiglu.h"
 #include "ops/linear_swiglu/q4/q4_linear_swiglu_kernels.h"
 #include "ops/linear_swiglu/q4/q4_linear_swiglu_plan.h"
@@ -209,9 +211,10 @@ int run_gate_up_small_t_i8(std::int32_t kTokens) {
     return failures;
 }
 
-int run_down(std::int32_t tokens) {
+// kCols selects the registered profile: 17408 is mlp/down, 6144 the attention o_proj and GDN
+// out_proj. They share one kernel, so both widths have to be checked against the oracle.
+int run_down(std::int32_t tokens, std::int32_t kCols = 17408) {
     constexpr std::int32_t kRows = 5120;
-    constexpr std::int32_t kCols = 17408;
 
     const PackedWeight host_weight =
         qw::make_patterned_weight(QType::Q5_G64_FP16, kRows, kCols, 5501U);
@@ -229,14 +232,15 @@ int run_down(std::int32_t tokens) {
     test::GuardedDeviceBuffer device_residual(res_elements * sizeof(std::uint16_t));
     device_residual.copy_from_host(residual0.data(), res_elements * sizeof(std::uint16_t));
 
-    WorkspaceArena workspace(
-        std::max<std::size_t>(ops::detail::q5a8_add_workspace_capacity_bytes(tokens, tokens), 256));
+    WorkspaceArena workspace(std::max<std::size_t>(
+        ops::detail::q5a8_add_workspace_capacity_bytes(kCols, tokens, tokens), 256));
     Tensor x(device_x.data(), DType::BF16, {kCols, tokens});
     Tensor residual(device_residual.data(), DType::BF16, {kRows, tokens});
     ops::detail::q5a8_add_launch(x, weight, residual, workspace, nullptr);
     test::cuda_check(cudaDeviceSynchronize(), "synchronize q5a8 add");
 
-    const std::string label = "LinearAdd Q5_A8INT T=" + std::to_string(tokens);
+    const std::string label =
+        "LinearAdd Q5_A8INT K=" + std::to_string(kCols) + " T=" + std::to_string(tokens);
     int failures            = 0;
     failures += device_residual.verify_guards(label);
 
@@ -267,6 +271,186 @@ int run_down(std::int32_t tokens) {
     return failures;
 }
 
+
+// The GDN input projection is two parents over one activation, scattered into three destinations:
+// qk -> qkv[0,4096), value_z rows [0,6144) -> qkv[4096,10240), rows [6144,12288) -> z. A row
+// mapped to the wrong destination still produces plausible numbers in the other two, so every
+// range is sampled.
+int run_gdn_input(std::int32_t tokens) {
+    constexpr std::int32_t kHidden    = 5120;
+    constexpr std::int32_t kQkRows    = 4096;
+    constexpr std::int32_t kValueRows = 6144;
+    constexpr std::int32_t kZRows     = 6144;
+    constexpr std::int32_t kQkvRows   = kQkRows + kValueRows;
+    constexpr std::int32_t kParentRows = kValueRows + kZRows;
+
+    const PackedWeight host_qk =
+        qw::make_patterned_weight(QType::Q4_G64_FP16, kQkRows, kHidden, 909U);
+    const PackedWeight host_vz =
+        qw::make_patterned_weight(QType::Q5_G64_FP16, kParentRows, kHidden, 313U);
+    const std::vector<std::uint16_t> activation = make_activation(kHidden, tokens, 41U);
+
+    test::GuardedDeviceBuffer device_qk(host_qk.payload.size());
+    device_qk.copy_from_host(host_qk.payload.data(), host_qk.payload.size());
+    test::GuardedDeviceBuffer device_vz(host_vz.payload.size());
+    device_vz.copy_from_host(host_vz.payload.data(), host_vz.payload.size());
+    const Weight qk = host_qk.device_weight(device_qk.data());
+    const Weight vz = host_vz.device_weight(device_vz.data());
+
+    test::GuardedDeviceBuffer device_x(activation.size() * sizeof(std::uint16_t));
+    device_x.copy_from_host(activation.data(), activation.size() * sizeof(std::uint16_t));
+    test::GuardedDeviceBuffer device_qkv(static_cast<std::size_t>(kQkvRows) * tokens *
+                                         sizeof(std::uint16_t));
+    test::GuardedDeviceBuffer device_z(static_cast<std::size_t>(kZRows) * tokens *
+                                       sizeof(std::uint16_t));
+
+    WorkspaceArena workspace(std::max<std::size_t>(
+        ops::detail::q4_q5_gdn_input_a8_workspace_capacity_bytes(tokens, tokens), 256));
+    Tensor x(device_x.data(), DType::BF16, {kHidden, tokens});
+    Tensor qkv(device_qkv.data(), DType::BF16, {kQkvRows, tokens});
+    Tensor z(device_z.data(), DType::BF16, {kZRows, tokens});
+    ops::detail::q4_q5_gdn_input_a8_launch(x, qk, vz, qkv, z, workspace, nullptr);
+    test::cuda_check(cudaDeviceSynchronize(), "synchronize q4_q5 gdn input a8");
+
+    const std::string label = "GdnInputProj A8INT T=" + std::to_string(tokens);
+    int failures            = 0;
+    failures += device_qkv.verify_guards(label);
+    failures += device_z.verify_guards(label);
+
+    const std::vector<double> got_qkv =
+        read_bf16(device_qkv, static_cast<std::size_t>(kQkvRows) * tokens);
+    const std::vector<double> got_z =
+        read_bf16(device_z, static_cast<std::size_t>(kZRows) * tokens);
+
+    Samples s;
+    std::vector<float> input(static_cast<std::size_t>(kHidden));
+    for (int pick = 0; pick < 24; ++pick) {
+        const std::int32_t token = static_cast<std::int32_t>(
+            qw::detail::mix64(pick * 7907U + 3U) % static_cast<std::uint64_t>(tokens));
+        for (std::int32_t k = 0; k < kHidden; ++k) {
+            input[static_cast<std::size_t>(k)] =
+                bf16_value(activation[static_cast<std::size_t>(token) * kHidden + k]);
+        }
+        // Rotate through the three destination ranges so each is sampled evenly.
+        const int range = pick % 3;
+        if (range == 0) {
+            const std::int32_t row = static_cast<std::int32_t>(
+                qw::detail::mix64(pick * 131071U + 11U) % static_cast<std::uint64_t>(kQkRows));
+            s.reference.push_back(qw::dot_fp64(host_qk, row, input.data(), kHidden));
+            s.actual.push_back(got_qkv[static_cast<std::size_t>(token) * kQkvRows + row]);
+        } else if (range == 1) {
+            const std::int32_t row = static_cast<std::int32_t>(
+                qw::detail::mix64(pick * 65521U + 13U) % static_cast<std::uint64_t>(kValueRows));
+            s.reference.push_back(qw::dot_fp64(host_vz, row, input.data(), kHidden));
+            s.actual.push_back(
+                got_qkv[static_cast<std::size_t>(token) * kQkvRows + kQkRows + row]);
+        } else {
+            const std::int32_t row = static_cast<std::int32_t>(
+                qw::detail::mix64(pick * 32749U + 17U) % static_cast<std::uint64_t>(kZRows));
+            s.reference.push_back(qw::dot_fp64(host_vz, kValueRows + row, input.data(), kHidden));
+            s.actual.push_back(got_z[static_cast<std::size_t>(token) * kZRows + row]);
+        }
+    }
+
+    const ReductionStats stats = compute_reduction_stats(
+        s.actual.data(), s.reference.data(), static_cast<std::int64_t>(s.actual.size()));
+    std::cout << "  " << label << " relative_l2=" << stats.relative_l2 << " (allowance "
+              << kA8QuantizationAllowance << ")\n";
+    failures += verify_reduction(label, s.actual, s.reference, kA8Criterion);
+    return failures;
+}
+
+
+// The attention input projection is two parents over one activation, split into four destinations:
+// query_key rows [0,6144) -> q and [6144,7168) -> k, gate_value the same into gate and v. The k/v
+// ranges are 1024 rows, the narrowest tile grid this kernel is launched with.
+int run_attn_input(std::int32_t tokens) {
+    constexpr std::int32_t kHidden     = 5120;
+    constexpr std::int32_t kQRows      = 6144;
+    constexpr std::int32_t kKvRows     = 1024;
+    constexpr std::int32_t kParentRows = kQRows + kKvRows;
+
+    const PackedWeight host_qk =
+        qw::make_patterned_weight(QType::Q4_G64_FP16, kParentRows, kHidden, 4441U);
+    const PackedWeight host_gv =
+        qw::make_patterned_weight(QType::Q5_G64_FP16, kParentRows, kHidden, 977U);
+    const std::vector<std::uint16_t> activation = make_activation(kHidden, tokens, 59U);
+
+    test::GuardedDeviceBuffer device_qk(host_qk.payload.size());
+    device_qk.copy_from_host(host_qk.payload.data(), host_qk.payload.size());
+    test::GuardedDeviceBuffer device_gv(host_gv.payload.size());
+    device_gv.copy_from_host(host_gv.payload.data(), host_gv.payload.size());
+    const Weight qk = host_qk.device_weight(device_qk.data());
+    const Weight gv = host_gv.device_weight(device_gv.data());
+
+    test::GuardedDeviceBuffer device_x(activation.size() * sizeof(std::uint16_t));
+    device_x.copy_from_host(activation.data(), activation.size() * sizeof(std::uint16_t));
+    const std::size_t q_elements  = static_cast<std::size_t>(kQRows) * tokens;
+    const std::size_t kv_elements = static_cast<std::size_t>(kKvRows) * tokens;
+    test::GuardedDeviceBuffer device_q(q_elements * sizeof(std::uint16_t));
+    test::GuardedDeviceBuffer device_gate(q_elements * sizeof(std::uint16_t));
+    test::GuardedDeviceBuffer device_k(kv_elements * sizeof(std::uint16_t));
+    test::GuardedDeviceBuffer device_v(kv_elements * sizeof(std::uint16_t));
+
+    WorkspaceArena workspace(std::max<std::size_t>(
+        ops::detail::q4_q5_attn_input_a8_workspace_capacity_bytes(tokens, tokens), 256));
+    Tensor x(device_x.data(), DType::BF16, {kHidden, tokens});
+    Tensor q(device_q.data(), DType::BF16, {kQRows, tokens});
+    Tensor gate(device_gate.data(), DType::BF16, {kQRows, tokens});
+    Tensor k(device_k.data(), DType::BF16, {kKvRows, tokens});
+    Tensor v(device_v.data(), DType::BF16, {kKvRows, tokens});
+    ops::detail::q4_q5_attn_input_a8_launch(x, qk, gv, q, gate, k, v, workspace, nullptr);
+    test::cuda_check(cudaDeviceSynchronize(), "synchronize q4_q5 attn input a8");
+
+    const std::string label = "AttnInputProj A8INT T=" + std::to_string(tokens);
+    int failures            = 0;
+    failures += device_q.verify_guards(label);
+    failures += device_gate.verify_guards(label);
+    failures += device_k.verify_guards(label);
+    failures += device_v.verify_guards(label);
+
+    const std::vector<double> got_q    = read_bf16(device_q, q_elements);
+    const std::vector<double> got_gate = read_bf16(device_gate, q_elements);
+    const std::vector<double> got_k    = read_bf16(device_k, kv_elements);
+    const std::vector<double> got_v    = read_bf16(device_v, kv_elements);
+
+    Samples s;
+    std::vector<float> input(static_cast<std::size_t>(kHidden));
+    for (int pick = 0; pick < 24; ++pick) {
+        const std::int32_t token = static_cast<std::int32_t>(
+            qw::detail::mix64(pick * 5153U + 7U) % static_cast<std::uint64_t>(tokens));
+        for (std::int32_t c = 0; c < kHidden; ++c) {
+            input[static_cast<std::size_t>(c)] =
+                bf16_value(activation[static_cast<std::size_t>(token) * kHidden + c]);
+        }
+        const int range = pick % 4;
+        const std::int32_t wide = static_cast<std::int32_t>(
+            qw::detail::mix64(pick * 99991U + 23U) % static_cast<std::uint64_t>(kQRows));
+        const std::int32_t narrow = static_cast<std::int32_t>(
+            qw::detail::mix64(pick * 49999U + 29U) % static_cast<std::uint64_t>(kKvRows));
+        if (range == 0) {
+            s.reference.push_back(qw::dot_fp64(host_qk, wide, input.data(), kHidden));
+            s.actual.push_back(got_q[static_cast<std::size_t>(token) * kQRows + wide]);
+        } else if (range == 1) {
+            s.reference.push_back(qw::dot_fp64(host_qk, kQRows + narrow, input.data(), kHidden));
+            s.actual.push_back(got_k[static_cast<std::size_t>(token) * kKvRows + narrow]);
+        } else if (range == 2) {
+            s.reference.push_back(qw::dot_fp64(host_gv, wide, input.data(), kHidden));
+            s.actual.push_back(got_gate[static_cast<std::size_t>(token) * kQRows + wide]);
+        } else {
+            s.reference.push_back(qw::dot_fp64(host_gv, kQRows + narrow, input.data(), kHidden));
+            s.actual.push_back(got_v[static_cast<std::size_t>(token) * kKvRows + narrow]);
+        }
+    }
+
+    const ReductionStats stats = compute_reduction_stats(
+        s.actual.data(), s.reference.data(), static_cast<std::int64_t>(s.actual.size()));
+    std::cout << "  " << label << " relative_l2=" << stats.relative_l2 << " (allowance "
+              << kA8QuantizationAllowance << ")\n";
+    failures += verify_reduction(label, s.actual, s.reference, kA8Criterion);
+    return failures;
+}
+
 // The routes must decline anything they do not cover, so the caller falls back to A16 rather than
 // producing a wrong answer. Decode and partial prefill chunks depend on this.
 int run_admission() {
@@ -277,6 +461,11 @@ int run_admission() {
         qw::make_patterned_weight(QType::Q5_G64_FP16, 5120, 17408, 2U);
     const PackedWeight wrong_shape =
         qw::make_patterned_weight(QType::Q4_G64_FP16, 4096, 5120, 3U);
+    // The mixer output projections: same kernel, narrower K.
+    const PackedWeight q5_mixer =
+        qw::make_patterned_weight(QType::Q5_G64_FP16, 5120, 6144, 4U);
+    const PackedWeight q5_unregistered =
+        qw::make_patterned_weight(QType::Q5_G64_FP16, 5120, 8192, 5U);
 
     void* fake = reinterpret_cast<void*>(static_cast<std::uintptr_t>(4096));
     struct Case {
@@ -298,6 +487,8 @@ int run_admission() {
         {"q5 declines partial tile", ops::detail::q5a8_add_supported(q5.device_weight(fake), 129), false},
         {"q5 declines a Q4 weight", ops::detail::q5a8_add_supported(q4.device_weight(fake), 128), false},
         {"q5 declines a null high plane", ops::detail::q5a8_add_supported(q5.device_weight(nullptr), 128), false},
+        {"q5 accepts the 6144 mixer output", ops::detail::q5a8_add_supported(q5_mixer.device_weight(fake), 128), true},
+        {"q5 declines an unregistered K", ops::detail::q5a8_add_supported(q5_unregistered.device_weight(fake), 128), false},
     };
     for (const Case& c : cases) {
         if (c.got != c.want) {
@@ -317,6 +508,9 @@ int main() {
         for (const std::int32_t tokens : {128, 256, 512}) {
             failures += run_gate_up(tokens);
             failures += run_down(tokens);
+            failures += run_down(tokens, 6144);
+            failures += run_gdn_input(tokens);
+            failures += run_attn_input(tokens);
         }
         // Every band of the T=2..32 dispatch, including widths that exercise column masking.
         for (const std::int32_t t : {2, 5, 8, 9, 16, 17, 24, 25, 31, 32}) {

@@ -151,6 +151,11 @@ void linear_swiglu(const Tensor& x, const Weight& gate_up_weight, Tensor& out, L
         return;
     }
 
+    if (!aligned_to(gate_up_weight.qdata, 16) ||
+        !aligned_to(gate_up_weight.scales, q8_weight ? 16 : 4)) {
+        throw std::invalid_argument("linear_swiglu: required code/scale alignment is missing");
+    }
+
     const bool integer_a8 = allows_a8_int(policy);
     if (integer_a8 && q4_weight && detail::q4a8_swiglu_supported(gate_up_weight, t)) {
         detail::q4a8_swiglu_launch(x, gate_up_weight, out, ws, stream);
@@ -163,10 +168,6 @@ void linear_swiglu(const Tensor& x, const Weight& gate_up_weight, Tensor& out, L
         gate_up_weight.n == 34816 && gate_up_weight.k == 5120) {
         detail::q4_linear_swiglu_small_t_tiled_i8_launch(x, gate_up_weight, out, ws, stream);
         return;
-    }
-    if (!aligned_to(gate_up_weight.qdata, 16) ||
-        !aligned_to(gate_up_weight.scales, q8_weight ? 16 : 4)) {
-        throw std::invalid_argument("linear_swiglu: required code/scale alignment is missing");
     }
 
     if (q8_weight) {

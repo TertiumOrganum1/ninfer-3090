@@ -32,8 +32,9 @@ void check(bool ok, const std::string& what) {
 }
 
 // Planning reads only qtype, shape and policy, so the parameters need no device memory. The
-// policies are what execution::Parameters assigns to the 27B groupwise-int MLP pair on sm_86.
-DenseParameters parameters(bool a8_decode) {
+// policies are what execution::Parameters assigns to the 27B groupwise-int MLP pair on sm_86,
+// mirroring src/models/qwen3_5/execution/parameters.cpp's Prepare::dense().
+DenseParameters parameters(bool prefill_a8, bool a8_decode) {
     DenseParameters out;
     out.gate_up.weight.qtype = QType::Q4_G64_FP16;
     out.gate_up.weight.n     = 34816;
@@ -42,18 +43,26 @@ DenseParameters parameters(bool a8_decode) {
     out.down.weight.n        = 5120;
     out.down.weight.k        = 17408;
 #if defined(NINFER_SM8X_COMPAT)
-    out.gate_up.policy = LinearPolicy::AllowA8Int;
-    out.down.policy    = LinearPolicy::AllowA8Int;
+    if (prefill_a8) {
+        out.gate_up.policy = LinearPolicy::AllowA8Int;
+        out.down.policy    = LinearPolicy::AllowA8Int;
+    }
 #endif
-    out.verify_gate_up_policy = a8_decode && out.gate_up.policy == LinearPolicy::AllowA8Int
-                                    ? LinearPolicy::AllowA8IntDecode
-                                    : out.gate_up.policy;
+    out.verify_gate_up_policy = out.gate_up.policy;
+#if defined(NINFER_SM8X_COMPAT)
+    // --mlp-a8-decode admits the decode route by this profile's own format/shape, independently
+    // of --prefill-a8 -- the two flags must stay orthogonal (see parameters.cpp:dense()).
+    if (a8_decode && out.gate_up.weight.qtype == QType::Q4_G64_FP16 &&
+        out.gate_up.weight.n == 34816 && out.gate_up.weight.k == 5120) {
+        out.verify_gate_up_policy = LinearPolicy::AllowA8IntDecode;
+    }
+#endif
     return out;
 }
 
 void run_planning() {
-    const DenseParameters on  = parameters(true);
-    const DenseParameters off = parameters(false);
+    const DenseParameters on  = parameters(true, true);
+    const DenseParameters off = parameters(true, false);
     for (const std::int32_t width : {16, 24, 32}) {
         const std::size_t prefill = ffn_workspace_bytes(on, width, width, false, false);
         const std::size_t verify  = ffn_workspace_bytes(on, width, width, false, true);
@@ -86,8 +95,49 @@ void run_planning() {
     }
 }
 
+// --no-prefill-a8 and --mlp-a8-decode are documented as orthogonal: disabling prefill's full-tile
+// route must not disable the separately requested decode route, and enabling decode must not
+// re-enable prefill.
+void run_combined_flags() {
+    const DenseParameters decode_only = parameters(/*prefill_a8=*/false, /*a8_decode=*/true);
+    const DenseParameters neither     = parameters(/*prefill_a8=*/false, /*a8_decode=*/false);
+    const DenseParameters both        = parameters(/*prefill_a8=*/true, /*a8_decode=*/true);
+
+    check(decode_only.gate_up.policy == LinearPolicy::A16Only,
+          "--no-prefill-a8 must leave gate_up.policy at A16Only regardless of --mlp-a8-decode");
+#if defined(NINFER_SM8X_COMPAT)
+    check(decode_only.verify_gate_up_policy == LinearPolicy::AllowA8IntDecode,
+          "--mlp-a8-decode must admit the decode route even when --no-prefill-a8 is set");
+#endif
+
+    for (const std::int32_t width : {16, 24, 32}) {
+        const std::size_t prefill = ffn_workspace_bytes(decode_only, width, width, false, false);
+        // --prefill-a8 is off, so a prefill/scoring call must reserve exactly the A16 amount,
+        // regardless of --mlp-a8-decode.
+        check(prefill == ffn_workspace_bytes(neither, width, width, false, false),
+              "prefill planning must stay A16-only with --no-prefill-a8 --mlp-a8-decode at T=" +
+                  std::to_string(width));
+        // --mlp-a8-decode alone must still admit the same verify-phase decode route it gets
+        // with --prefill-a8 also on -- the two flags must not interact.
+        const std::size_t verify = ffn_workspace_bytes(decode_only, width, width, false, true);
+        check(verify >= prefill, "verify planning must not undercut prefill under "
+                                  "--no-prefill-a8 --mlp-a8-decode at T=" +
+                                      std::to_string(width));
+#if defined(NINFER_SM8X_COMPAT)
+        check(verify > prefill,
+              "verify planning must admit the decode route under --no-prefill-a8 "
+              "--mlp-a8-decode at T=" +
+                  std::to_string(width));
+#endif
+        check(verify == ffn_workspace_bytes(both, width, width, false, true),
+              "decode-route verify planning must be identical with --prefill-a8 on or off at T=" +
+                  std::to_string(width));
+    }
+}
+
 int run() {
     run_planning();
+    run_combined_flags();
     std::cout << (failures == 0 ? "OK" : "FAIL")
               << " --mlp-a8-decode phase gate and workspace planning\n";
     return failures == 0 ? 0 : 1;

@@ -3061,9 +3061,152 @@ ceiling, and neither has had any optimisation attempted.
       at this reference passed `-k 'regex:a|b'` and PowerShell parsed the `|` as a pipe before `ncu`
       saw it, producing an empty report. Fixed to a single `--kernel-name` pattern.
 
-- [ ] **Prefill's MLP GEMMs run at ~30% of the card's INT8 tensor-core rate, because 124 registers
-      per thread hold the SM to 16 of 48 warps.** Cause located 2026-09-09 with counters; the
-      remaining work is a retile. Every other explanation has been measured and ruled out.
+- [ ] **Prefill's MLP GEMMs run at ~30% of the card's INT8 tensor-core rate. The occupancy
+      explanation below is wrong, and the retile it asks for is measured and does not pay.**
+
+      **Measured 2026-09-18** with `tools/w4a8_rowsplit_probe.cu`, which parameterises the warp
+      tile, at the gate_up shape and T=512. Occupancy was raised for real, not argued about:
+
+      | warp tile | block tile | registers | blocks/SM | warps of 48 | us |
+      |---|---|---:|---:|---:|---:|
+      | 2x4 (production shape) | 128x128 | 108 | 1 | 16 | 1,890 |
+      | 1x4 | 64x128 | **55** | **2** | **32** | **1,785** |
+      | 2x2 | 128x64 | 63 | 2 | 32 | 2,844 |
+
+      Doubling resident warps is worth **6%**, not the 40% `ncu` estimated, and cutting the tile
+      further to reach the same occupancy costs 50% because each thread re-reads more weight.
+      `cudaOccupancyMaxActiveBlocksPerMultiprocessor` confirms the block counts, so this is not a
+      launch that failed to get the occupancy it asked for. **Registers are not the lever.**
+
+      The same probe rules out the other half of the theory: keeping the artifact's RowSplit
+      weights and winning everything else the fragment-order probe won — `cp.async` on all four
+      planes, packed nibbles in shared, the weight scales as an async ring so nothing waits on a
+      synchronous global read — measures **1,726 us against production's 1,701**, i.e. nothing.
+      `tools/w4a8_real_weight_probe.cu` puts the fully repacked layout at 1,566 us with per-group
+      scales (the 1,415 us figure needs per-token scales, at 12.9% relative L2 on outlier-heavy
+      inputs), so **the entire layout lever is ~8%** and it requires a repack `AGENTS.md` forbids
+      and ~9.7 GB a 24 GB card does not have.
+
+      **And the reason none of it moved is that the kernel was not compute-bound.** Ablating the
+      probe (same shape, T=512) removes one cost at a time while keeping the MMA count identical:
+      2,068 us complete, 1,918 without the scale reads, 1,856 without the per-group rescale, 1,423
+      without the A-fragment shared reads, 1,424 without B's as well -- and **1,378 us with the
+      MMAs removed but every load kept, against 1,378 us with the MMAs and every shared read
+      removed.** Two thirds of the time is the global-to-shared streaming path, at ~28% of DRAM
+      peak, so it is cp.async latency rather than bandwidth, occupancy, or the tensor cores.
+
+      What generates that traffic is the token tile: a block covering BN tokens re-streams the whole
+      weight matrix once per column block, eight times over at the production chunk of 1,024. At
+      T=1024, 128x128 measures 4,265 us, 128x256 3,702, and **64x512 3,060 (+39%)**; a grid swizzle
+      to let L2 serve the repeats is worth within 0.5% of nothing. That is shipped -- see
+      `docs/performance.md` -- and it is what this entry should have been about.
+
+      **And the size of what is left is now measured, not guessed.**
+      `tools/int8_gemm_reference_probe.cu` runs cuBLAS's int8 GEMM over these shapes on this card:
+      237.5 TOP/s at gate_up against our 95.5, 176.1 at mlp/down against 100.1, 176.7 at the mixer
+      out_proj against 93.3 -- 1.8x to 2.5x, while reading twice the weight bytes our int4 codes do
+      and with no unpack, no per-group scale and no fused epilogue to pay for. cuBLAS finishes
+      gate_up in 1,537 us, less than the 1,711 us our schedule spends streaming alone, so the
+      streaming is ours rather than the hardware's.
+
+      **And the deficit is specific to the integer path, which the bf16 control settles.** The same
+      probe runs cuBLAS's bf16 GEMM over the same shapes: 66.4 TFLOP/s at gate_up against this
+      fork's A16 route at 59.4, so the 16-bit path is at **89% of a tuned kernel** while the integer
+      path is at **40%** of one. This fork does not write slow GEMMs; it writes one slow *integer*
+      GEMM, because that mainloop does two things extra -- unpacking 4-bit codes and applying a
+      per-group scale -- and under MMAs four times faster than bf16 those stop hiding.
+
+      **Every knob this structure has is now priced** (gate_up, T=1024, against 3,113 us for the
+      shipped 64x512 schedule):
+
+      | knob | worth |
+      |---|---:|
+      | token tile 128 -> 512 (shipped) | **+39%** |
+      | occupancy, 16 -> 32 warps | +6% |
+      | cp.async pipeline depth 2 -> 4 | +3.9% |
+      | grid swizzle for L2 reuse | +0.5% |
+      | L2 `evict_first` on the weight stream (Marlin's hint) | -0.8% |
+      | interleaving the B loads with the MMAs | -1.9% |
+      | operand layout in MMA-fragment order | ~17%, behind a repack |
+
+      Nothing left is worth more than a few percent, so **stop tuning this kernel**.
+
+      **What Marlin has instead, read from `IST-DASLab/marlin` and summarised so the next person
+      does not have to:** four cp.async stages rather than two; register fragments double-buffered
+      across k-steps (`frag_a[2]`, `frag_b_quant[2]`, indexed `k % 2`); `ldmatrix` (`ldsm4`) for the
+      fragments rather than per-lane loads; the quantised operand held *packed* in registers and
+      dequantised immediately before its MMA with LOP3 bit tricks (~6-7 instructions per 8 values);
+      an XOR-swizzled shared layout rather than padding; 256 threads (8 warps) rather than 512; and
+      a striped split-K with an L2 global reduce. The one that makes the rest possible is that
+      **its weights are permuted into fragment order before the kernel ever runs** -- which is why
+      its fragment loads are single instructions and ours are four.
+
+      **The other direction is priced too, and it is worse.** `tools/w4_dequant_cublas_probe.cu`
+      materialises the weights as int8 and calls cuBLAS. It cannot be done once and kept -- int8
+      weights for this model are ~24 GB against a 24 GB card, so neither VRAM nor a different
+      on-disk format rescues it -- so it measures a per-chunk materialisation. At T=1024: gate_up
+      324 us to dequantise plus 1,540 in cuBLAS against our 3,825 (2.05x), mlp/down 1.51x, out_proj
+      1.60x. Deduct an epilogue pass over cuBLAS's int32 output that the probe does not charge for
+      (~360 us on gate_up) and it is ~1.7x, bought with a coarser weight quantisation (one scale per
+      row rather than per 64), per-token activation scales, and ~320 MB of scratch. Strictly worse
+      than the layout change, which keeps 4-bit weights.
+
+      **Marlin's design was then built and measured, and it does not pay.**
+      `tools/w4a8_marlin_probe.cu` implements all of it at once over a permuted weight layout: the
+      weight permuted within each group of 64 so one 8-byte shared load is a lane's whole A fragment
+      for a row, LOP3 dequant whose natural output order *is* the MMA's required order, packed
+      nibbles in shared, a cp.async ring of 3-4 stages, and one barrier per stage instead of two per
+      group. Best configuration (128x128, 256 threads, 2 blocks/SM): **2,901 us / 125.8 TOP/s
+      against the shipped 117.3 - 1.07x**, where the gate was 1,900 us / 192 TOP/s. Abandoned.
+
+      **The decomposition is the useful part, because it relocates the problem twice over.** The
+      kernel has two different bottlenecks at two different shapes, and no shape escapes both.
+      Per-thread accumulator count is `BM*BN/THREADS`, and 64 fp32 accumulators is what a
+      128-register budget allows once fragments, addresses and the scale ring also live there. So a
+      tile wide enough to cut the streamed bytes forces 512 threads, and 512 threads is what wrecks
+      the MMA issue rate:
+
+      | ablation (gate_up, T=1024) | 128x128, 256 thr | 128x256, 512 thr |
+      |---|---:|---:|
+      | streaming alone, no MMAs, no shared reads | 2,729 us | 1,376 us |
+      | MMAs alone, no streaming, no reads, no rescale | 1,444 us | 1,704 us (1,855 with barriers) |
+      | full kernel | **2,901 us** | 2,966 us |
+      | | memory bound | issue bound, parts additive |
+
+      **The arithmetic this campaign spent itself attacking is not the gap.** At the better shape
+      the entire per-group rescale -- 64 int-to-float converts plus 64 FMAs per thread per group,
+      four ALU operations for every MMA -- is worth **44 us of 2,901** (int32 accumulate, rescaled
+      once), and per-token activation scales are worth 42 us. Both sit inside the noise of a kernel
+      on its memory floor. **Group-128 weight scales and per-token activation scales -- the two
+      quality trades Marlin makes and this fork declines -- would buy ~1.5% here.** That closes the
+      open question the previous revision of this entry left, and closes it against the trade.
+
+      **What the bytes say.** At 128x128, 1,712 MB of activation re-reads plus 856 MB of weights in
+      2,729 us is 941 GB/s: exactly this card's DRAM peak, so no L2 reuse at all -- although the
+      786 KB activation tile is shared by all 164 concurrent blocks and ought to be L2-resident. At
+      128x256 with 512 threads the same sum runs at 1,555 GB/s, 1.66x DRAM peak, so there the reuse
+      *is* happening. The difference is memory-level parallelism, not bytes: the 256-thread shape
+      cannot keep enough cp.async in flight to reach L2's rate. And byte-minimal shapes do not
+      rescue it either -- 256x128 at 512 threads streams the least of any register-legal tile
+      (1,712 MB) and runs 3,220 us, because 70 KB of shared drops it to one block per SM.
+
+      **So two questions remain, and both are counter reads, not probes:** whether the 128x256
+      shape is leaving ~3x of L2 bandwidth unclaimed, and why its streaming and its MMAs add rather
+      than overlap. `dram__bytes`, `lts__t_sectors` and the issue-stall reasons answer both in one
+      `ncu` session, which needs elevation on this box (ERR_NVGPUCTRPERM). Until someone has that
+      data, **prefill kernel work on this fork is closed**: the shipped state is +21-29% over where
+      this entry started, the remaining gap is localised to the memory path rather than the
+      arithmetic, and further guessing is mispriced.
+
+      The projections that had no integer route at all were the larger win and are done: see
+      `docs/performance.md`, +13-17% prefill at every length.
+
+      The original entry follows, kept because its ruled-out explanations are still ruled out.
+
+- [ ] **(superseded, see above) Prefill's MLP GEMMs run at ~30% of the card's INT8 tensor-core
+      rate, because 124 registers per thread hold the SM to 16 of 48 warps.** Cause located
+      2026-09-09 with counters; the remaining work is a retile. Every other explanation has been
+      measured and ruled out.
 
       Measured (#53 plus `tools/tensor_core_rate_probe.cu`): `q4a8_swiglu` reaches 97.4 T/s and
       `q5a8_add` 89.4 T/s against a measured **314.8 TOPS** INT8 ceiling, while the BF16 GDN

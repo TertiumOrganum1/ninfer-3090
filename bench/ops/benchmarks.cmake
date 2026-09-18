@@ -54,6 +54,8 @@ ninfer_add_op_bench(ninfer_q5_linear_add_schedule_bench
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/q5_linear_add_schedule_bench.cu")
 ninfer_add_op_bench(ninfer_dense_linear_add_schedule_bench
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/dense_linear_add_schedule_bench.cu")
+ninfer_add_op_bench(ninfer_a8_prefill_schedule_bench
+  SOURCES "${CMAKE_CURRENT_LIST_DIR}/a8_prefill_schedule_bench.cu")
 ninfer_add_op_bench(ninfer_q8_dflash2_schedule_bench
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/q8_dflash2_schedule_bench.cu")
 ninfer_add_op_bench(ninfer_q8_pair_schedule_bench

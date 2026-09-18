@@ -44,6 +44,22 @@ void gdn_input_proj(const Tensor& x, const Weight& qk_weight, const Weight& valu
                     Tensor& qkv, Tensor& z, cudaStream_t stream);
 
 /**
+ * Policy-bearing split form. AllowA8Int admits the integer-activation route for the registered
+ * Q4 [4096,5120] plus Q5 [12288,5120] pair at full prefill tiles (T a positive multiple of 128);
+ * every other width, shape or policy takes the A16 schedules and needs no transient bytes. The
+ * transient storage is sized by gdn_input_proj_split_workspace_capacity_bytes().
+ */
+void gdn_input_proj(const Tensor& x, const Weight& qk_weight, const Weight& value_z_weight,
+                    Tensor& qkv, Tensor& z, LinearPolicy policy, WorkspaceArena& workspace,
+                    cudaStream_t stream);
+
+[[nodiscard]] std::size_t
+gdn_input_proj_split_workspace_capacity_bytes(QType qk_qtype, std::int32_t qk_rows,
+                                              QType value_z_qtype, std::int32_t value_z_rows,
+                                              std::int32_t input_rows, LinearPolicy policy,
+                                              std::int32_t min_tokens, std::int32_t max_tokens);
+
+/**
  * Single-parent GDN projection. Registered parent forms are:
  *
  * - Q8_G32_FP16 RowSplit [12288,2048], with stored row counts [2048,2048,4096,4096];

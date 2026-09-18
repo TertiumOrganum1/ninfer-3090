@@ -305,3 +305,30 @@ MMA's arithmetic advantage is mostly unspendable at this shape. The largest sing
 exercise was not the instruction swap but deleting a redundant copy of the staged activation slab.
 That reading applies to the other small-T kernels too -- they share the shape and the staging
 pattern -- and is the reason a cp.async ring lost at every width here.
+
+## `--no-prefill-a8` -- the escape hatch for the integer prefill routes
+
+The odd one out: this is the only flag here that turns a trade *off*. The integer-activation
+prefill routes are default-on because they are cheap enough to be, and the flag exists so they can
+be priced -- both arms of every number in
+[Integer activations for every registered prefill projection](../performance.md#integer-activations-for-every-registered-prefill-projection)
+were measured by flipping it on the same build and card.
+
+Scoring runs the prefill phase, so unlike `--mlp-a8-decode` perplexity sees these routes directly.
+Quick corpus, RTX 3090, Qwen3.8-27B groupwise-int, `--kv-dtype int8`:
+
+| arm | overall perplexity | against A16 |
+|---|---:|---:|
+| `--no-prefill-a8` (every projection A16) | 4.342982 | — |
+| every registered integer route (default) | 4.343155 | **+0.004%** |
+
+That is inside run-to-run noise, and inside the +0.05% this fork requires before a lossy route is
+on by default. The supporting evidence is the FP64 oracle bound in
+`ninfer_linear_swiglu_q4a8_int_test`: 0.010-0.020 relative L2 across every destination range of
+the five registered profiles, against the 0.04 allowance A8 activation compute is held to.
+
+Per-group activation scaling is what keeps the cost this low, and it is a deliberate choice rather
+than an accident of the schedule. `tools/w4a8_real_weight_probe.cu` measures a per-token absmax --
+what Marlin and the vLLM stacks use -- at 1.2e-2 relative L2 rising to **1.29e-1** as outlier
+channels grow, against 9e-3 to 2.0e-2 for a scale per group of 64. It is about 20% faster and it is
+not worth it here; a single large channel otherwise starves every other channel in the token.

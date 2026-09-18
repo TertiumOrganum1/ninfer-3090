@@ -16,6 +16,7 @@ target_sources(ninfer_ops PRIVATE
   "${CMAKE_CURRENT_LIST_DIR}/q4_q5/q4_q5_gdn_input_gemm_mma.cu"
   "${CMAKE_CURRENT_LIST_DIR}/q4_q5/q4_q5_gdn_input_independent.cu"
   "${CMAKE_CURRENT_LIST_DIR}/q4_q5/q4_q5_gdn_input_small_t.cu"
+  "${CMAKE_CURRENT_LIST_DIR}/q4_q5/q4_q5_gdn_input_a8.cu"
   "${CMAKE_CURRENT_LIST_DIR}/q4_q5/q4_q5_gdn_input_plan.cpp"
   "${CMAKE_CURRENT_LIST_DIR}/gdn_projected_conv.cu"
   "${CMAKE_CURRENT_LIST_DIR}/q8/q8_gdn_input_decode.cu"
