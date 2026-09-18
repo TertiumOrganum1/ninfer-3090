@@ -29,24 +29,54 @@ namespace {
 
 namespace a8 = rowsplit_a8;
 
-constexpr std::int32_t kHidden    = 5120;
-constexpr std::int32_t kQkRows    = 4096;
-constexpr std::int32_t kValueRows = 6144;
-constexpr std::int32_t kZRows     = 6144;
-constexpr std::int32_t kQkvRows   = kQkRows + kValueRows;
+constexpr std::int32_t kHidden     = 5120;
+constexpr std::int32_t kQkRows     = 4096;
+constexpr std::int32_t kValueRows  = 6144;
+constexpr std::int32_t kZRows      = 6144;
+constexpr std::int32_t kQkvRows    = kQkRows + kValueRows;
 constexpr std::int32_t kParentRows = kValueRows + kZRows;
 
-template <class Codec>
+// One m-tile per warp over a 4x4 warp grid stages 64 rows, which every row count here divides, and
+// leaves the register budget for the widest token tile.
+using Rows = a8::ContiguousRows<1>;
+
+template <class Codec, int NT>
 void launch_range(const Weight& weight, const std::int8_t* codes, const __half* scales,
                   std::int32_t tokens, std::int32_t row_begin, std::int32_t row_count,
                   a8::StoreEpilogue epilogue, cudaStream_t stream) {
-    const dim3 grid(row_count / a8::kBM, tokens / a8::kBN);
-    a8::a8_mma_kernel<Codec, kHidden, a8::StoreEpilogue>
-        <<<grid, a8::kThreads, a8::shared_bytes(), stream>>>(
-            static_cast<const std::uint8_t*>(weight.qdata),
-            static_cast<const std::uint8_t*>(weight.qhigh),
-            static_cast<const __half*>(weight.scales), codes, scales, tokens, row_begin, epilogue);
+    constexpr int BN       = a8::kWarpsN * NT * 8;
+    const std::size_t smem = a8::shared_bytes<Codec, 1, NT, Rows>(kHidden);
+    const dim3 grid(row_count / Rows::kRowsPerBlock, tokens / BN);
+    auto* kernel = a8::a8_mma_kernel<Codec, kHidden, 1, NT, Rows, a8::StoreEpilogue>;
+    if (smem > 48 * 1024) {
+        CUDA_CHECK(cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize,
+                                        static_cast<int>(smem)));
+    }
+    kernel<<<grid, a8::kThreads, smem, stream>>>(
+        static_cast<const std::uint8_t*>(weight.qdata),
+        static_cast<const std::uint8_t*>(weight.qhigh),
+        static_cast<const __half*>(weight.scales), codes, scales, tokens, Rows{row_begin},
+        epilogue);
     CUDA_CHECK(cudaGetLastError());
+}
+
+// The quantiser writes its activations in the tile's fragment order, so the tile width is chosen
+// once and every launch of this call uses it.
+template <int NT>
+void launch_all(const Tensor& x, const Weight& qk, const Weight& value_z, std::int32_t tokens,
+                std::int8_t* codes, __half* scales, __nv_bfloat16* qkv, __nv_bfloat16* z,
+                cudaStream_t stream) {
+    constexpr int BN = a8::kWarpsN * NT * 8;
+    a8::quantize_activations<kHidden, BN><<<tokens, 128, 0, stream>>>(
+        reinterpret_cast<const __nv_bfloat16*>(x.data), tokens, codes, scales);
+    CUDA_CHECK(cudaGetLastError());
+
+    launch_range<a8::Q4Codec, NT>(qk, codes, scales, tokens, 0, kQkRows,
+                                  a8::StoreEpilogue{qkv, kQkvRows, 0}, stream);
+    launch_range<a8::Q5Codec, NT>(value_z, codes, scales, tokens, 0, kValueRows,
+                                  a8::StoreEpilogue{qkv, kQkvRows, kQkRows}, stream);
+    launch_range<a8::Q5Codec, NT>(value_z, codes, scales, tokens, kValueRows, kZRows,
+                                  a8::StoreEpilogue{z, kZRows, 0}, stream);
 }
 
 } // namespace
@@ -81,22 +111,22 @@ void q4_q5_gdn_input_a8_launch(const Tensor& x, const Weight& qk, const Weight& 
     const DeviceSpan scales = workspace.alloc_bytes(
         static_cast<std::size_t>(tokens) * (kHidden / a8::kGroup) * sizeof(__half));
 
-    a8::quantize_activations<kHidden><<<tokens, 128, 0, stream>>>(
-        reinterpret_cast<const __nv_bfloat16*>(x.data), tokens,
-        reinterpret_cast<std::int8_t*>(codes.data), reinterpret_cast<__half*>(scales.data));
-    CUDA_CHECK(cudaGetLastError());
+    auto* code_data  = reinterpret_cast<std::int8_t*>(codes.data);
+    auto* scale_data = reinterpret_cast<__half*>(scales.data);
+    auto* qkv_data   = static_cast<__nv_bfloat16*>(qkv.data);
+    auto* z_data     = static_cast<__nv_bfloat16*>(z.data);
 
-    const auto* x_codes  = reinterpret_cast<const std::int8_t*>(codes.data);
-    const auto* x_scales = reinterpret_cast<const __half*>(scales.data);
-    auto* qkv_data       = static_cast<__nv_bfloat16*>(qkv.data);
-    auto* z_data         = static_cast<__nv_bfloat16*>(z.data);
-
-    launch_range<a8::Q4Codec>(qk, x_codes, x_scales, tokens, 0, kQkRows,
-                              a8::StoreEpilogue{qkv_data, kQkvRows, 0}, stream);
-    launch_range<a8::Q5Codec>(value_z, x_codes, x_scales, tokens, 0, kValueRows,
-                              a8::StoreEpilogue{qkv_data, kQkvRows, kQkRows}, stream);
-    launch_range<a8::Q5Codec>(value_z, x_codes, x_scales, tokens, kValueRows, kZRows,
-                              a8::StoreEpilogue{z_data, kZRows, 0}, stream);
+    switch (a8::token_tile(tokens, 512)) {
+    case 512:
+        launch_all<16>(x, qk, value_z, tokens, code_data, scale_data, qkv_data, z_data, stream);
+        return;
+    case 256:
+        launch_all<8>(x, qk, value_z, tokens, code_data, scale_data, qkv_data, z_data, stream);
+        return;
+    default:
+        launch_all<4>(x, qk, value_z, tokens, code_data, scale_data, qkv_data, z_data, stream);
+        return;
+    }
 }
 
 } // namespace ninfer::ops::detail

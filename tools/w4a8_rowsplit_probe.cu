@@ -58,7 +58,12 @@
 
 constexpr int N      = 34816;
 constexpr int K      = 5120;
-constexpr int T      = 512;
+// The production prefill chunk is 1024; at BN tokens per block the weight matrix is streamed
+// ceil(T/BN) times, which is what the tile-width and grid-order experiments below are about.
+#ifndef T_TOKENS
+#define T_TOKENS 512
+#endif
+constexpr int T      = T_TOKENS;
 // Warp tile, swept: MT m-tiles of 16 rows and NT n-tiles of 8 tokens per warp, over a fixed 4x4
 // warp grid. The accumulator is MT*NT*4 floats per thread and is the only register term big enough
 // to move occupancy, which TODO.md's open entry names as the cause of the ~30%-of-ceiling rate.
@@ -67,6 +72,23 @@ constexpr int T      = 512;
 #endif
 #ifndef NT
 #define NT 4
+#endif
+// Ablations, to decompose where the time goes. Each removes one cost and keeps the MMA count
+// identical, so the difference is that cost. 1..4 are numerically wrong by construction and skip
+// the correctness gate.
+//   0  everything (the real kernel)
+//   1  no activation/weight scale reads: the per-group rescale keeps its 4 FMAs, loses the loads,
+//      the two half2float conversions and the scale multiply
+//   2  no per-group rescale at all: accumulate s32 across every group, convert once at the end
+//   3  A fragments hoisted out of the group loop (no per-group shared reads for the weights)
+//   4  A and B fragments both hoisted (no shared reads in the loop at all): the MMA issue floor
+//   5  no MMAs: every load, barrier and cp.async stays, so this is the streaming floor
+//   6  no MMAs and no shared reads: cp.async, the barriers and the loop only
+#ifndef SWIZZLE
+#define SWIZZLE 0
+#endif
+#ifndef ABLATE
+#define ABLATE 0
 #endif
 constexpr int WARPS_M = 4;
 constexpr int WARPS_N = 4;
@@ -152,31 +174,40 @@ __global__ __launch_bounds__(512) void w4a8_rowsplit(const unsigned char* __rest
     const int warp_m = warp >> 2;
     const int warp_n = warp & 3;
 
+#if SWIZZLE
+    const int row_block = blockIdx.y * BM;
+    const int col_block = blockIdx.x * BN;
+#else
     const int row_block = blockIdx.x * BM;
     const int col_block = blockIdx.y * BN;
+#endif
 
     const unsigned char* const w_blk = w_codes + static_cast<size_t>(row_block) * (K / 2);
-    const char* const x_blk          = x_perm + static_cast<size_t>(blockIdx.y) * GROUPS * XSTAGE;
+    const char* const x_blk = x_perm + static_cast<size_t>(col_block / BN) * GROUPS * XSTAGE;
     const char* const xs_blk =
-        reinterpret_cast<const char*>(x_scales) + static_cast<size_t>(blockIdx.y) * GROUPS * XSSTAGE;
+        reinterpret_cast<const char*>(x_scales) + static_cast<size_t>(col_block / BN) * GROUPS * XSSTAGE;
     const char* const ws_blk = reinterpret_cast<const char*>(w_scales) +
                                static_cast<size_t>(row_block) * GROUPS * 2;
 
     auto issue = [&](int g, int buf) {
         char* const dst = s_base + buf * STAGE;
         // W: one row's group is 32 contiguous bytes in RowSplit, so two 16-byte copies per row.
-        if (tid < BM * 2) {
-            const int row  = tid >> 1;
-            const int half = tid & 1;
+#pragma unroll
+        for (int c = tid; c < BM * 2; c += 512) {
+            const int row  = c >> 1;
+            const int half = c & 1;
             cp_async16(dst + row * WROW + half * 16,
                        w_blk + static_cast<size_t>(row) * (K / 2) + g * (BK / 2) + half * 16);
         }
-        if (tid < XSTAGE / 16) {
-            cp_async16(dst + WSTAGE + tid * 16, x_blk + static_cast<size_t>(g) * XSTAGE + tid * 16);
+        // One 16-byte copy per thread per pass; a wide token tile needs more than one pass.
+#pragma unroll
+        for (int c = tid; c < XSTAGE / 16; c += 512) {
+            cp_async16(dst + WSTAGE + c * 16, x_blk + static_cast<size_t>(g) * XSTAGE + c * 16);
         }
-        if (tid < XSSTAGE / 16) {
-            cp_async16(dst + WSTAGE + XSTAGE + tid * 16,
-                       xs_blk + static_cast<size_t>(g) * XSSTAGE + tid * 16);
+#pragma unroll
+        for (int c = tid; c < XSSTAGE / 16; c += 512) {
+            cp_async16(dst + WSTAGE + XSTAGE + c * 16,
+                       xs_blk + static_cast<size_t>(g) * XSSTAGE + c * 16);
         }
         // The scale ring rides the commit group of the stage that first reads it.
         if (g % RING_GROUPS == 0 && tid < BM) {
@@ -188,6 +219,15 @@ __global__ __launch_bounds__(512) void w4a8_rowsplit(const unsigned char* __rest
     };
 
     float acc[MT][NT][4];
+#if ABLATE == 2
+    int iacc[MT][NT][4];
+#pragma unroll
+    for (int m = 0; m < MT; ++m)
+#pragma unroll
+        for (int n = 0; n < NT; ++n)
+#pragma unroll
+            for (int j = 0; j < 4; ++j) iacc[m][n][j] = 0;
+#endif
 #pragma unroll
     for (int m = 0; m < MT; ++m)
 #pragma unroll
@@ -195,6 +235,10 @@ __global__ __launch_bounds__(512) void w4a8_rowsplit(const unsigned char* __rest
 #pragma unroll
             for (int j = 0; j < 4; ++j) acc[m][n][j] = 0.0f;
 
+#if ABLATE >= 3
+    unsigned af[MT][2][4];
+    unsigned bf[NT][2][2];
+#endif
 #pragma unroll
     for (int i = 0; i < STAGES - 1; ++i) {
         if (i < GROUPS) { issue(i, i); }
@@ -220,41 +264,70 @@ __global__ __launch_bounds__(512) void w4a8_rowsplit(const unsigned char* __rest
         const __half* const ring =
             reinterpret_cast<const __half*>(s_ring + ((g / RING_GROUPS) % RING_BUFS) * RING_BYTES);
 
-        unsigned af[MT][2][4];
-        unsigned bf[NT][2][2];
+#if ABLATE >= 3
+        // Fragments assembled once, outside the loop; the MMAs still run every group.
+        if (g == 0) {
+#endif
+        unsigned af_local[MT][2][4];
+        unsigned bf_local[NT][2][2];
 #pragma unroll
         for (int m = 0; m < MT; ++m) {
             const int r0 = (warp_m * MT + m) * 16 + gid;
 #pragma unroll
             for (int ks = 0; ks < 2; ++ks) {
                 const int off = ks * 16 + tig * 2;
-                af[m][ks][0]  = expand16(lds16(sa + r0 * WROW + off));
-                af[m][ks][1]  = expand16(lds16(sa + (r0 + 8) * WROW + off));
-                af[m][ks][2]  = expand16(lds16(sa + r0 * WROW + off + 8));
-                af[m][ks][3]  = expand16(lds16(sa + (r0 + 8) * WROW + off + 8));
+                af_local[m][ks][0] = expand16(lds16(sa + r0 * WROW + off));
+                af_local[m][ks][1] = expand16(lds16(sa + (r0 + 8) * WROW + off));
+                af_local[m][ks][2] = expand16(lds16(sa + r0 * WROW + off + 8));
+                af_local[m][ks][3] = expand16(lds16(sa + (r0 + 8) * WROW + off + 8));
             }
         }
 #pragma unroll
         for (int n = 0; n < NT; ++n) {
-            const uint4 b = lds128(sb + ((warp_n * NT + n) * 32 + lane) * 16);
-            bf[n][0][0]   = b.x;
-            bf[n][0][1]   = b.y;
-            bf[n][1][0]   = b.z;
-            bf[n][1][1]   = b.w;
+            const uint4 b     = lds128(sb + ((warp_n * NT + n) * 32 + lane) * 16);
+            bf_local[n][0][0] = b.x;
+            bf_local[n][0][1] = b.y;
+            bf_local[n][1][0] = b.z;
+            bf_local[n][1][1] = b.w;
         }
+#if ABLATE >= 3
+            for (int m = 0; m < MT; ++m)
+                for (int ks = 0; ks < 2; ++ks)
+                    for (int j = 0; j < 4; ++j) af[m][ks][j] = af_local[m][ks][j];
+            for (int n = 0; n < NT; ++n)
+                for (int ks = 0; ks < 2; ++ks)
+                    for (int j = 0; j < 2; ++j) bf[n][ks][j] = bf_local[n][ks][j];
+        }
+#else
+#define af af_local
+#define bf bf_local
+#endif
 #pragma unroll
         for (int m = 0; m < MT; ++m) {
+#if ABLATE == 0
             const int sr    = (warp_m * MT + m) * 16 + gid;
             const float ws0 = __half2float(ring[sr * RING_GROUPS + (g % RING_GROUPS)]);
             const float ws1 = __half2float(ring[(sr + 8) * RING_GROUPS + (g % RING_GROUPS)]);
+#endif
 #pragma unroll
             for (int n = 0; n < NT; ++n) {
+#if ABLATE == 2
+                int* s = iacc[m][n];
+#else
                 int s[4] = {0, 0, 0, 0};
+#endif
+#if ABLATE == 5 || ABLATE == 6
+                // Keep a data dependency on both fragments so nothing is optimised away.
+                s[0] += static_cast<int>(af[m][0][0] ^ bf[n][0][0]);
+                s[1] += static_cast<int>(af[m][1][1] ^ bf[n][1][1]);
+#else
 #pragma unroll
                 for (int ks = 0; ks < 2; ++ks) {
                     mma_s8(s[0], s[1], s[2], s[3], af[m][ks][0], af[m][ks][1], af[m][ks][2],
                            af[m][ks][3], bf[n][ks][0], bf[n][ks][1]);
                 }
+#endif
+#if ABLATE == 0
                 const int c     = (warp_n * NT + n) * 8 + tig * 2;
                 const float xa0 = __half2float(sxs[c]);
                 const float xa1 = __half2float(sxs[c + 1]);
@@ -262,6 +335,12 @@ __global__ __launch_bounds__(512) void w4a8_rowsplit(const unsigned char* __rest
                 acc[m][n][1]    = fmaf(static_cast<float>(s[1]), ws0 * xa1, acc[m][n][1]);
                 acc[m][n][2]    = fmaf(static_cast<float>(s[2]), ws1 * xa0, acc[m][n][2]);
                 acc[m][n][3]    = fmaf(static_cast<float>(s[3]), ws1 * xa1, acc[m][n][3]);
+#elif ABLATE == 1 || ABLATE == 3 || ABLATE == 4 || ABLATE == 5 || ABLATE == 6
+                acc[m][n][0] += static_cast<float>(s[0]);
+                acc[m][n][1] += static_cast<float>(s[1]);
+                acc[m][n][2] += static_cast<float>(s[2]);
+                acc[m][n][3] += static_cast<float>(s[3]);
+#endif
             }
         }
         // Second barrier: the next iteration's issue writes the buffer this one just read, and a
@@ -270,6 +349,14 @@ __global__ __launch_bounds__(512) void w4a8_rowsplit(const unsigned char* __rest
         __syncthreads();
     }
 
+#if ABLATE == 2
+#pragma unroll
+    for (int m = 0; m < MT; ++m)
+#pragma unroll
+        for (int n = 0; n < NT; ++n)
+#pragma unroll
+            for (int j = 0; j < 4; ++j) acc[m][n][j] = static_cast<float>(iacc[m][n][j]);
+#endif
 #pragma unroll
     for (int m = 0; m < MT; ++m) {
         const int r0 = row_block + (warp_m * MT + m) * 16 + gid;
@@ -342,7 +429,11 @@ int main() {
     CHECK(cudaMemcpy(dx, hxp.data(), x_count, cudaMemcpyHostToDevice));
     CHECK(cudaMemcpy(dxs, hxsp.data(), xs_count * sizeof(__half), cudaMemcpyHostToDevice));
 
+#if SWIZZLE
+    dim3 grid(T / BN, N / BM);
+#else
     dim3 grid(N / BM, T / BN);
+#endif
     const size_t smem = STAGES * STAGE + RING_BUFS * RING_BYTES;
     CHECK(cudaFuncSetAttribute(w4a8_rowsplit, cudaFuncAttributeMaxDynamicSharedMemorySize,
                                static_cast<int>(smem)));
@@ -383,8 +474,8 @@ int main() {
         worst = std::max(worst, std::abs(got - ref) / std::max(std::abs(ref), 1e-6));
     }
     printf("correctness: 64 sampled outputs, worst relative error %.3e  (%s)\n", worst,
-           worst < 5e-3 ? "OK" : "MISMATCH");
-    if (worst >= 5e-3) {
+           worst < 5e-3 ? "OK" : (ABLATE ? "wrong by construction, this is an ablation" : "MISMATCH"));
+    if (ABLATE == 0 && worst >= 5e-3) {
         printf("  aborting: kernel is wrong, timing would be meaningless\n");
         return 1;
     }
