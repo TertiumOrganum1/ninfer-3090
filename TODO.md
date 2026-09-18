@@ -3151,12 +3151,35 @@ ceiling, and neither has had any optimisation attempted.
       row rather than per 64), per-token activation scales, and ~320 MB of scratch. Strictly worse
       than the layout change, which keeps 4-bit weights.
 
-      **So the decision is to port Marlin's design, with its weight permutation produced at
-      conversion time rather than repacked at runtime.** That is the artifact change this entry
-      spent months avoiding, and the measurements above are why it is now the right one. Open
-      question for that work: whether to adopt Marlin's per-token activation scales or keep this
-      fork's per-group ones, which are its quality advantage (per-token measures 1.2e-2 relative L2
-      rising to 1.29e-1 on outlier-heavy inputs, against 9e-3 to 2.0e-2 per group).
+      **Marlin's design was then built and measured, and it does not pay.**
+      `tools/w4a8_marlin_probe.cu` implements all of it at once over a permuted weight layout: the
+      weight permuted within each group of 64 so one 8-byte shared load is a lane's whole A fragment
+      for a row, LOP3 dequant whose natural output order *is* the MMA's required order, packed
+      nibbles in shared, a cp.async ring of 3-4 stages, and one barrier per stage instead of two per
+      group. Best configuration (128x256, 512 threads): **2,966 us / 123.3 TOP/s against the shipped
+      117.3 — 1.05x**, where the gate was 1,900 us / 192 TOP/s. Abandoned.
+
+      **The decomposition is the useful part, because it relocates the problem.** Ablating the best
+      configuration: full 2,966 us; without the per-group rescale 2,744; streaming only, no MMAs and
+      no shared reads, 1,376 (the shipped 64x512 tile floors at 1,723). The parts are **additive** —
+      1,376 streaming + ~1,230 compute + ~370 rescale — so nothing overlaps. And the compute
+      component is already at the hardware floor: 44.6M m16n8k32 MMAs at Ampere's 1,024 int8
+      MAC/SM/cycle is ~1.28 ms of pure issue across 82 SMs, so **our MMA stream runs at ~93% of the
+      card's peak int8 rate**. cuBLAS finishes the whole GEMM in 1,532 us, i.e. roughly
+      max(streaming, MMA) rather than their sum.
+
+      So the entire remaining 1.9x is the *overlap* of streaming with compute, and every structural
+      thing Marlin brings failed to move it: the permuted layout with single-instruction fragment
+      loads (1.01x), ring depth 3 and 4, one barrier per stage rather than two (+5%), and a tile
+      that halves the streamed bytes (the floor fell 1,723 -> 1,376; the total did not follow).
+
+      **What is left, and it is one hypothesis, not a plan:** both phases contend for the same
+      LSU/MIO pipe, in which case the lever is shared-read *volume per MMA* — bigger MT so a B
+      fragment is reused across more m-tiles — rather than anything about layout, depth or barriers.
+      Testing that needs `ncu` counters, which require elevation on this box (ERR_NVGPUCTRPERM), so
+      it wants an admin profiling session rather than another blind probe. Until someone has that
+      data, **prefill kernel work on this fork is closed**: the shipped state is +21-29% over where
+      this entry started, the remaining gap is understood, and further guessing is mispriced.
 
       The projections that had no integer route at all were the larger win and are done: see
       `docs/performance.md`, +13-17% prefill at every length.
