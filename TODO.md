@@ -3061,9 +3061,45 @@ ceiling, and neither has had any optimisation attempted.
       at this reference passed `-k 'regex:a|b'` and PowerShell parsed the `|` as a pipe before `ncu`
       saw it, producing an empty report. Fixed to a single `--kernel-name` pattern.
 
-- [ ] **Prefill's MLP GEMMs run at ~30% of the card's INT8 tensor-core rate, because 124 registers
-      per thread hold the SM to 16 of 48 warps.** Cause located 2026-09-09 with counters; the
-      remaining work is a retile. Every other explanation has been measured and ruled out.
+- [ ] **Prefill's MLP GEMMs run at ~30% of the card's INT8 tensor-core rate. The occupancy
+      explanation below is wrong, and the retile it asks for is measured and does not pay.**
+
+      **Measured 2026-09-18** with `tools/w4a8_rowsplit_probe.cu`, which parameterises the warp
+      tile, at the gate_up shape and T=512. Occupancy was raised for real, not argued about:
+
+      | warp tile | block tile | registers | blocks/SM | warps of 48 | us |
+      |---|---|---:|---:|---:|---:|
+      | 2x4 (production shape) | 128x128 | 108 | 1 | 16 | 1,890 |
+      | 1x4 | 64x128 | **55** | **2** | **32** | **1,785** |
+      | 2x2 | 128x64 | 63 | 2 | 32 | 2,844 |
+
+      Doubling resident warps is worth **6%**, not the 40% `ncu` estimated, and cutting the tile
+      further to reach the same occupancy costs 50% because each thread re-reads more weight.
+      `cudaOccupancyMaxActiveBlocksPerMultiprocessor` confirms the block counts, so this is not a
+      launch that failed to get the occupancy it asked for. **Registers are not the lever.**
+
+      The same probe rules out the other half of the theory: keeping the artifact's RowSplit
+      weights and winning everything else the fragment-order probe won — `cp.async` on all four
+      planes, packed nibbles in shared, the weight scales as an async ring so nothing waits on a
+      synchronous global read — measures **1,726 us against production's 1,701**, i.e. nothing.
+      `tools/w4a8_real_weight_probe.cu` puts the fully repacked layout at 1,566 us with per-group
+      scales (the 1,415 us figure needs per-token scales, at 12.9% relative L2 on outlier-heavy
+      inputs), so **the entire layout lever is ~8%** and it requires a repack `AGENTS.md` forbids
+      and ~9.7 GB a 24 GB card does not have.
+
+      So what remains is the one thing neither probe has tried: `ldmatrix` for the A fragments,
+      which is how CUTLASS-class int8 GEMMs avoid assembling operands with per-lane loads. That is
+      the open question, not registers.
+
+      The projections that had no integer route at all were the larger win and are done: see
+      `docs/performance.md`, +13-17% prefill at every length.
+
+      The original entry follows, kept because its ruled-out explanations are still ruled out.
+
+- [ ] **(superseded, see above) Prefill's MLP GEMMs run at ~30% of the card's INT8 tensor-core
+      rate, because 124 registers per thread hold the SM to 16 of 48 warps.** Cause located
+      2026-09-09 with counters; the remaining work is a retile. Every other explanation has been
+      measured and ruled out.
 
       Measured (#53 plus `tools/tensor_core_rate_probe.cu`): `q4a8_swiglu` reaches 97.4 T/s and
       `q5a8_add` 89.4 T/s against a measured **314.8 TOPS** INT8 ceiling, while the BF16 GDN

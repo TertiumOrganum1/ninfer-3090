@@ -92,6 +92,59 @@ added to the findings in this section: only single-prompt smoke numbers exist on
 far, and pasting another architecture's corpus results beside them would read as agreement that
 has not been measured. DFlash2 rows will be added here once measured on a 3090.
 
+### Integer activations for every registered prefill projection
+
+**Result.** Prompt processing is 13-17% faster than the previous state at every context length,
+because the attention and GDN projections now reach the s8 tensor cores that the MLP pair already
+used. Measured on one RTX 3090 at 315 W, Qwen3.8-27B groupwise-int, `--kv-dtype int8`,
+`ninfer_bench -r 3 --warmup 1`, all three arms on the same build and card:
+
+| prefill tok/s | 1k | 4k | 16k | 51k |
+|---|---:|---:|---:|---:|
+| `--no-prefill-a8` (every projection A16) | 1,008.5 | 995.4 | 946.9 | 836.4 |
+| previous state (integer MLP only) | 1,303.2 | 1,277.5 | 1,195.1 | 1,022.9 |
+| **every registered projection** | **1,529.8** | **1,493.3** | **1,382.3** | **1,153.3** |
+| change against the previous state | +17.4% | +16.9% | +15.7% | +12.8% |
+
+Three routes were added, in the order their Nsight share justified — a 4,096-token prefill spends
+749 ms of 3,280 ms in the GDN input projection, 346 ms in the two output projections and 209 ms in
+the attention input projection:
+
+| route | shape | per-Op, T=1024 | end to end, pp4096 |
+|---|---|---|---|
+| attention o_proj and GDN out_proj | Q5 [5120,6144] LinearAdd | 1,097.7 → 827.4 us | +3.0% |
+| GDN input projection | Q4 [4096,5120] + Q5 [12288,5120] | — | +10.1% |
+| attention input projection | Q4 + Q5 [7168,5120] | — | +1.6% |
+
+They share one schedule (`src/ops/common/rowsplit_a8_mma.cuh`): the 128x128 tile the MLP routes
+measured, with the codec and the output mapping as template parameters. Both input projections are
+two parents over one activation, so each quantises its input once for all its launches — O(K*T)
+against the GEMMs' O(N*K*T).
+
+**Quality.** Quick corpus, same build: 4.342982 with `--no-prefill-a8` against **4.343155** with
+every integer route on, **+0.004%** — inside run-to-run noise, and inside the +0.05% this fork
+requires before a lossy route is default-on. Relative L2 against the FP64 oracle is 0.010-0.020
+across every destination range, against the 0.04 allowance A8 activation compute is held to.
+Decode is untouched (45.8 against 45.6 tok/s at tg128): the routes admit only full 128-column
+prefill tiles, so decode and partial chunks stay on A16.
+
+**What did not pay, so nobody re-walks it.** `TODO.md`'s long-standing explanation for these
+kernels running at ~30% of the INT8 ceiling — 124 registers holding the SM to 16 of 48 warps — is
+not what costs the time. `tools/w4a8_rowsplit_probe.cu` measures the alternatives at the gate_up
+shape, T=512:
+
+- **Doubling occupancy buys 6%.** A 64x128 tile compiles to 55 registers and genuinely runs 2
+  blocks per SM (32 of 48 warps, confirmed with `cudaOccupancyMaxActiveBlocksPerMultiprocessor`):
+  1,890 → 1,785 us, against the 40% `ncu` estimated.
+- **Smaller tiles past that lose badly**: 128x64 at 63 registers measures 2,844 us, 1.5x worse.
+- **Layout is worth nothing without a repack.** Streaming the weights with `cp.async` in their
+  RowSplit order, packed nibbles in shared and the scales as an async ring — everything the
+  fragment-order probe won except permuting the weights — measures 1,726 us against production's
+  1,701. `tools/w4a8_real_weight_probe.cu` puts the fully repacked layout at 1,566 us with
+  per-group scales, so the whole layout lever is ~8%, and a permuted copy of the 27B's two MLP
+  matrices is ~9.7 GB on a 24 GB card. The 1,415 us headline needs per-token activation scales,
+  whose relative L2 reaches 12.9% on outlier-heavy inputs against 0.9-2.0% per group.
+
 ### Small-T tensor-core kernels for verify and cohort decode
 
 **Result.** Qwen3.8-27B MTP3 decode is 1.5x faster at C1 and 1.7x at C8 than v0.9.1, with
