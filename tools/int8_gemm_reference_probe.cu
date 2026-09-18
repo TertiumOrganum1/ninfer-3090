@@ -110,6 +110,40 @@ int main() {
             const double work = 2.0 * shape.rows * shape.cols * t;
             printf("%-26s %7d %12.1f %12.2f\n", shape.name, t, us, work / (us * 1e-6) / 1e12);
 
+            // Same shape in bf16, for scale: this fork's A16 route runs at ~88% of the card's
+            // bf16 ceiling, so if cuBLAS bf16 lands near it the gap is specific to the integer
+            // path rather than to these GEMMs in general.
+            void *ab = nullptr, *bb = nullptr, *cb = nullptr;
+            CHECK(cudaMalloc(&ab, static_cast<size_t>(shape.cols) * shape.rows * 2));
+            CHECK(cudaMalloc(&bb, static_cast<size_t>(shape.cols) * t * 2));
+            CHECK(cudaMalloc(&cb, static_cast<size_t>(shape.rows) * t * 2));
+            CHECK(cudaMemset(ab, 0x3c, static_cast<size_t>(shape.cols) * shape.rows * 2));
+            CHECK(cudaMemset(bb, 0x3c, static_cast<size_t>(shape.cols) * t * 2));
+            const float alpha_f = 1.0F, beta_f = 0.0F;
+            const auto run_bf16 = [&] {
+                CHECK_BLAS(cublasGemmEx(handle, CUBLAS_OP_T, CUBLAS_OP_N, shape.rows, t, shape.cols,
+                                        &alpha_f, ab, CUDA_R_16BF, shape.cols, bb, CUDA_R_16BF,
+                                        shape.cols, &beta_f, cb, CUDA_R_16BF, shape.rows,
+                                        CUBLAS_COMPUTE_32F, CUBLAS_GEMM_DEFAULT));
+            };
+            run_bf16();
+            CHECK(cudaDeviceSynchronize());
+            for (int i = 0; i < 9; ++i) {
+                CHECK(cudaMemsetAsync(flush, i & 0xff, 256u << 20));
+                CHECK(cudaEventRecord(start));
+                run_bf16();
+                CHECK(cudaEventRecord(stop));
+                CHECK(cudaEventSynchronize(stop));
+                CHECK(cudaEventElapsedTime(&ms[i], start, stop));
+            }
+            std::sort(ms.begin(), ms.end());
+            const double us_bf16 = ms[4] * 1000.0;
+            printf("%-26s %7d %12.1f %12.2f   (bf16)\n", shape.name, t, us_bf16,
+                   work / (us_bf16 * 1e-6) / 1e12);
+            CHECK(cudaFree(ab));
+            CHECK(cudaFree(bb));
+            CHECK(cudaFree(cb));
+
             CHECK(cudaEventDestroy(start));
             CHECK(cudaEventDestroy(stop));
             CHECK(cudaFree(a));
