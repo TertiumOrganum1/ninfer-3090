@@ -24,6 +24,9 @@ struct SingleProjectionWeight {
 
 struct PairedProjectionWeights {
     Weight first, second;
+    // Split parents reach their Op without a SingleProjectionWeight to carry the decision, so the
+    // pair carries it. A16Only unless a registered route exists for these exact shapes.
+    LinearPolicy policy = LinearPolicy::A16Only;
 };
 
 using ProjectionWeights = std::variant<SingleProjectionWeight, PairedProjectionWeights>;

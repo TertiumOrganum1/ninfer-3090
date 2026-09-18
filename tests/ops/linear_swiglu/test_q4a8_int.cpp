@@ -12,6 +12,7 @@
 // about 0.009 on the real 27B weight, so a four-fold regression would still pass the gate but be
 // obvious in the output.
 
+#include "ops/gdn_input_proj/q4_q5/q4_q5_gdn_input_plan.h"
 #include "ops/linear_swiglu/q4a8/q4a8_linear_swiglu.h"
 #include "ops/linear_swiglu/q4/q4_linear_swiglu_kernels.h"
 #include "ops/linear_swiglu/q4/q4_linear_swiglu_plan.h"
@@ -269,6 +270,95 @@ int run_down(std::int32_t tokens, std::int32_t kCols = 17408) {
     return failures;
 }
 
+
+// The GDN input projection is two parents over one activation, scattered into three destinations:
+// qk -> qkv[0,4096), value_z rows [0,6144) -> qkv[4096,10240), rows [6144,12288) -> z. A row
+// mapped to the wrong destination still produces plausible numbers in the other two, so every
+// range is sampled.
+int run_gdn_input(std::int32_t tokens) {
+    constexpr std::int32_t kHidden    = 5120;
+    constexpr std::int32_t kQkRows    = 4096;
+    constexpr std::int32_t kValueRows = 6144;
+    constexpr std::int32_t kZRows     = 6144;
+    constexpr std::int32_t kQkvRows   = kQkRows + kValueRows;
+    constexpr std::int32_t kParentRows = kValueRows + kZRows;
+
+    const PackedWeight host_qk =
+        qw::make_patterned_weight(QType::Q4_G64_FP16, kQkRows, kHidden, 909U);
+    const PackedWeight host_vz =
+        qw::make_patterned_weight(QType::Q5_G64_FP16, kParentRows, kHidden, 313U);
+    const std::vector<std::uint16_t> activation = make_activation(kHidden, tokens, 41U);
+
+    test::GuardedDeviceBuffer device_qk(host_qk.payload.size());
+    device_qk.copy_from_host(host_qk.payload.data(), host_qk.payload.size());
+    test::GuardedDeviceBuffer device_vz(host_vz.payload.size());
+    device_vz.copy_from_host(host_vz.payload.data(), host_vz.payload.size());
+    const Weight qk = host_qk.device_weight(device_qk.data());
+    const Weight vz = host_vz.device_weight(device_vz.data());
+
+    test::GuardedDeviceBuffer device_x(activation.size() * sizeof(std::uint16_t));
+    device_x.copy_from_host(activation.data(), activation.size() * sizeof(std::uint16_t));
+    test::GuardedDeviceBuffer device_qkv(static_cast<std::size_t>(kQkvRows) * tokens *
+                                         sizeof(std::uint16_t));
+    test::GuardedDeviceBuffer device_z(static_cast<std::size_t>(kZRows) * tokens *
+                                       sizeof(std::uint16_t));
+
+    WorkspaceArena workspace(std::max<std::size_t>(
+        ops::detail::q4_q5_gdn_input_a8_workspace_capacity_bytes(tokens, tokens), 256));
+    Tensor x(device_x.data(), DType::BF16, {kHidden, tokens});
+    Tensor qkv(device_qkv.data(), DType::BF16, {kQkvRows, tokens});
+    Tensor z(device_z.data(), DType::BF16, {kZRows, tokens});
+    ops::detail::q4_q5_gdn_input_a8_launch(x, qk, vz, qkv, z, workspace, nullptr);
+    test::cuda_check(cudaDeviceSynchronize(), "synchronize q4_q5 gdn input a8");
+
+    const std::string label = "GdnInputProj A8INT T=" + std::to_string(tokens);
+    int failures            = 0;
+    failures += device_qkv.verify_guards(label);
+    failures += device_z.verify_guards(label);
+
+    const std::vector<double> got_qkv =
+        read_bf16(device_qkv, static_cast<std::size_t>(kQkvRows) * tokens);
+    const std::vector<double> got_z =
+        read_bf16(device_z, static_cast<std::size_t>(kZRows) * tokens);
+
+    Samples s;
+    std::vector<float> input(static_cast<std::size_t>(kHidden));
+    for (int pick = 0; pick < 24; ++pick) {
+        const std::int32_t token = static_cast<std::int32_t>(
+            qw::detail::mix64(pick * 7907U + 3U) % static_cast<std::uint64_t>(tokens));
+        for (std::int32_t k = 0; k < kHidden; ++k) {
+            input[static_cast<std::size_t>(k)] =
+                bf16_value(activation[static_cast<std::size_t>(token) * kHidden + k]);
+        }
+        // Rotate through the three destination ranges so each is sampled evenly.
+        const int range = pick % 3;
+        if (range == 0) {
+            const std::int32_t row = static_cast<std::int32_t>(
+                qw::detail::mix64(pick * 131071U + 11U) % static_cast<std::uint64_t>(kQkRows));
+            s.reference.push_back(qw::dot_fp64(host_qk, row, input.data(), kHidden));
+            s.actual.push_back(got_qkv[static_cast<std::size_t>(token) * kQkvRows + row]);
+        } else if (range == 1) {
+            const std::int32_t row = static_cast<std::int32_t>(
+                qw::detail::mix64(pick * 65521U + 13U) % static_cast<std::uint64_t>(kValueRows));
+            s.reference.push_back(qw::dot_fp64(host_vz, row, input.data(), kHidden));
+            s.actual.push_back(
+                got_qkv[static_cast<std::size_t>(token) * kQkvRows + kQkRows + row]);
+        } else {
+            const std::int32_t row = static_cast<std::int32_t>(
+                qw::detail::mix64(pick * 32749U + 17U) % static_cast<std::uint64_t>(kZRows));
+            s.reference.push_back(qw::dot_fp64(host_vz, kValueRows + row, input.data(), kHidden));
+            s.actual.push_back(got_z[static_cast<std::size_t>(token) * kZRows + row]);
+        }
+    }
+
+    const ReductionStats stats = compute_reduction_stats(
+        s.actual.data(), s.reference.data(), static_cast<std::int64_t>(s.actual.size()));
+    std::cout << "  " << label << " relative_l2=" << stats.relative_l2 << " (allowance "
+              << kA8QuantizationAllowance << ")\n";
+    failures += verify_reduction(label, s.actual, s.reference, kA8Criterion);
+    return failures;
+}
+
 // The routes must decline anything they do not cover, so the caller falls back to A16 rather than
 // producing a wrong answer. Decode and partial prefill chunks depend on this.
 int run_admission() {
@@ -327,6 +417,7 @@ int main() {
             failures += run_gate_up(tokens);
             failures += run_down(tokens);
             failures += run_down(tokens, 6144);
+            failures += run_gdn_input(tokens);
         }
         // Every band of the T=2..32 dispatch, including widths that exercise column masking.
         for (const std::int32_t t : {2, 5, 8, 9, 16, 17, 24, 25, 31, 32}) {

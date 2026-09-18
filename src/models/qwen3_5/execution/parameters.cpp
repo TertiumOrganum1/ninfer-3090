@@ -39,6 +39,26 @@ public:
 #endif
     }
 
+    // Split parents reach their Op as a pair rather than a SingleProjectionWeight, so the pair
+    // carries the decision. Keyed on both parents' exact shapes, for the same reason.
+    void integer_route_pair(ops::ProjectionWeights& projection, QType first_format,
+                            std::int32_t first_rows, QType second_format, std::int32_t second_rows,
+                            std::int32_t input_rows) const {
+#if defined(NINFER_SM8X_COMPAT)
+        if (!model_.options().prefill_a8) { return; }
+        auto* pair = std::get_if<ops::PairedProjectionWeights>(&projection);
+        if (pair == nullptr || pair->policy != ops::LinearPolicy::A16Only) { return; }
+        if (pair->first.qtype == first_format && pair->first.n == first_rows &&
+            pair->first.k == input_rows && pair->second.qtype == second_format &&
+            pair->second.n == second_rows && pair->second.k == input_rows) {
+            pair->policy = ops::LinearPolicy::AllowA8Int;
+        }
+#else
+        (void)projection; (void)first_format; (void)first_rows; (void)second_format;
+        (void)second_rows; (void)input_rows;
+#endif
+    }
+
     LinearParameters linear(WeightId id) const {
         return with_context(model_.weight(id).name,
                             [&] { return ops::prepare_linear_weight(model_.input(id)); });
@@ -126,9 +146,13 @@ public:
             const auto& g              = std::get<GdnWeights>(w.mixer);
             LinearParameters gdn_output = linear(g.output);
             integer_route(gdn_output, QType::Q5_G64_FP16, 5120, 6144);
+            ops::ProjectionWeights gdn_projection = ops::prepare_gdn_input_proj_weights(
+                model_.input(g.query), model_.input(g.key), model_.input(g.value),
+                model_.input(g.z));
+            integer_route_pair(gdn_projection, QType::Q4_G64_FP16, 4096, QType::Q5_G64_FP16, 12288,
+                               5120);
             out.mixer = GdnParameters{
-                ops::prepare_gdn_input_proj_weights(model_.input(g.query), model_.input(g.key),
-                                                        model_.input(g.value), model_.input(g.z)),
+                std::move(gdn_projection),
                 ops::prepare_gdn_gating_proj_weights(model_.input(g.a_projection),
                                                          model_.input(g.b_projection)),
                 tensor(g.a_log),
