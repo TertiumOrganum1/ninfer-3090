@@ -116,13 +116,31 @@ std::optional<VisionWindow> VisionResidencyBroker::try_acquire_kv(std::size_t by
     }
     KVLoanPlan plan = plan_kv_loan(*kv_arena_, *kv_pages_, bytes);
     if (plan.granules.empty()) { return std::nullopt; }
-    for (const KVPageRun& run : plan.runs) { kv_pages_->lend_pages(run.begin, run.count); }
-    if (on_change_) { on_change_(); }
+    // Lending mutates the page pool before any VisionWindow owns the loan, so a throw part-way
+    // through this loop would strand the runs already lent: capacity the pool never gets back,
+    // because no destructor knows about them. Unwind what this loop did before the failure leaves.
+    std::size_t lent = 0;
+    try {
+        for (; lent < plan.runs.size(); ++lent) {
+            kv_pages_->lend_pages(plan.runs[lent].begin, plan.runs[lent].count);
+        }
+    } catch (...) {
+        while (lent-- > 0) {
+            try {
+                kv_pages_->return_pages(plan.runs[lent].begin, plan.runs[lent].count);
+            } catch (...) { std::terminate(); }
+        }
+        throw;
+    }
     VisionWindow window;
     window.broker_ = this;
     window.tier_   = VisionWindow::Tier::KvGranules;
     window.runs_   = std::move(plan.runs);
-    window.kv_     = kv_arena_->lease(plan.granules, device_.stream);
+    // From here the window owns the loan: if the lease throws, unwinding destroys `window`, whose
+    // close() returns every run and notifies. Which is why the revision is published only below --
+    // a window that never opened must not leave a capacity change behind it.
+    window.kv_ = kv_arena_->lease(plan.granules, device_.stream);
+    if (on_change_) { on_change_(); }
     return window;
 }
 
