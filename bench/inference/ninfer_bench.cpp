@@ -157,6 +157,7 @@ int main(int argc, char** argv) {
         engine_options.context_cache.enabled = false;
         engine_options.speculative           = options.speculative;
         engine_options.use_cuda_graph        = options.use_cuda_graph;
+        engine_options.prefill_a8            = options.prefill_a8;
 
         ninfer::bench::BenchEnvironment env;
         env.artifact_path            = options.artifact_path;

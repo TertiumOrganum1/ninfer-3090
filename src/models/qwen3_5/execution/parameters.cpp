@@ -64,8 +64,10 @@ public:
         // s8 tensor cores, which Ampere has and which no A16 route uses. It is registered only for
         // the 27B Dense MLP pair, so the policy is keyed on those exact shapes rather than the
         // format alone; any other projection keeps what its Use permits.
-        const auto integer_route = [](LinearParameters& p, QType format, std::int32_t n,
-                                      std::int32_t k) {
+        const auto integer_route = [enabled = model_.options().prefill_a8](
+                                       LinearParameters& p, QType format, std::int32_t n,
+                                       std::int32_t k) {
+            if (!enabled) { return; }
             if (p.policy == ops::LinearPolicy::A16Only && p.weight.qtype == format &&
                 p.weight.n == n && p.weight.k == k) {
                 p.policy = ops::LinearPolicy::AllowA8Int;
