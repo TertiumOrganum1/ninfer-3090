@@ -91,6 +91,10 @@ constexpr int T      = T_TOKENS;
 #ifndef INTERLEAVE
 #define INTERLEAVE 0
 #endif
+// Stream the weights past L2 rather than through it (see cp_async16_stream).
+#ifndef EVICT_FIRST
+#define EVICT_FIRST 0
+#endif
 #ifndef SWIZZLE
 #define SWIZZLE 0
 #endif
@@ -151,6 +155,21 @@ __device__ __forceinline__ void cp_async16(void* smem, const void* gmem) {
     asm volatile("cp.async.cg.shared.global [%0], [%1], 16;" ::"r"(addr), "l"(gmem));
 }
 
+// Marlin streams its weights with an L2 evict-first policy, because they are read once per block
+// while the activation tile is re-read by every row block. This kernel has the same problem: the X
+// tile is 2.6 MB against a 6 MB L2 and 544 row blocks read it, while the weight stream pushes tens
+// of MB through L2 per k-step and evicts it. For data read once, staying out of the way is worth
+// more than being cached.
+__device__ __forceinline__ void cp_async16_stream(void* smem, const void* gmem) {
+    const unsigned addr = static_cast<unsigned>(__cvta_generic_to_shared(smem));
+    asm volatile("{\n"
+                 "   .reg .b64 policy;\n"
+                 "   createpolicy.fractional.L2::evict_first.b64 policy, 1.0;\n"
+                 "   cp.async.cg.shared.global.L2::cache_hint [%0], [%1], 16, policy;\n"
+                 "}\n" ::"r"(addr),
+                 "l"(gmem));
+}
+
 // Two packed bytes hold four consecutive k as (low,high) nibble pairs. Codes are two's complement
 // in the low four bits, so centring is a subtract of 8 per nibble. Returns the s8 word an A
 // fragment register wants: k, k+1, k+2, k+3 in byte order.
@@ -208,8 +227,13 @@ __global__ __launch_bounds__(512) void w4a8_rowsplit(const unsigned char* __rest
         for (int c = tid; c < BM * 2; c += 512) {
             const int row  = c >> 1;
             const int half = c & 1;
+#if EVICT_FIRST
+            cp_async16_stream(dst + row * WROW + half * 16,
+                              w_blk + static_cast<size_t>(row) * (K / 2) + g * (BK / 2) + half * 16);
+#else
             cp_async16(dst + row * WROW + half * 16,
                        w_blk + static_cast<size_t>(row) * (K / 2) + g * (BK / 2) + half * 16);
+#endif
         }
         // One 16-byte copy per thread per pass; a wide token tile needs more than one pass.
 #pragma unroll
