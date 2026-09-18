@@ -6,6 +6,7 @@
 #include <cuda_runtime.h>
 
 #include <cstddef>
+#include <cstdint>
 #include <memory>
 #include <span>
 #include <vector>
@@ -94,8 +95,22 @@ public:
     [[nodiscard]] DeviceSpan granule_bytes(std::size_t index) const;
 
     // Lends the given granules, mapped consecutively at the overlay range in the order supplied.
-    // Indices must be strictly increasing and inside the lendable prefix.
+    // Indices must be strictly increasing and inside the lendable prefix. A failure part-way
+    // through returns every piece to its home mapping before it throws, so a refused lease leaves
+    // the arena exactly as it found it and the caller may try again.
     [[nodiscard]] Transaction lease(std::span<const std::size_t> granules, cudaStream_t stream);
+
+    // Stage of one granule's move to the overlay range, named so a test can fail a lease there.
+    enum class LeaseFault : std::uint8_t {
+        None,
+        Unmap,   // before the piece leaves its home mapping
+        Overlay, // after the home unmap, before the overlay mapping exists
+        Access,  // after the overlay mapping exists, before the piece counts as lent
+    };
+
+    // Test seam: makes the next lease() throw at `rank`, at the stage named, and fires once. The
+    // rollback in lease() must still hand back a fully resident, unpoisoned pool.
+    void inject_lease_fault(std::size_t rank, LeaseFault stage) noexcept;
 
 private:
     struct Impl;

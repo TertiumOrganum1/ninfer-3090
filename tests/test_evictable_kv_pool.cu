@@ -1,6 +1,6 @@
 // Lifetime and integrity qualification for the VMM-backed KV arena: stable home addresses across
 // leases, granules handed out contiguously at the overlay range, resident bytes untouched by a
-// lease, and rejection of invalid leases.
+// lease, rejection of invalid leases, and full rollback of a lease that fails part-way.
 
 #include "core/arena.h"
 #include "core/device.h"
@@ -17,6 +17,8 @@
 #include <iostream>
 #include <stdexcept>
 #include <optional>
+#include <string>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -175,6 +177,59 @@ int main() {
         rejects({0, 1, 2, 3}, "a lease beyond the window capacity is rejected");
         rejects({2, 2}, "duplicate granules are rejected");
         rejects({3, 1}, "unordered granules are rejected");
+
+        // A lease that fails part-way through must roll back: the caller never receives a
+        // transaction, so nothing else would ever return the granules it already moved. Each
+        // stage leaves a different half-applied state -- a piece still home, a piece homeless
+        // with no overlay mapping, and a piece mapped at the overlay but not yet counted as lent.
+        {
+            using Fault = ninfer::EvictableKVPool::LeaseFault;
+            constexpr std::byte kBefore{0x3c};
+            const std::size_t granules[] = {0, 2, 5};
+            const std::pair<Fault, const char*> stages[] = {
+                {Fault::Unmap, "before the home unmap"},
+                {Fault::Overlay, "before the overlay mapping"},
+                {Fault::Access, "after the overlay mapping"},
+            };
+            for (const auto& [stage, where] : stages) {
+                const std::string at_stage = std::string(" (") + where + ")";
+                fill(arena.data, kBefore, arena_bytes);
+                CUDA_CHECK(cudaDeviceSynchronize());
+
+                pool.inject_lease_fault(1, stage);
+                bool threw = false;
+                try {
+                    auto lease = pool.lease(std::span<const std::size_t>(granules), device.stream);
+                    (void)lease;
+                } catch (const std::exception&) { threw = true; }
+                failures += expect(threw, ("an injected lease fault throws" + at_stage).c_str());
+                failures += expect(!pool.lease_open(),
+                                   ("a failed lease closes the window" + at_stage).c_str());
+                failures += expect(!pool.poisoned(),
+                                   ("a rolled back lease does not poison" + at_stage).c_str());
+
+                // Every payload granule is home again, with the physical bytes it held, and
+                // writable: a piece left unmapped or without access would fault right here.
+                bool intact = true;
+                for (std::size_t index = 0; index < 6; ++index) {
+                    intact = intact && read_one(at(arena, index * granule)) == kBefore;
+                }
+                failures += expect(intact, ("the payload is resident and intact" + at_stage).c_str());
+                constexpr std::byte kAfter{0x71};
+                fill(arena.data, kAfter, payload_bytes);
+                CUDA_CHECK(cudaDeviceSynchronize());
+                failures += expect(read_one(at(arena, 0)) == kAfter &&
+                                       read_one(at(arena, 5 * granule)) == kAfter,
+                                   ("restored granules take writes" + at_stage).c_str());
+
+                // And the pool still lends, which a stale `lent` entry would refuse.
+                ninfer::EvictableKVPool::Transaction lease =
+                    pool.lease(std::span<const std::size_t>(granules), device.stream);
+                failures += expect(lease.leased().bytes == 3 * granule,
+                                   ("the pool lends again" + at_stage).c_str());
+            }
+            failures += expect(!pool.lease_open(), "the retry lease closes with its scope");
+        }
 
         bool window_rejected = false;
         try {
