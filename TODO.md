@@ -3087,9 +3087,23 @@ ceiling, and neither has had any optimisation attempted.
       inputs), so **the entire layout lever is ~8%** and it requires a repack `AGENTS.md` forbids
       and ~9.7 GB a 24 GB card does not have.
 
-      So what remains is the one thing neither probe has tried: `ldmatrix` for the A fragments,
-      which is how CUTLASS-class int8 GEMMs avoid assembling operands with per-lane loads. That is
-      the open question, not registers.
+      **And the reason none of it moved is that the kernel was not compute-bound.** Ablating the
+      probe (same shape, T=512) removes one cost at a time while keeping the MMA count identical:
+      2,068 us complete, 1,918 without the scale reads, 1,856 without the per-group rescale, 1,423
+      without the A-fragment shared reads, 1,424 without B's as well -- and **1,378 us with the
+      MMAs removed but every load kept, against 1,378 us with the MMAs and every shared read
+      removed.** Two thirds of the time is the global-to-shared streaming path, at ~28% of DRAM
+      peak, so it is cp.async latency rather than bandwidth, occupancy, or the tensor cores.
+
+      What generates that traffic is the token tile: a block covering BN tokens re-streams the whole
+      weight matrix once per column block, eight times over at the production chunk of 1,024. At
+      T=1024, 128x128 measures 4,265 us, 128x256 3,702, and **64x512 3,060 (+39%)**; a grid swizzle
+      to let L2 serve the repeats is worth within 0.5% of nothing. That is shipped -- see
+      `docs/performance.md` -- and it is what this entry should have been about.
+
+      Still untried, and now the honest next question: `ldmatrix` for the A fragments, worth at most
+      the 21% the ablation attributes to assembling them, and only once the streaming is no longer
+      the binding constraint.
 
       The projections that had no integer route at all were the larger win and are done: see
       `docs/performance.md`, +13-17% prefill at every length.

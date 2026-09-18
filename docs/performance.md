@@ -94,17 +94,18 @@ has not been measured. DFlash2 rows will be added here once measured on a 3090.
 
 ### Integer activations for every registered prefill projection
 
-**Result.** Prompt processing is 13-17% faster than the previous state at every context length,
-because the attention and GDN projections now reach the s8 tensor cores that the MLP pair already
-used. Measured on one RTX 3090 at 315 W, Qwen3.8-27B groupwise-int, `--kv-dtype int8`,
+**Result.** Prompt processing is 22-29% faster than the previous state at every context length:
+the attention and GDN projections now reach the s8 tensor cores that only the MLP pair used, and
+the schedule they share stopped re-streaming the weight matrix once per 128 tokens. Measured on one RTX 3090 at 315 W, Qwen3.8-27B groupwise-int, `--kv-dtype int8`,
 `ninfer_bench -r 3 --warmup 1`, all three arms on the same build and card:
 
 | prefill tok/s | 1k | 4k | 16k | 51k |
 |---|---:|---:|---:|---:|
 | `--no-prefill-a8` (every projection A16) | 1,008.5 | 995.4 | 946.9 | 836.4 |
-| previous state (integer MLP only) | 1,303.2 | 1,277.5 | 1,195.1 | 1,022.9 |
-| **every registered projection** | **1,529.8** | **1,493.3** | **1,382.3** | **1,153.3** |
-| change against the previous state | +17.4% | +16.9% | +15.7% | +12.8% |
+| previous state (integer MLP only, 128-token tile) | 1,303.2 | 1,277.5 | 1,195.1 | 1,022.9 |
+| every registered projection, 128-token tile | 1,529.8 | 1,493.3 | 1,382.3 | 1,153.3 |
+| **every registered projection, widened tile** | **1,684.9** | **1,648.5** | **1,521.8** | **1,242.7** |
+| change against the previous state | +29.3% | +29.0% | +27.3% | +21.5% |
 
 Three routes were added, in the order their Nsight share justified — a 4,096-token prefill spends
 749 ms of 3,280 ms in the GDN input projection, 346 ms in the two output projections and 209 ms in
@@ -127,6 +128,36 @@ requires before a lossy route is default-on. Relative L2 against the FP64 oracle
 across every destination range, against the 0.04 allowance A8 activation compute is held to.
 Decode is untouched (45.8 against 45.6 tok/s at tg128): the routes admit only full 128-column
 prefill tiles, so decode and partial chunks stay on A16.
+
+**The token tile, and why it was hiding.** Ablating the probe at the gate_up shape, T=512, gives
+the decomposition that explains the whole schedule -- each row removes one cost and keeps the MMA
+count identical:
+
+| | us | |
+|---|---:|---|
+| complete kernel | 2,068 | |
+| minus the activation and weight scale reads | 1,918 | the rescale's loads are ~7% |
+| minus the per-group rescale entirely | 1,856 | the rescale is ~10% |
+| minus the A-fragment shared reads | 1,423 | **assembling A is ~21%** |
+| minus the B-fragment reads as well | 1,424 | B is free: one 128-bit load per n-tile |
+| minus the MMAs, keeping every load | 1,377 | |
+| minus the MMAs *and* every shared read | 1,378 | **streaming alone is 67% of the kernel** |
+
+So these kernels were never compute-bound. DRAM sits at ~28% of peak, which makes the streaming
+path cp.async-latency-bound, and what generates the traffic is the token tile: a block covering BN
+tokens re-streams the entire weight matrix once per column block, eight times over at the
+production chunk of 1,024. Widening it is worth more than everything else attempted:
+
+| tile (rows x tokens) | us at T=1024 | TOP/s |
+|---|---:|---:|
+| 128 x 128 | 4,265 | 85.6 |
+| 128 x 256 | 3,702 | 98.6 |
+| **64 x 512** | **3,060** | **119.3** |
+
+A grid swizzle to let L2 serve the repeated passes measured within 0.5% of nothing: the passes have
+to be removed, not cached. gate_up is the exception that proves the rule -- its gate/up pairing
+fixes the row tile at 128 and so caps it at 256 tokens, where the tile it gains does not pay for
+the operand assembly it would lose, so it keeps its own kernel.
 
 **What did not pay, so nobody re-walks it.** `TODO.md`'s long-standing explanation for these
 kernels running at ~30% of the INT8 ceiling — 124 registers holding the SM to 16 of 48 warps — is
