@@ -3101,9 +3101,21 @@ ceiling, and neither has had any optimisation attempted.
       to let L2 serve the repeats is worth within 0.5% of nothing. That is shipped -- see
       `docs/performance.md` -- and it is what this entry should have been about.
 
-      Still untried, and now the honest next question: `ldmatrix` for the A fragments, worth at most
-      the 21% the ablation attributes to assembling them, and only once the streaming is no longer
-      the binding constraint.
+      **And the size of what is left is now measured, not guessed.**
+      `tools/int8_gemm_reference_probe.cu` runs cuBLAS's int8 GEMM over these shapes on this card:
+      237.5 TOP/s at gate_up against our 95.5, 176.1 at mlp/down against 100.1, 176.7 at the mixer
+      out_proj against 93.3 -- 1.8x to 2.5x, while reading twice the weight bytes our int4 codes do
+      and with no unpack, no per-group scale and no fused epilogue to pay for. cuBLAS finishes
+      gate_up in 1,537 us, less than the 1,711 us our schedule spends streaming alone, so the
+      streaming is ours rather than the hardware's.
+
+      Every cheap lever against it is now spent: pipeline depth 2 -> 4 is +3.9%, interleaving the B
+      loads with the MMAs is -1.9%, occupancy +6%, grid swizzle +0.5%, operand layout ~17% behind a
+      repack this engine does not allow. Closing 1.8-2.5x means a mainloop rather than a knob --
+      register double buffering, `ldmatrix`, a swizzled shared layout -- i.e. adopting a
+      CUTLASS-class kernel or porting Marlin, with the weight layout that implies. That is a
+      product decision, not a tuning task, and it is the only thing between this fork and the
+      patched-vLLM stacks on prefill.
 
       The projections that had no integer route at all were the larger win and are done: see
       `docs/performance.md`, +13-17% prefill at every length.

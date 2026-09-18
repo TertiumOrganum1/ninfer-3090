@@ -143,10 +143,9 @@ count identical:
 | minus the MMAs, keeping every load | 1,377 | |
 | minus the MMAs *and* every shared read | 1,378 | **streaming alone is 67% of the kernel** |
 
-So these kernels were never compute-bound. DRAM sits at ~28% of peak, which makes the streaming
-path cp.async-latency-bound, and what generates the traffic is the token tile: a block covering BN
-tokens re-streams the entire weight matrix once per column block, eight times over at the
-production chunk of 1,024. Widening it is worth more than everything else attempted:
+So these kernels were never compute-bound, and what generates the traffic is the token tile: a
+block covering BN tokens re-streams the entire weight matrix once per column block, eight times
+over at the production chunk of 1,024. Widening it is worth more than everything else attempted:
 
 | tile (rows x tokens) | us at T=1024 | TOP/s |
 |---|---:|---:|
@@ -158,6 +157,28 @@ A grid swizzle to let L2 serve the repeated passes measured within 0.5% of nothi
 to be removed, not cached. gate_up is the exception that proves the rule -- its gate/up pairing
 fixes the row tile at 128 and so caps it at 256 tokens, where the tile it gains does not pay for
 the operand assembly it would lose, so it keeps its own kernel.
+
+**What is still missing, measured against a tuned kernel rather than against a microbenchmark.**
+`tools/int8_gemm_reference_probe.cu` runs cuBLAS's own int8 GEMM (IMMA, TN, s32 accumulate) over
+these shapes on this card. It solves a strictly easier problem -- 8-bit weights, no unpack, no
+per-group scale, no fused epilogue -- and it reads *twice* the weight bytes our int4 codes do, so
+it is an upper bound rather than a like-for-like rival. At T=1024:
+
+| shape | cuBLAS int8 | this fork's W4A8 | ratio |
+|---|---:|---:|---:|
+| gate_up 34816x5120 | 237.5 TOP/s | 95.5 | 2.5x |
+| down 5120x17408 | 176.1 TOP/s | 100.1 | 1.8x |
+| out_proj 5120x6144 | 176.7 TOP/s | 93.3 | 1.9x |
+
+That reading also corrects the ablation above: cuBLAS finishes the entire gate_up GEMM in 1,537 us,
+less than the 1,711 us our schedule spends on streaming *alone* at the same shape and tile. The
+streaming is not a hardware floor, it is our streaming -- a 2-stage pipeline over 16 warps with the
+A fragments assembled from per-lane 2-byte loads. Everything cheap has now been tried against it:
+pipeline depth 2 -> 4 is worth 3.9%, interleaving the B loads with the MMAs -1.9%, occupancy 6%,
+grid swizzle 0.5%, operand layout ~17% (and that one needs a repack this engine does not allow).
+What is left is not a knob but a mainloop: register-level double buffering, `ldmatrix`, and a
+swizzled shared layout, which is what CUTLASS-class kernels -- and the Marlin kernel the vLLM
+stacks use -- are built out of.
 
 **What did not pay, so nobody re-walks it.** `TODO.md`'s long-standing explanation for these
 kernels running at ~30% of the INT8 ceiling — 124 registers holding the SM to 16 of 48 warps — is

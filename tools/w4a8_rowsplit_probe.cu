@@ -84,6 +84,13 @@ constexpr int T      = T_TOKENS;
 //   4  A and B fragments both hoisted (no shared reads in the loop at all): the MMA issue floor
 //   5  no MMAs: every load, barrier and cp.async stays, so this is the streaming floor
 //   6  no MMAs and no shared reads: cp.async, the barriers and the loop only
+// Load the B fragment for one n-tile immediately before its MMAs instead of loading all NT of them
+// up front. Same instructions, but only one fragment is live at a time, so the shared-load latency
+// of n+1 can hide behind the MMAs of n -- which is what a pipelined mainloop does and what the
+// ablation says this kernel is missing.
+#ifndef INTERLEAVE
+#define INTERLEAVE 0
+#endif
 #ifndef SWIZZLE
 #define SWIZZLE 0
 #endif
@@ -109,7 +116,12 @@ constexpr int WSTAGE  = BM * WROW;           // packed bytes, RowSplit order, pa
 constexpr int XSTAGE  = NTILES * 32 * 16;    // 8192 s8 bytes, fragment order
 constexpr int XSSTAGE = BN * 2;              // one FP16 activation scale per token, this group
 constexpr int STAGE   = WSTAGE + XSTAGE + XSSTAGE;
-constexpr int STAGES  = 2;
+// Pipeline depth. Two stages is what the production schedule has; cuBLAS-class kernels run four
+// to six, which is the standard way to hide global latency behind the MMAs.
+#ifndef STAGES_N
+#define STAGES_N 2
+#endif
+constexpr int STAGES  = STAGES_N;
 
 // Weight scales arrive eight groups at a time: 16 bytes is the widest cp.async, and for one row
 // eight consecutive groups are exactly that.
@@ -249,7 +261,11 @@ __global__ __launch_bounds__(512) void w4a8_rowsplit(const unsigned char* __rest
         if (g + STAGES - 1 < GROUPS) { issue(g + STAGES - 1, (g + STAGES - 1) % STAGES); }
         const int issued  = (g + STAGES < GROUPS) ? (g + STAGES) : GROUPS;
         const int allowed = issued - (g + 1);
-        if (allowed >= 2) {
+        if (allowed >= 4) {
+            asm volatile("cp.async.wait_group 4;");
+        } else if (allowed == 3) {
+            asm volatile("cp.async.wait_group 3;");
+        } else if (allowed == 2) {
             asm volatile("cp.async.wait_group 2;");
         } else if (allowed == 1) {
             asm volatile("cp.async.wait_group 1;");
@@ -282,6 +298,7 @@ __global__ __launch_bounds__(512) void w4a8_rowsplit(const unsigned char* __rest
                 af_local[m][ks][3] = expand16(lds16(sa + (r0 + 8) * WROW + off + 8));
             }
         }
+#if INTERLEAVE == 0
 #pragma unroll
         for (int n = 0; n < NT; ++n) {
             const uint4 b     = lds128(sb + ((warp_n * NT + n) * 32 + lane) * 16);
@@ -290,6 +307,7 @@ __global__ __launch_bounds__(512) void w4a8_rowsplit(const unsigned char* __rest
             bf_local[n][1][0] = b.z;
             bf_local[n][1][1] = b.w;
         }
+#endif
 #if ABLATE >= 3
             for (int m = 0; m < MT; ++m)
                 for (int ks = 0; ks < 2; ++ks)
@@ -311,6 +329,14 @@ __global__ __launch_bounds__(512) void w4a8_rowsplit(const unsigned char* __rest
 #endif
 #pragma unroll
             for (int n = 0; n < NT; ++n) {
+#if INTERLEAVE
+                // One fragment live at a time; the next n's load issues while these MMAs run.
+                const uint4 b_now = lds128(sb + ((warp_n * NT + n) * 32 + lane) * 16);
+                bf[n][0][0] = b_now.x;
+                bf[n][0][1] = b_now.y;
+                bf[n][1][0] = b_now.z;
+                bf[n][1][1] = b_now.w;
+#endif
 #if ABLATE == 2
                 int* s = iacc[m][n];
 #else
