@@ -25,9 +25,9 @@ using LinearParameters = ops::SingleProjectionWeight;
 struct DenseParameters {
     LinearParameters gate_up;
     LinearParameters down;
-    // gate_up policy for Verify-phase calls. It differs from gate_up.policy only when
-    // --mlp-a8-decode widens an integer-activation gate_up to AllowA8IntDecode; prefill and scoring
-    // never take the decode-width integer route.
+    // gate_up policy for Verify-phase calls. --mlp-a8-decode widens this to AllowA8IntDecode
+    // independently of --prefill-a8, so long as the profile is eligible; prefill and scoring
+    // always use gate_up.policy and never take the decode-width integer route.
     ops::LinearPolicy verify_gate_up_policy = ops::LinearPolicy::A16Only;
 };
 

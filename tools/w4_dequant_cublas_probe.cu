@@ -109,10 +109,13 @@ struct Shape {
 int main() {
     cudaDeviceProp p{};
     CHECK(cudaGetDeviceProperties(&p, 0));
+    // Q4_G64_FP16 only -- dequantise_rows_to_int8 reads just the low nibble plane, so a Q5 shape
+    // (mlp/down and out_proj both carry an extra high-plane bit per element) would silently
+    // measure fewer bytes than its real route moves. gate_up is the only registered A8 prefill
+    // shape that is genuinely Q4, so it is the only one this dequantise-then-cuBLAS question
+    // applies to as-is.
     const Shape shapes[] = {
         {"mlp/gate_up 34816x5120", 34816, 5120, 3824.6},
-        {"mlp/down     5120x17408", 5120, 17408, 1823.7},
-        {"out_proj     5120x6144", 5120, 6144, 690.2},
     };
     const int t = 1024;
 

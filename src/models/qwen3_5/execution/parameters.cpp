@@ -97,12 +97,16 @@ public:
                             linear(w.down)};
         integer_route(out.gate_up, QType::Q4_G64_FP16, 34816, 5120);
         integer_route(out.down, QType::Q5_G64_FP16, 5120, 17408);
-        // --mlp-a8-decode only widens a gate_up that already admits integer activations: the flag
-        // must not conjure an integer route on a build or shape that has none.
-        out.verify_gate_up_policy =
-            model_.options().mlp_a8_decode && out.gate_up.policy == ops::LinearPolicy::AllowA8Int
-                ? ops::LinearPolicy::AllowA8IntDecode
-                : out.gate_up.policy;
+        // --mlp-a8-decode is a separate verify-phase trade from --prefill-a8: it must admit the
+        // decode route by this profile's own format/shape, not by whether prefill promotion
+        // already ran, so the two flags stay orthogonal as documented.
+        out.verify_gate_up_policy = out.gate_up.policy;
+#if defined(NINFER_SM8X_COMPAT)
+        if (model_.options().mlp_a8_decode && out.gate_up.weight.qtype == QType::Q4_G64_FP16 &&
+            out.gate_up.weight.n == 34816 && out.gate_up.weight.k == 5120) {
+            out.verify_gate_up_policy = ops::LinearPolicy::AllowA8IntDecode;
+        }
+#endif
         return out;
     }
 

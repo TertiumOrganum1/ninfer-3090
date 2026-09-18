@@ -48,9 +48,9 @@ struct Profile {
     bool swiglu; // false selects linear_add, whose residual is its own output
 };
 
-// gate_up and down are the two registered A8 prefill profiles. The 5120x6144 LinearAdd is the
-// attention o_proj / GDN out_proj shape: it has no A8 route yet, so its two cells read the same
-// today and become the A/B for that step when one lands.
+// gate_up and down are the MLP's registered A8 prefill profiles. The 5120x6144 LinearAdd is the
+// attention o_proj / GDN out_proj shape, now also registered for A8: its two cells are the real
+// A16-versus-A8 comparison for that route, same as the MLP pair above.
 const Profile kProfiles[] = {
     {"mlp/gate_up", QType::Q4_G64_FP16, 34816, 5120, 17408, true},
     {"mlp/down", QType::Q5_G64_FP16, 5120, 17408, 5120, false},
