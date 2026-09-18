@@ -29,33 +29,52 @@
 //   256 x 512   178 MB     713 MB   891 MB
 //
 // ---------------------------------------------------------------------------------------------
-// RESULT, 2026-09-18: this did not pay, and the decomposition says why.
+// RESULT, 2026-09-18: Marlin's structure is worth ~7%, and the two-shape decomposition says why.
 //
-// Best configuration (128x256, 3-4 stages, 512 threads, permuted layout, LOP3 dequant, one barrier
-// per stage): 2,966 us / 123.3 TOP/s against the shipped kernel's 3,113 us / 117.3 -- **1.05x**,
-// against a gate of 1,900 us / 192 TOP/s. The layout change is therefore abandoned; see TODO.md.
+// Best full configuration (128x128, 256 threads, 2 blocks/SM, 3 stages, permuted layout, LOP3
+// dequant, one barrier per stage): 2,901 us / 125.8 TOP/s against the shipped 3,113 / 117.3. The
+// gate was 1,900 / 192, so the layout change is abandoned; TODO.md carries the decision.
 //
-// Ablating the best configuration:
+// **The kernel has two different bottlenecks at two different shapes, and no shape escapes both.**
+// Per-thread accumulator count is BM*BN/THREADS, and 64 fp32 accumulators is what a 128-register
+// budget allows once fragments, addresses and the ring also live there. So a tile wide enough to
+// cut the streamed bytes forces 512 threads, and 512 threads is what wrecks the MMA issue rate.
 //
-//   full kernel                          2,966 us
-//   without the per-group rescale        2,744 us   (rescale ~12%)
-//   streaming only, no MMAs, no reads    1,376 us   (was 1,723 at the shipped 64x512 tile)
+//   128x128, 256 threads            128x256, 512 threads
+//   -------------------------       --------------------------
+//   streaming alone   2,729 us      streaming alone   1,376 us
+//   MMAs alone        1,444         MMAs alone        1,704 (1,855 with the barriers)
+//   full              2,901         full              2,966
+//   -> memory bound                 -> issue bound, and the parts are additive
 //
-// The parts are additive: 1,376 streaming + ~1,230 compute + ~370 rescale. **Nothing overlaps.**
-// And the compute component is already at the hardware floor: this GEMM is 44.6M m16n8k32 MMAs,
-// which at Ampere's 1,024 int8 MAC/SM/cycle is ~1.28 ms of pure issue across 82 SMs, so our MMA
-// stream runs at ~93% of the card's peak int8 rate. cuBLAS finishes everything in 1,532 us, i.e.
-// roughly max(streaming, MMA) rather than their sum.
+// The arithmetic we spent this campaign attacking is *not* the problem at the better shape. At
+// 128x128 the whole per-group rescale -- 64 int-to-float converts plus 64 FMAs per thread per
+// group, four ALU ops for every MMA -- is worth **44 us of 2,901** (ABLATE=1, int32 accumulate
+// rescaled once), and per-token activation scales are worth 42 us (ABLATE=7). Both are inside the
+// noise of a kernel sitting on its memory floor. Group-128 scales and per-token scales, the two
+// quality trades Marlin makes and this fork declines, would buy ~1.5% here. They are not the gap.
 //
-// So the entire remaining gap is the overlap of streaming with compute, and none of the things
-// Marlin's structure brings moved it: the permuted layout and single-instruction fragment loads
-// (1.01x), the ring depth at 3 and 4 stages, one barrier per stage instead of two (+5%), or the
-// tile that halves the streamed bytes (the floor fell 1,723 -> 1,376, the total did not follow).
-// What that leaves -- and what this probe cannot settle without `ncu` counters, which need
-// elevation on this box -- is the hypothesis that both phases contend for the same LSU/MIO pipe,
-// in which case the lever is shared-read volume per MMA rather than anything structural.
-// ---------------------------------------------------------------------------------------------
-
+// **What the bytes say.** At 128x128: 1,712 MB of activation re-reads plus 856 MB of weights in
+// 2,729 us is 941 GB/s -- exactly this card's DRAM peak, i.e. no L2 reuse at all, although the
+// 786 KB activation tile is shared by all 164 concurrent blocks and ought to be L2-resident. At
+// 128x256 with 512 threads the same sum runs at 1,555 GB/s, 1.66x DRAM peak, so there the reuse
+// *is* happening. The difference between the two is memory-level parallelism, not bytes: the
+// 256-thread shape cannot keep enough cp.async in flight to reach L2's rate.
+//
+// So the one live question is whether the 128x256 shape is leaving ~3x of L2 bandwidth unclaimed,
+// and whether its streaming and its MMAs can be made to overlap instead of adding. Both are
+// `dram__bytes` / `lts__t_sectors` / issue-stall reads -- one `ncu` session with the elevation this
+// box needs (ERR_NVGPUCTRPERM), not another blind probe. Until then prefill kernel work is closed.
+//
+// Byte-minimal shapes do not rescue it either: 256x128 at 512 threads streams the least of any
+// register-legal tile (1,712 MB) and runs 3,220 us, because 70 KB of shared memory drops it to one
+// block per SM.
+//
+// Dead ends recorded so nobody repeats them: half2 scale products underflow (both scales are ~2e-3,
+// their product ~6e-6 against fp16's 6.1e-5 smallest normal); hoisting the token scales into
+// registers is worth nothing; independent accumulators for the two k-halves cost 24%; 1024-thread
+// blocks collapse.
+//
 // Sweep with -DBM_ROWS -DBN_TOKENS -DSTAGES_N -DTHREADS_N -DWARPS_M_N -DABLATE.
 //
 // Build:
@@ -104,7 +123,26 @@ constexpr int GROUPS = K / GROUP;
 #define STAGES_N 3
 #endif
 // 0 = full kernel, 1 = MMAs and loads but no per-group rescale (int32 accumulate, converted once),
-// 2 = streaming only (no MMAs, no shared reads): the G0a floor.
+// 2 = streaming only (no MMAs, no shared reads): the G0a floor,
+// 3 = compute only: every shared read, decode, MMA and rescale, but no cp.async at all. Reads stale
+//     data, so it is numerically meaningless and timing-wise exactly the question -- is our compute
+//     at the MMA issue floor, or only arithmetically close to it?
+// 4 = compute without the LOP3 decode: raw shared words go straight into the MMA,
+// 5 = MMAs and rescale only: no streaming, fragments hoisted out of the loop (no shared reads),
+// 6 = MMAs only: no streaming, no shared reads, no rescale -- the pure issue floor of our own
+//     instruction stream, which is the number to compare against the 1.28 ms hardware floor,
+// 7 = per-token activation scale (Marlin's choice) instead of per-group: the weight scale still
+//     changes every 64, so the FMA stays, but the ws*xa product per (m,n) and the two half2float
+//     per n disappear into the epilogue,
+// 8 = independent accumulators for the two k-halves, summed after the loop, to see whether the
+//     back-to-back dependent MMAs into one s[] are stalling the tensor pipe,
+// 9 = per-group activation scales in half2. MEASURED WRONG: both scales are ~2e-3 and their
+//     product ~6e-6 is subnormal in fp16 (smallest normal 6.1e-5), so it flushes. Kept as a
+//     recorded dead end.
+// 10 = per-group activation scales kept exactly, but the token scales are hoisted into registers
+//     once per group instead of being re-read from shared inside the m loop. Same arithmetic, same
+//     quality; the question is how much of ABLATE=7's win was the scale *loads* rather than the
+//     scale *maths*.
 #ifndef ABLATE
 #define ABLATE 0
 #endif
@@ -264,6 +302,10 @@ __global__ __launch_bounds__(THREADS) void w4a8_marlin(const unsigned char* __re
         asm volatile("cp.async.commit_group;");
     };
 
+#if ABLATE == 5 || ABLATE == 6
+    unsigned af[MT][2][4];
+    unsigned bf[NT][2][2];
+#endif
     float acc[MT][NT][4];
 #pragma unroll
     for (int m = 0; m < MT; ++m)
@@ -276,6 +318,10 @@ __global__ __launch_bounds__(THREADS) void w4a8_marlin(const unsigned char* __re
     for (int i = 0; i < STAGES - 1; ++i) {
         if (i < GROUPS) { issue(i, i); }
     }
+#if ABLATE >= 3 && ABLATE <= 6
+    asm volatile("cp.async.wait_group 0;");
+    __syncthreads();
+#endif
 
     for (int g = 0; g < GROUPS; ++g) {
         // One barrier per stage, and the order is the whole point. Wait for this stage's data, then
@@ -283,7 +329,13 @@ __global__ __launch_bounds__(THREADS) void w4a8_marlin(const unsigned char* __re
         // the next issue is about to overwrite -- then issue and compute with nothing between them,
         // so the copies for stage g+STAGES-1 fly while stage g's MMAs run. The shipped kernel pays
         // two barriers per group and serialises the two phases.
+#if ABLATE == 5 || ABLATE == 6
+        const int outstanding = 0;
+        (void)outstanding;
+#else
         const int outstanding = (g + STAGES - 1 < GROUPS) ? (STAGES - 2) : 0;
+#endif
+#if ABLATE != 5 && ABLATE != 6
         if (outstanding >= 3) {
             asm volatile("cp.async.wait_group 3;");
         } else if (outstanding == 2) {
@@ -293,8 +345,13 @@ __global__ __launch_bounds__(THREADS) void w4a8_marlin(const unsigned char* __re
         } else {
             asm volatile("cp.async.wait_group 0;");
         }
+#endif
+#if ABLATE != 5 && ABLATE != 6
         __syncthreads();
+#endif
+#if ABLATE < 3 || ABLATE > 6
         if (g + STAGES - 1 < GROUPS) { issue(g + STAGES - 1, (g + STAGES - 1) % STAGES); }
+#endif
 
         const char* const sa    = s_base + (g % STAGES) * STAGE;
         const char* const sb    = sa + WSTAGE;
@@ -303,44 +360,103 @@ __global__ __launch_bounds__(THREADS) void w4a8_marlin(const unsigned char* __re
             reinterpret_cast<const __half*>(s_ring + ((g / RING_GROUPS) % RING_BUFS) * RING_BYTES);
 
 #if ABLATE != 2
+#if ABLATE == 5 || ABLATE == 6
+        // Hoisted: assembled once, so the loop issues MMAs and nothing else.
+        if (g == 0) {
+#else
         unsigned af[MT][2][4];
         unsigned bf[NT][2][2];
+#endif
 #pragma unroll
         for (int m = 0; m < MT; ++m) {
             const int r0 = (warp_m * MT + m) * 16 + gid;
             // One 8-byte load per row is this lane's whole fragment for both k-halves.
             const uint2 w0 = lds64(sa + r0 * WROW + tig * 8);
             const uint2 w1 = lds64(sa + (r0 + 8) * WROW + tig * 8);
+#if ABLATE == 4
+            af[m][0][0] = w0.x; af[m][0][1] = w1.x; af[m][0][2] = w0.x; af[m][0][3] = w1.x;
+            af[m][1][0] = w0.y; af[m][1][1] = w1.y; af[m][1][2] = w0.y; af[m][1][3] = w1.y;
+#else
             af[m][0][0] = decode_lo(w0.x); af[m][0][1] = decode_lo(w1.x);
             af[m][0][2] = decode_hi(w0.x); af[m][0][3] = decode_hi(w1.x);
             af[m][1][0] = decode_lo(w0.y); af[m][1][1] = decode_lo(w1.y);
             af[m][1][2] = decode_hi(w0.y); af[m][1][3] = decode_hi(w1.y);
+#endif
         }
 #pragma unroll
         for (int n = 0; n < NT; ++n) {
             const uint4 b = lds128(sb + ((warp_n * NT + n) * 32 + lane) * 16);
             bf[n][0][0] = b.x; bf[n][0][1] = b.y; bf[n][1][0] = b.z; bf[n][1][1] = b.w;
         }
+#if ABLATE == 5 || ABLATE == 6
+        }
+#endif
+#if ABLATE == 10
+        // One read per token pair per group, not one per (m, token pair).
+        float xa_lo[NT], xa_hi[NT];
+#pragma unroll
+        for (int n = 0; n < NT; ++n) {
+            const int c = (warp_n * NT + n) * 8 + tig * 2;
+            xa_lo[n]    = __half2float(sxs[c]);
+            xa_hi[n]    = __half2float(sxs[c + 1]);
+        }
+#endif
 #pragma unroll
         for (int m = 0; m < MT; ++m) {
             const int sr    = (warp_m * MT + m) * 16 + gid;
-#if ABLATE != 1
+#if ABLATE == 9
+            const __half ws0h = ring[sr * RING_GROUPS + (g % RING_GROUPS)];
+            const __half ws1h = ring[(sr + 8) * RING_GROUPS + (g % RING_GROUPS)];
+#elif ABLATE != 1 && ABLATE != 6
             const float ws0 = __half2float(ring[sr * RING_GROUPS + (g % RING_GROUPS)]);
             const float ws1 = __half2float(ring[(sr + 8) * RING_GROUPS + (g % RING_GROUPS)]);
 #endif
 #pragma unroll
             for (int n = 0; n < NT; ++n) {
+#if ABLATE == 8
+                // Two chains, no dependency between them; the sum costs 4 adds per group.
+                int s[4]  = {0, 0, 0, 0};
+                int s2[4] = {0, 0, 0, 0};
+                mma_s8(s[0], s[1], s[2], s[3], af[m][0][0], af[m][0][1], af[m][0][2], af[m][0][3],
+                       bf[n][0][0], bf[n][0][1]);
+                mma_s8(s2[0], s2[1], s2[2], s2[3], af[m][1][0], af[m][1][1], af[m][1][2],
+                       af[m][1][3], bf[n][1][0], bf[n][1][1]);
+#pragma unroll
+                for (int j = 0; j < 4; ++j) { s[j] += s2[j]; }
+#else
                 int s[4] = {0, 0, 0, 0};
 #pragma unroll
                 for (int ks = 0; ks < 2; ++ks) {
                     mma_s8(s[0], s[1], s[2], s[3], af[m][ks][0], af[m][ks][1], af[m][ks][2],
                            af[m][ks][3], bf[n][ks][0], bf[n][ks][1]);
                 }
-#if ABLATE == 1
+#endif
+#if ABLATE == 1 || ABLATE == 6
                 acc[m][n][0] += static_cast<float>(s[0]);
                 acc[m][n][1] += static_cast<float>(s[1]);
                 acc[m][n][2] += static_cast<float>(s[2]);
                 acc[m][n][3] += static_cast<float>(s[3]);
+#elif ABLATE == 7
+                // Only the weight scale is in the loop; the token scale is a per-column constant
+                // and waits for the epilogue.
+                acc[m][n][0] = fmaf(static_cast<float>(s[0]), ws0, acc[m][n][0]);
+                acc[m][n][1] = fmaf(static_cast<float>(s[1]), ws0, acc[m][n][1]);
+                acc[m][n][2] = fmaf(static_cast<float>(s[2]), ws1, acc[m][n][2]);
+                acc[m][n][3] = fmaf(static_cast<float>(s[3]), ws1, acc[m][n][3]);
+#elif ABLATE == 10
+                acc[m][n][0] = fmaf(static_cast<float>(s[0]), ws0 * xa_lo[n], acc[m][n][0]);
+                acc[m][n][1] = fmaf(static_cast<float>(s[1]), ws0 * xa_hi[n], acc[m][n][1]);
+                acc[m][n][2] = fmaf(static_cast<float>(s[2]), ws1 * xa_lo[n], acc[m][n][2]);
+                acc[m][n][3] = fmaf(static_cast<float>(s[3]), ws1 * xa_hi[n], acc[m][n][3]);
+#elif ABLATE == 9
+                const int c        = (warp_n * NT + n) * 8 + tig * 2;
+                const __half2 xa   = *reinterpret_cast<const __half2*>(sxs + c);
+                const float2 p0    = __half22float2(__hmul2(__half2half2(ws0h), xa));
+                const float2 p1    = __half22float2(__hmul2(__half2half2(ws1h), xa));
+                acc[m][n][0]       = fmaf(static_cast<float>(s[0]), p0.x, acc[m][n][0]);
+                acc[m][n][1]       = fmaf(static_cast<float>(s[1]), p0.y, acc[m][n][1]);
+                acc[m][n][2]       = fmaf(static_cast<float>(s[2]), p1.x, acc[m][n][2]);
+                acc[m][n][3]       = fmaf(static_cast<float>(s[3]), p1.y, acc[m][n][3]);
 #else
                 const int c     = (warp_n * NT + n) * 8 + tig * 2;
                 const float xa0 = __half2float(sxs[c]);
@@ -486,7 +602,7 @@ int main() {
     CHECK(cudaMemcpy(hout.data(), dout, static_cast<size_t>(N) * T * sizeof(__nv_bfloat16),
                      cudaMemcpyDeviceToHost));
     double worst = 0.0;
-#if ABLATE == 0
+#if ABLATE == 0 || ABLATE == 9 || ABLATE == 10
     for (int s = 0; s < 64; ++s) {
         const int r = static_cast<int>(static_cast<size_t>(rand()) * 7919 % N);
         const int c = rand() % T;

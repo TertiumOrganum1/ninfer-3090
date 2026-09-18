@@ -3156,30 +3156,47 @@ ceiling, and neither has had any optimisation attempted.
       weight permuted within each group of 64 so one 8-byte shared load is a lane's whole A fragment
       for a row, LOP3 dequant whose natural output order *is* the MMA's required order, packed
       nibbles in shared, a cp.async ring of 3-4 stages, and one barrier per stage instead of two per
-      group. Best configuration (128x256, 512 threads): **2,966 us / 123.3 TOP/s against the shipped
-      117.3 — 1.05x**, where the gate was 1,900 us / 192 TOP/s. Abandoned.
+      group. Best configuration (128x128, 256 threads, 2 blocks/SM): **2,901 us / 125.8 TOP/s
+      against the shipped 117.3 - 1.07x**, where the gate was 1,900 us / 192 TOP/s. Abandoned.
 
-      **The decomposition is the useful part, because it relocates the problem.** Ablating the best
-      configuration: full 2,966 us; without the per-group rescale 2,744; streaming only, no MMAs and
-      no shared reads, 1,376 (the shipped 64x512 tile floors at 1,723). The parts are **additive** —
-      1,376 streaming + ~1,230 compute + ~370 rescale — so nothing overlaps. And the compute
-      component is already at the hardware floor: 44.6M m16n8k32 MMAs at Ampere's 1,024 int8
-      MAC/SM/cycle is ~1.28 ms of pure issue across 82 SMs, so **our MMA stream runs at ~93% of the
-      card's peak int8 rate**. cuBLAS finishes the whole GEMM in 1,532 us, i.e. roughly
-      max(streaming, MMA) rather than their sum.
+      **The decomposition is the useful part, because it relocates the problem twice over.** The
+      kernel has two different bottlenecks at two different shapes, and no shape escapes both.
+      Per-thread accumulator count is `BM*BN/THREADS`, and 64 fp32 accumulators is what a
+      128-register budget allows once fragments, addresses and the scale ring also live there. So a
+      tile wide enough to cut the streamed bytes forces 512 threads, and 512 threads is what wrecks
+      the MMA issue rate:
 
-      So the entire remaining 1.9x is the *overlap* of streaming with compute, and every structural
-      thing Marlin brings failed to move it: the permuted layout with single-instruction fragment
-      loads (1.01x), ring depth 3 and 4, one barrier per stage rather than two (+5%), and a tile
-      that halves the streamed bytes (the floor fell 1,723 -> 1,376; the total did not follow).
+      | ablation (gate_up, T=1024) | 128x128, 256 thr | 128x256, 512 thr |
+      |---|---:|---:|
+      | streaming alone, no MMAs, no shared reads | 2,729 us | 1,376 us |
+      | MMAs alone, no streaming, no reads, no rescale | 1,444 us | 1,704 us (1,855 with barriers) |
+      | full kernel | **2,901 us** | 2,966 us |
+      | | memory bound | issue bound, parts additive |
 
-      **What is left, and it is one hypothesis, not a plan:** both phases contend for the same
-      LSU/MIO pipe, in which case the lever is shared-read *volume per MMA* — bigger MT so a B
-      fragment is reused across more m-tiles — rather than anything about layout, depth or barriers.
-      Testing that needs `ncu` counters, which require elevation on this box (ERR_NVGPUCTRPERM), so
-      it wants an admin profiling session rather than another blind probe. Until someone has that
+      **The arithmetic this campaign spent itself attacking is not the gap.** At the better shape
+      the entire per-group rescale -- 64 int-to-float converts plus 64 FMAs per thread per group,
+      four ALU operations for every MMA -- is worth **44 us of 2,901** (int32 accumulate, rescaled
+      once), and per-token activation scales are worth 42 us. Both sit inside the noise of a kernel
+      on its memory floor. **Group-128 weight scales and per-token activation scales -- the two
+      quality trades Marlin makes and this fork declines -- would buy ~1.5% here.** That closes the
+      open question the previous revision of this entry left, and closes it against the trade.
+
+      **What the bytes say.** At 128x128, 1,712 MB of activation re-reads plus 856 MB of weights in
+      2,729 us is 941 GB/s: exactly this card's DRAM peak, so no L2 reuse at all -- although the
+      786 KB activation tile is shared by all 164 concurrent blocks and ought to be L2-resident. At
+      128x256 with 512 threads the same sum runs at 1,555 GB/s, 1.66x DRAM peak, so there the reuse
+      *is* happening. The difference is memory-level parallelism, not bytes: the 256-thread shape
+      cannot keep enough cp.async in flight to reach L2's rate. And byte-minimal shapes do not
+      rescue it either -- 256x128 at 512 threads streams the least of any register-legal tile
+      (1,712 MB) and runs 3,220 us, because 70 KB of shared drops it to one block per SM.
+
+      **So two questions remain, and both are counter reads, not probes:** whether the 128x256
+      shape is leaving ~3x of L2 bandwidth unclaimed, and why its streaming and its MMAs add rather
+      than overlap. `dram__bytes`, `lts__t_sectors` and the issue-stall reasons answer both in one
+      `ncu` session, which needs elevation on this box (ERR_NVGPUCTRPERM). Until someone has that
       data, **prefill kernel work on this fork is closed**: the shipped state is +21-29% over where
-      this entry started, the remaining gap is understood, and further guessing is mispriced.
+      this entry started, the remaining gap is localised to the memory path rather than the
+      arithmetic, and further guessing is mispriced.
 
       The projections that had no integer route at all were the larger win and are done: see
       `docs/performance.md`, +13-17% prefill at every length.
