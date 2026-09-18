@@ -19,15 +19,15 @@ int run_nvfp4_a16() {
     invocations.push_back({33, CallForm::Policy, ops::LinearPolicy::AllowA8});
     int failures = 0;
     failures += run_shape("NVFP4_A16", ActivationCompute::A16, make_nvfp4_weight,
-                          {14336, 5120, 701U, Comparison::Sampled, true, invocations});
+                          {14336, 5120, 701U, Comparison::SampledRows, true, invocations});
     failures += run_shape("NVFP4_A16", ActivationCompute::A16, make_nvfp4_weight,
-                          {16384, 5120, 703U, Comparison::Sampled, true, invocations});
+                          {16384, 5120, 703U, Comparison::SampledRows, true, invocations});
     failures += run_shape("NVFP4_A16", ActivationCompute::A16, make_nvfp4_weight,
-                          {34816, 5120, 704U, Comparison::Sampled, true, invocations});
+                          {34816, 5120, 704U, Comparison::SampledRows, true, invocations});
     failures += run_shape("NVFP4_A16", ActivationCompute::A16, make_nvfp4_weight,
-                          {5120, 6144, 705U, Comparison::Sampled, true, invocations});
+                          {5120, 6144, 705U, Comparison::SampledRows, true, invocations});
     failures += run_shape("NVFP4_A16", ActivationCompute::A16, make_nvfp4_weight,
-                          {5120, 17408, 707U, Comparison::Sampled, true, invocations});
+                          {5120, 17408, 707U, Comparison::SampledRows, true, invocations});
     for (auto [n, k] : {std::pair{14336, 5120}, std::pair{16384, 5120}, std::pair{34816, 5120},
                         std::pair{5120, 6144}, std::pair{5120, 17408}}) {
         failures += verify_workspace_envelopes(QType::NVFP4, n, k);

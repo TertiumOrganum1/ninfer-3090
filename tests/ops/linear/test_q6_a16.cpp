@@ -20,7 +20,7 @@ int q6_a16_conformance() {
         a16(24), a16(25), a16(26), a16(32), a16(33), a16(34), a16(48), a16(49), a16(50), a16(128),
     };
     failures += run_shape("Q6_A16", ActivationCompute::A16, make_q6_g64_fp16_weight,
-                          {248320, 5120, 191U, Comparison::Sampled, false, kN248320K5120});
+                          {248320, 5120, 191U, Comparison::SampledRows, false, kN248320K5120});
 
     constexpr std::array kN248320K2048{
         a16(1),  a16(3),   a16(4),   a16(5),   a16(16),  a16(17),  a16(24),  a16(25),  a16(32),
@@ -29,7 +29,7 @@ int q6_a16_conformance() {
         a16(97), a16(104), a16(105), a16(111), a16(112), a16(113), a16(127), a16(128), a16(129),
     };
     failures += run_shape("Q6_A16", ActivationCompute::A16, make_q6_g64_fp16_weight,
-                          {248320, 2048, 193U, Comparison::Sampled, false, kN248320K2048});
+                          {248320, 2048, 193U, Comparison::SampledRows, false, kN248320K2048});
 
     constexpr std::array kN1152K1536Full{
         convenience(4),
@@ -43,7 +43,7 @@ int q6_a16_conformance() {
         a16(960), a16(964), a16(1024), a16(1028), a16(1088), a16(1092), a16(131072),
     };
     failures += run_shape("Q6_A16", ActivationCompute::A16, make_q6_g64_fp16_weight,
-                          {1152, 1536, 197U, Comparison::Sampled, false, kN1152K1536Large});
+                          {1152, 1536, 197U, Comparison::SampledRows, false, kN1152K1536Large});
 
     return failures;
 }

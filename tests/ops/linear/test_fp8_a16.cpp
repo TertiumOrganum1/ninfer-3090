@@ -25,13 +25,13 @@ std::vector<Invocation> a16_capacity_calls() {
 int run_fp8_a16() {
     const auto attn_invocations = a16_capacity_calls();
     int failures                = run_shape("FP8_A16", ActivationCompute::A16, make_fp8_weight,
-                                            {14336, 5120, 811U, Comparison::Sampled, true, attn_invocations});
+                                            {14336, 5120, 811U, Comparison::SampledRows, true, attn_invocations});
     const auto gdn_invocations  = a16_capacity_calls();
     failures += run_shape("FP8_A16", ActivationCompute::A16, make_fp8_weight,
-                          {16384, 5120, 817U, Comparison::Sampled, true, gdn_invocations});
+                          {16384, 5120, 817U, Comparison::SampledRows, true, gdn_invocations});
     const auto mlp_invocations = a16_capacity_calls();
     failures += run_shape("FP8_A16", ActivationCompute::A16, make_fp8_weight,
-                          {34816, 5120, 821U, Comparison::Sampled, true, mlp_invocations});
+                          {34816, 5120, 821U, Comparison::SampledRows, true, mlp_invocations});
     std::vector<Invocation> vocabulary_invocations{
         Invocation{1, CallForm::A16Convenience, ops::LinearPolicy::A16Only},
         Invocation{8, CallForm::Policy, ops::LinearPolicy::AllowA8},
@@ -63,7 +63,7 @@ int run_fp8_a16() {
     for (int t : {7, 25, 41, 65, 128})
         vocabulary_invocations.push_back({t, CallForm::Policy, ops::LinearPolicy::A16Only, true});
     failures += run_shape("FP8_A16", ActivationCompute::A16, make_fp8_weight,
-                          {248320, 5120, 823U, Comparison::Sampled, true, vocabulary_invocations});
+                          {248320, 5120, 823U, Comparison::SampledRows, true, vocabulary_invocations});
     constexpr std::array vocabulary_policies{
         ops::LinearPolicy::A16Only,
         ops::LinearPolicy::AllowA8,
@@ -84,11 +84,11 @@ int run_fp8_a16() {
     }
     const auto residual6144_invocations = a16_capacity_calls();
     failures += run_shape("FP8_A16", ActivationCompute::A16, make_fp8_weight,
-                          {5120, 6144, 827U, Comparison::Sampled, true, residual6144_invocations});
+                          {5120, 6144, 827U, Comparison::SampledRows, true, residual6144_invocations});
     const auto residual17408_invocations = a16_capacity_calls();
     failures +=
         run_shape("FP8_A16", ActivationCompute::A16, make_fp8_weight,
-                  {5120, 17408, 829U, Comparison::Sampled, true, residual17408_invocations});
+                  {5120, 17408, 829U, Comparison::SampledRows, true, residual17408_invocations});
 
     auto packed = make_fp8_weight(14336, 5120, 831U);
     try {

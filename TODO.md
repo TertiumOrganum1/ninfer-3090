@@ -153,20 +153,70 @@ what it says about kernels and measurements still holds except where this sectio
       than fitted to two points: 272, 288, 304, 336..368, 400..432 and 464..496 were never sampled,
       and a band table built from two measurements is how the T=128 miss got there in the first
       place. Sweep the 257..512 range at a 16-column stride before touching it.
-- [ ] **The same BF16 dequantization is live in plain `linear` at the two largest K, and its suite
-      cannot see it.** `src/ops/linear/q8/shapes/n5120_k17408.cu` routes T=56..64 to
-      `launch_q8_mma_r32_c64`, 65..128 to `r32_c128`, 129..192 to `r64_c96` and above to
-      `r64_c128` -- the default, inexact tile, at the same K where `linear_add` spends 1.15 of its
-      relative-L2 criterion. `n5120_k25600.cu` is the same story one K further out. The suite does
-      not catch it because `tests/ops/linear/linear_test_common.cpp` compares `Comparison::Sampled`,
-      which is seven rows against **seven sampled columns** per invocation, where the `linear_add`
-      suite compares seven rows against *every* column -- two orders of magnitude more elements, and
-      that is the whole reason one saw it and the other did not. Before changing any route: widen
-      that comparison (or add a relative-L2-only full-column pass) and read the ratio with
-      `NINFER_OP_REPORT_STATS=1`; `linear`'s criterion is the same `{2^-8, 2^-8, 2^-7}`. The fix, if
-      it is needed, is already built: `::with_exact_group_scale`, plus a `with_min_blocks` to hold
-      the occupancy. Do not assume it is needed -- `linear` has no residual and a different seed, so
-      measure first.
+- [x] **The same BF16 dequantization is live in plain `linear`, it is within budget at every shape
+      the artifact carries, and the suite can now see it.** The tiles were measured, not assumed,
+      and the answer is different from `linear_add`'s: the worst Q8 A16 route spends **0.75** of the
+      relative-L2 criterion, not 1.15, and **no route changed**. `::with_exact_group_scale` stays
+      unset in `linear`.
+
+      **The coverage gap was real and is closed.** `tests/ops/linear/linear_test_common.cpp`
+      compared `Comparison::Sampled`: thirty-two sampled rows against **thirty-two sampled columns**
+      per invocation, at most 1,024 elements no matter how wide the call. It is now
+      `Comparison::SampledRows` -- the same rows against *every* column, up to 32,768 elements --
+      and it is *cheaper* than what it replaced, because the oracle is evaluated once per shape at
+      the widest invocation and sliced by the narrower ones instead of being recomputed per call.
+      The whole `linear` suite is 47 s and every qtype in it stays green.
+
+      **Sampling columns was not, in the end, what hid this.** Widening it moved the k=17408 tile
+      ratio from a scattered 0.60-0.66 to a flat 0.61; the step at the route boundary -- 0.42 on the
+      K-split rung, 0.61 on the tile above it -- was in the sampled numbers all along. Nobody had
+      read them, because nothing failed. The widening is still the right change: it is what makes
+      the step legible as a step rather than as scatter, and it is what a *future* decode error will
+      trip on.
+
+      The other half of the change is `ActivationSigns`, because the size of this particular error
+      turns out to depend on the fixture's activation as much as on the kernel. `linear`'s A16
+      activation is centered on zero, which lets a per-weight error cancel along K at the same rate
+      as the dot product it perturbs; `linear_add`'s is all-positive, which does not. Every Q8 shape
+      the artifact carries is now run both ways. They agree within 0.02 of the criterion on nine of
+      the ten; on [14336, 5120] the one-sign fixture reads 0.75 where the centered one reads 0.60.
+
+      **Measured** (sm_86, `NINFER_OP_REPORT_STATS=1`, worst relative-L2 ratio over T=1..1024, every
+      column; "K-split" is the rung below the first tiled band, "tile" the bands above it, and
+      "excess" is the tile's own contribution, sqrt(tile^2 - ksplit^2), all in units of the 2^-8
+      criterion):
+
+      | shape | tensors | K-split | tile | excess |
+      |---|---|---:|---:|---:|
+      | [14336, 5120] | `mtp/layer/attention/query_key_gate_value` | 0.43 | **0.75** | 0.61 |
+      | [34816, 5120] | 6x `mlp/gate_up` | 0.43 | 0.69 | 0.53 |
+      | [6144, 5120] | 5x dflash2 `attention/query_key_value` | 0.43 | 0.64 | 0.47 |
+      | [248320, 5120] | `text/output_head`, `text/token_embedding` | 0.46 | 0.63 | 0.43 |
+      | [4608, 4608] | `vision/merger/fc1` | 0.43 | 0.61 | 0.44 |
+      | [5120, 25600] | `dflash2/feature_projection` | 0.43 | 0.61 | 0.42 |
+      | [5120, 17408] | 6x `mlp/down` | 0.44 | 0.60 | 0.40 |
+      | [5120, 10240] | `mtp/input_projection` | 0.43 | 0.57 | 0.36 |
+      | [5120, 6144] | `mtp/layer/attention/output` | 0.43 | 0.52 | 0.29 |
+      | [5120, 4608] | `vision/merger/fc2` | 0.44 | 0.53 | 0.29 |
+
+      Worst gross ratio anywhere: 0.52. The centered fixture is within 0.02 of these everywhere
+      except [14336, 5120], where it reads 0.60 against the biased 0.75.
+
+      **The excess does not grow with K**, which is the part of `linear_add`'s write-up that does
+      *not* generalize. It is 0.40 at K=17408 and 0.61 at K=5120 -- if anything the wrong way round.
+      An offline model of the same rounding (random int8 codes, the fixture's four 1.0625*2^e
+      scales, K from 5,120 to 51,200, both sign conventions) puts it at 0.40-0.43 and flat. So the
+      1.15 that `linear_add` measured at k=17408 is a resonance between *that* fixture's hashed code
+      pattern and its activation, not a K law. **Do not carry 1.15 to a third Op; re-measure.**
+
+      **So the entry closes with the routes as they shipped.** Nothing changed, so there was nothing
+      to weigh against DFlash2 or MTP acceptance -- and it would have measured nothing anyway: at
+      `--draft-tokens 3` or 4 every one of these tensors runs at T<=5, which every table routes to
+      the K-split rung that decodes exactly. The tiles are reached only during prefill. What is
+      worth knowing is that [14336, 5120] leaves only a quarter of the criterion in hand, and that
+      `text/output_head` is the one Q8 tensor on the target's own output path, where an error is not
+      absorbed by draft verification. If either moves, `::with_exact_group_scale` plus a
+      `with_min_blocks` is built and waiting; price the throughput before taking it.
 - [ ] **Trap to know before extending a schedule sweep.** Three Q8 `linear_add` launches -- decode,
       exact-T split-K, medium split-K -- hardcode `kRows = 2048` (`q8_linear_add_gemm_splitk.cu`),
       so at 5120 rows they compute the first 2,048 and return. The first dense sweep read that as a

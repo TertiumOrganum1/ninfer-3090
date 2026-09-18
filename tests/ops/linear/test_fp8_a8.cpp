@@ -20,7 +20,7 @@ int run_fp8_a8() {
         Invocation{1024, CallForm::Policy, ops::LinearPolicy::AllowA8},
     };
     int failures = run_shape("FP8_A8", ActivationCompute::A8, make_fp8_weight,
-                             {14336, 5120, 829U, Comparison::Sampled, true, attn_invocations});
+                             {14336, 5120, 829U, Comparison::SampledRows, true, attn_invocations});
     constexpr std::array gdn_invocations{
         Invocation{11, CallForm::Policy, ops::LinearPolicy::AllowA8},
         Invocation{48, CallForm::Policy, ops::LinearPolicy::AllowA4},
@@ -28,7 +28,7 @@ int run_fp8_a8() {
         Invocation{1024, CallForm::Policy, ops::LinearPolicy::AllowA8},
     };
     failures += run_shape("FP8_A8", ActivationCompute::A8, make_fp8_weight,
-                          {16384, 5120, 839U, Comparison::Sampled, true, gdn_invocations});
+                          {16384, 5120, 839U, Comparison::SampledRows, true, gdn_invocations});
     constexpr std::array mlp_invocations{
         Invocation{1, CallForm::Policy, ops::LinearPolicy::AllowA8},
         Invocation{5, CallForm::Policy, ops::LinearPolicy::AllowA8},
@@ -37,7 +37,7 @@ int run_fp8_a8() {
         Invocation{1024, CallForm::Policy, ops::LinearPolicy::AllowA8},
     };
     failures += run_shape("FP8_A8", ActivationCompute::A8, make_fp8_weight,
-                          {34816, 5120, 853U, Comparison::Sampled, true, mlp_invocations});
+                          {34816, 5120, 853U, Comparison::SampledRows, true, mlp_invocations});
 
     constexpr std::array residual6144_invocations{
         Invocation{25, CallForm::Policy, ops::LinearPolicy::AllowA8},
@@ -46,7 +46,7 @@ int run_fp8_a8() {
         Invocation{1024, CallForm::Policy, ops::LinearPolicy::AllowA8},
     };
     failures += run_shape("FP8_A8", ActivationCompute::A8, make_fp8_weight,
-                          {5120, 6144, 857U, Comparison::Sampled, true, residual6144_invocations});
+                          {5120, 6144, 857U, Comparison::SampledRows, true, residual6144_invocations});
     constexpr std::array residual17408_invocations{
         Invocation{25, CallForm::Policy, ops::LinearPolicy::AllowA8},
         Invocation{48, CallForm::Policy, ops::LinearPolicy::AllowA4},
@@ -55,7 +55,7 @@ int run_fp8_a8() {
     };
     failures +=
         run_shape("FP8_A8", ActivationCompute::A8, make_fp8_weight,
-                  {5120, 17408, 859U, Comparison::Sampled, true, residual17408_invocations});
+                  {5120, 17408, 859U, Comparison::SampledRows, true, residual17408_invocations});
 
     struct Problem {
         std::int32_t rows;
