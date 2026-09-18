@@ -77,7 +77,9 @@ what it says about kernels and measurements still holds except where this sectio
       them is numerically wrong**, so that table is unchanged. The Q4 dense table repeats the
       plain-`linear` finding at the same geometry -- the 32-row tiles lose 21-76% from 65 columns
       up, and 9..16 wants the capacity-24 rung (+43% at T=12). `bench/ops/dense_linear_add_schedule_bench.cu`
-      is the sweep.
+      is the sweep. **k=6144's T=128 was mis-routed** and is fixed: re-measured twice with the
+      bench's row-tile predicate corrected, `mma_r32_c128` is 170-173 us there and `mma_r64_c64`
+      150, so 128 is now its own entry; 112..124 keep the shipped order (154 vs 160, 162 vs 163).
 - [x] **The Q8 tiled path at K=17408 was not wrong; it was rounding the dequantized weight, and the
       tiles now have the option not to.** The failure was real and reproducible -- index 297,
       actual -33.25 against reference -33.5091, at every width from 33 up, identically for C64,
@@ -107,7 +109,50 @@ what it says about kernels and measurements still holds except where this sectio
       **Cost.** The exact body holds an FP32 group partial and this tile's row scales, so ptxas
       wants more registers; `with_min_blocks` pins the three tiles that would otherwise lose a
       resident block (r32_c64, r32_c96, r64_c64) back to their default twin's occupancy. Nothing
-      spills (`cuobjdump -res-usage`).
+      spills, and all 42 default instantiations keep their exact register and stack counts
+      (`cuobjdump -res-usage`, before against after), so no other Op that shares this header moves.
+
+      **Per-op, retuned** (sm_86, cold, median of 15, `dense_linear_add_schedule_bench`, us, new
+      route against the grouped split-K it replaces): T=65 398 vs 681 (1.71x), T=128 445 vs 829
+      (1.86x), T=192 578 vs 1317 (2.28x), T=224 801 vs 1419 (1.77x), T=256 887 vs 1551 (1.75x),
+      T=512 1755 vs 3227 (1.84x), T=1024 3648 vs 6913 (1.89x). The capacity route's ceiling drops
+      from 64 to 40, where the two cross.
+- [ ] **The 1.7-2.3x above is worth nothing on today's artifacts, because none of them quantize the
+      dense down projection to Q8 -- and the earlier write-up of it as "the 27B MLP
+      down-projection's Q8 shape" was wrong about that.** Reading the manifests: in
+      `qwen3_8_27b_dflash2.v3.ninfer` all sixty-four `text/layers/*/mlp/down` are `q5_g64_fp16` at
+      [5120, 17408]; the only `q8_g32_fp16` tensors at that shape are `mtp/layer/mlp/down` and the
+      five `dflash2/layers/*/mlp/down`. `qwen3_6_27b.v3.ninfer` has exactly one (the MTP layer) and
+      `qwen3_6_27b_nvfp4.v3.ninfer`'s text tower is NVFP4. The draft heads run at draft widths, and
+      every width up to 40 keeps the K-split capacity rung this change did not touch.
+
+      Measured accordingly and it is a wash, which is the right answer rather than a disappointing
+      one: `run_interleaved_ab.py`, arm order swapped every repetition, paired medians of 4,
+      `ninfer_bench -pg 2048,128 -r 2 --warmup 1 --kv-dtype int8 --max-ctx 4096` on
+      `qwen3_8_27b_dflash2.v3.ninfer`, both arms one commit apart in `src/ops/linear_add/q8` only:
+
+      | metric | median | min..max | positive |
+      |---|---:|---|---:|
+      | 27B prefill (pp2048) | -0.22% | -0.89%..+0.17% | 2/4 |
+      | 27B dense decode (tg128) | +0.16% | -0.24%..+0.36% | 3/4 |
+
+      Decode is the control here by construction: T=1 resolves to the same K-split capacity route in
+      both arms, so anything it shows is drift, and it shows 0.16%.
+
+      **So the win is banked, not spent.** It is claimed the moment a conversion puts the dense down
+      projection in Q8 -- which the fork's `q8_linear_add_admits` has always been ready for and the
+      route table now serves correctly. Before quoting the 1.7-2.3x anywhere, say which artifact it
+      would apply to.
+- [ ] **Two more dense k=6144 widths are mis-routed, and the pattern says there are more between
+      them.** Measured 2026-09-18 alongside the T=128 fix, same conditions (us, shipped route vs
+      best): **T=320** `mma_r64_c128` 434 against `mma_r128_c80` 343 (**-21%**) and `mma_r64_c64`
+      367; **T=448** `mma_r64_c128` 552 against `mma_r64_c112` 514 (-7%). Both are widths that are
+      *not* a multiple of 128, so the 128-wide tile pays for a half-empty trailing column tile --
+      the same effect the Q5 composite note describes one level up, and the same reason T=384, 512,
+      768 and 1024 (all multiples of 128 or close) keep `r64_c128` as the winner. Left alone rather
+      than fitted to two points: 272, 288, 304, 336..368, 400..432 and 464..496 were never sampled,
+      and a band table built from two measurements is how the T=128 miss got there in the first
+      place. Sweep the 257..512 range at a 16-column stride before touching it.
 - [ ] **The same BF16 dequantization is live in plain `linear` at the two largest K, and its suite
       cannot see it.** `src/ops/linear/q8/shapes/n5120_k17408.cu` routes T=56..64 to
       `launch_q8_mma_r32_c64`, 65..128 to `r32_c128`, 129..192 to `r64_c96` and above to
