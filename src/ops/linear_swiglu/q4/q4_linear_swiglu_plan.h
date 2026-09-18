@@ -1,5 +1,6 @@
 #pragma once
 
+#include "core/weight.h"
 #include "core/arena.h"
 
 #include <cuda_runtime.h>
@@ -16,6 +17,7 @@ enum class Q4LinearSwiGluScheduleId {
     MmaSplitHalfPairR32C48,
     Materialized,
     MmaSplitHalfPairR32C128,
+    MmaSplitHalfPairR32C128Tail,
     // int8 tensor-core small-T route, T=32 only. Not in the route table -- reachable only through
     // q4_linear_swiglu_execute_schedule, for measuring against SmallTTiled before any decision to
     // wire it in. See q4_small_t_mma_i8.cuh and docs/performance.md's tensor-rate-bound C8 finding.
@@ -67,7 +69,7 @@ void q4_linear_swiglu_execute_plan(const Q4LinearSwiGluPlan& plan, const Tensor&
 // only way to tell whether a route boundary sits in the right place. Materialized in particular
 // cannot be timed any other way: it is not a kernel but a composite -- linear() into a workspace,
 // then silu_mul() over the two halves -- so a bench that called the pieces itself would be timing a
-// replica of the dispatch rather than the dispatch. Mirrors w8_pair_execute_schedule, which exists
+// replica of the dispatch rather than the dispatch. Mirrors q8_pair_execute_schedule, which exists
 // for the same reason.
 //
 // Nothing on the inference path should call this: the check execute_plan adds is what keeps a plan

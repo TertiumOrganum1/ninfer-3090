@@ -1,6 +1,6 @@
 #pragma once
 
-// Q5 row-split small-T MMA core, the Q5 counterpart of q4_small_t_mma.cuh. For narrow decode
+// Q5 row-split small-T MMA core, the Q5 counterpart of q4_ksplit_mma.cuh. For narrow decode
 // extents -- an MTP verify is T = K+1 = 4 -- the SIMT split2/split4 kernels grow with T because
 // every column is its own FMA stream, while an MMA over an eight-column tile costs the same from
 // T=1 to T=8.

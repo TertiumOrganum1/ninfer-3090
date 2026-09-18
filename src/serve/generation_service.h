@@ -94,8 +94,8 @@ struct PreparedRequest {
     int prompt_tokens    = 0;
     bool enable_thinking = true;
     std::optional<std::uint32_t> thinking_budget;
-    std::optional<ninfer::ReasoningEffort> effective_reasoning_effort;
-    bool preserve_thinking = false;
+    std::optional<ninfer::ReasoningEffort> reasoning_effort;
+    std::optional<bool> preserve_thinking;
     // False trims the finished response to a single tool call. See GenerationRequest.
     bool parallel_tool_calls = true;
     std::shared_ptr<RequestLifetime> lifetime;
@@ -165,7 +165,6 @@ private:
 
     ServeOptions options_;
     std::unique_ptr<ninfer::Engine> engine_;
-    ninfer::PromptCapabilities prompt_capabilities_;
     std::shared_ptr<RequestCapacity> request_capacity_;
 };
 

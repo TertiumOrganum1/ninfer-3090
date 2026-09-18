@@ -1,5 +1,307 @@
 # TODO
 
+## Open after the 2026-09-17 upstream catch-up (v3 artifacts, `src/models/qwen3_5`)
+
+The fork now sits on Neroued/ninfer `f76e19c0`. Everything below this section predates that merge;
+what it says about kernels and measurements still holds except where this section contradicts it.
+
+- [x] **The plain `linear` Q4/Q5/Q8 shape tables are swept and retuned on sm_86.** They were
+      upstream's RTX 5090 sweep and **every one of the eighteen shapes measured here was wrong**,
+      by between 1.2x and 3.8x at some width. `bench/ops/linear_schedule_bench.cu` is the sweep --
+      the fourth user of `bench/ops/schedule_sweep.cuh`, and the first for an Op whose tables return
+      a plain launch pointer rather than a schedule enum, so `routed_to` is recovered by matching
+      the shape table's own pointer against the candidate set. Cold, L2 flushed, median of 11 and
+      then a second independent run at median of 21-31 with min..p95; a band moved only where both
+      runs agreed on the sign and the margin cleared the spread. Best speedup per shape, public
+      `linear()` before vs after:
+
+      | shape | best | shape | best | shape | best |
+      |---|---|---|---|---|---|
+      | q4 131072x5120 | **3.84x** (T=12) | q8 34816x5120 | **2.72x** (T=56) | q4 1024x5120 | 1.95x (T=24) |
+      | q8 6144x5120 | 1.85x (T=56) | q4 5120x6144 | 1.72x (T=128) | q5 5120x6144 | 1.67x (T=160) |
+      | q4 7168x5120 | 1.66x (T=12) | q4 34816x5120 | 1.63x (T=12) | q4 6144x5120 | 1.61x (T=12) |
+      | q8 2048x16384 | 1.60x (T=128) | q5 5120x17408 | 1.60x (T=160) | q8 5120x10240 | 1.53x (T=64) |
+      | q8 5120x6144 | 1.53x (T=64) | q5 7168x5120 | 1.51x (T=112) | q8 14336x5120 | 1.46x (T=160) |
+      | q8 5120x25600 | 1.44x (T=96) | q5 1024x5120 | 1.42x (T=1024) | q8 5120x17408 | 1.39x (T=32) |
+      | q4 4096x5120 | 1.37x (T=256) | q5 6144x5120 | 1.30x (T=112) | | |
+
+      Four corrections recur and are worth knowing before touching any other inherited table:
+
+      * **The draft head was the worst route in the registry.** `q4 131072x5120` sent everything
+        above eight columns to the 128-wide tile; at the widths a DFlash2 or MTP round actually
+        uses that is 1.7-3.8x the right tile. Nothing about it is specific to the draft head --
+        it is what a single wide tile costs when the extent does not fill it.
+      * **`ca` beats `cg` for staged activations on sm_86.** Upstream's 028eb61e moved the Q8
+        K-split activation loads to `cg`; measured here that is backwards by 11-19% at every
+        capacity that was flipped. The L1 `cg` bypasses is where the staged slab wants to live.
+      * **Eight K warps fit sm_86's 49,152 bytes up to a 32-column tile**, so `Q8KSplitSm8xFourWarpSchedule`'s
+        blanket four-warp fallback gave away 20-26% on the narrow Q8 rungs of the tall shapes.
+        It is still the right fallback above 32 columns.
+      * **Above the capacity ladder, 64-row MMA tiles beat 32-row ones and beat wide K-split rungs.**
+        This is the same "too few CTAs" story §2c records for the GDN projection, and it accounts
+        for most of the 33..192 band on every shape of both quantizations.
+
+      Each shape file now records what moved, by how much, and which bands are upstream's value
+      kept because it measured best here. `tests/ops/linear/test_q{4,5,8}_a16.cpp` gained the new
+      route boundaries.
+- [ ] **Not yet swept on this card: the Q6, BF16, FP8-A16 and NVFP4-A16 `linear` shape tables**, and
+      the Q4/Q5 `1152`-family Vision shapes. `linear_schedule_bench.cu` has no candidate set for
+      them yet; adding one is the 40-line file its header promises, and given that eighteen of
+      eighteen swept shapes moved, the prior on these is not good. The Q8 vocabulary crossover
+      (`248320x5120`) is deliberately excluded -- it is this fork's own measurement and the catch-up
+      left it alone.
+- [x] **The new Q5 `linear_add` tail route past 513 columns is right on this card too, and is kept.**
+      `MmaResidualR64C128Tail` splits a wide extent into whole 512-column waves plus a narrow tail
+      routed through the normal table, on the argument that a trailing mostly-empty 128-wide tile is
+      billed as a full wave. Swept with `bench/ops/q5_linear_add_schedule_bench.cu`, cold, median of
+      11 with min..p95, public Op (the composite) against `mma_r64_c128` (the plain wide launch),
+      both k (us):
+
+      | T | 513 | 576 | 640 | 704 | 768 | 896 | 1024 | 1152 | 1280 | 1536 |
+      |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+      | k=6144 composite | 610 | 751 | 828 | 877 | 869 | 1070 | 1149 | 1402 | 1440 | 1708 |
+      | k=6144 plain | 864 | 865 | 812 | 940 | 897 | 1098 | 1194 | 1404 | 1490 | 1762 |
+      | k=17408 composite | 1635 | 2004 | 2209 | 2358 | 2369 | 2862 | 3144 | 3786 | 3912 | 4682 |
+      | k=17408 plain | 2330 | 2378 | 2189 | 2585 | 2478 | 2998 | 3239 | 3717 | 4036 | 4804 |
+
+      **1.42x at 513 columns** on both k, 1.1-1.2x through 704, and 1.0-1.05x beyond. The two points
+      where the composite is 1-2% behind (640 and k=17408's 1152) are inside the spread. This is the
+      one inherited table in this pass that measured right as it shipped; do not re-sweep it.
+- [x] **The new dense (5120-row) `linear_add` Q8 and Q4 tables are swept; k=6144 is retuned and
+      k=17408 turns out to be right as it shipped, for a reason nobody had written down.** The Q8
+      table was two entries -- K-split capacity to 64 columns, then the grouped split-K for
+      everything above -- where the same Op's 2048-row tables are thirty-three. At **k=6144** the
+      grouped route is about 2x slower than a plain MMA tile at every width it covers: +74% at
+      T=80, +135% at T=192, +110% at T=256, +123% at T=1024; and the capacity route's ceiling is 32
+      columns, not 64. At **k=17408** the same tiles measure 1.6-2.5x faster and **every one of
+      them is numerically wrong**, so that table is unchanged. The Q4 dense table repeats the
+      plain-`linear` finding at the same geometry -- the 32-row tiles lose 21-76% from 65 columns
+      up, and 9..16 wants the capacity-24 rung (+43% at T=12). `bench/ops/dense_linear_add_schedule_bench.cu`
+      is the sweep. **k=6144's T=128 was mis-routed** and is fixed: re-measured twice with the
+      bench's row-tile predicate corrected, `mma_r32_c128` is 170-173 us there and `mma_r64_c64`
+      150, so 128 is now its own entry; 112..124 keep the shipped order (154 vs 160, 162 vs 163).
+- [x] **The Q8 tiled path at K=17408 was not wrong; it was rounding the dequantized weight, and the
+      tiles now have the option not to.** The failure was real and reproducible -- index 297,
+      actual -33.25 against reference -33.5091, at every width from 33 up, identically for C64,
+      C96, C112 and C128 -- but the criterion it broke is `relative_l2`, at 1.15 of the limit, with
+      the gross bound never above 0.56. That is the shape of a precision budget, not of a dropped
+      K-tile or a wrapped offset, either of which lands on the gross bound first.
+
+      **Root cause.** `src/ops/linear/q8/q8_rowsplit_gemm_mma.cuh`, `dequant_w`:
+      `__floats2bfloat162_rn(q0 * scale, q1 * scale)` stores `round_bf16(code * scale)` as the MMA
+      operand. The code needs eight significand bits and an FP16 group scale up to eleven; BF16 has
+      eight, so up to eleven bits of every weight are discarded. That error does not average out
+      over K on this weight population -- it grows about linearly in K while the dot product grows
+      like sqrt(K) -- so the relative error grows like sqrt(K): 0.57 of the criterion at k=6144,
+      1.15 at k=17408. Every other Q8 route decodes exactly instead (`q8_ksplit_bf16_pair_from_s8`
+      holds the bare code, which BF16 represents exactly, and `fmaf`s the FP32 group partial by the
+      scale), which is why the K-split and grouped routes sit at 0.43 at the same K and why the
+      shipped table was right. **Confirmed** by rounding the oracle's weights to BF16: the tiles
+      fall from 1.15 to 0.42 and the K-split routes rise from 0.43 to 1.15, an exact mirror.
+
+      **Fix.** `EXACT_GROUP_SCALE_`, a new schedule parameter, defaults off, so no existing
+      instantiation changes by a bit. Set, the tile carries the bare code, accumulates one Q8G32
+      group (two m16n8k16 steps) into an FP32 partial and `fmaf`s it into the accumulator by the
+      row's group scale, exactly as the K-split family does. The k=17408 dense `linear_add` table
+      takes the exact tiles and measures 0.42 across every width, continuous with the K-split
+      routes below it -- no step at the route boundary.
+
+      **Cost.** The exact body holds an FP32 group partial and this tile's row scales, so ptxas
+      wants more registers; `with_min_blocks` pins the three tiles that would otherwise lose a
+      resident block (r32_c64, r32_c96, r64_c64) back to their default twin's occupancy. Nothing
+      spills, and all 42 default instantiations keep their exact register and stack counts
+      (`cuobjdump -res-usage`, before against after), so no other Op that shares this header moves.
+
+      **Per-op, retuned** (sm_86, cold, median of 15, `dense_linear_add_schedule_bench`, us, new
+      route against the grouped split-K it replaces): T=65 398 vs 681 (1.71x), T=128 445 vs 829
+      (1.86x), T=192 578 vs 1317 (2.28x), T=224 801 vs 1419 (1.77x), T=256 887 vs 1551 (1.75x),
+      T=512 1755 vs 3227 (1.84x), T=1024 3648 vs 6913 (1.89x). The capacity route's ceiling drops
+      from 64 to 40, where the two cross.
+- [ ] **The 1.7-2.3x above is worth nothing on today's artifacts, because none of them quantize the
+      dense down projection to Q8 -- and the earlier write-up of it as "the 27B MLP
+      down-projection's Q8 shape" was wrong about that.** Reading the manifests: in
+      `qwen3_8_27b_dflash2.v3.ninfer` all sixty-four `text/layers/*/mlp/down` are `q5_g64_fp16` at
+      [5120, 17408]; the only `q8_g32_fp16` tensors at that shape are `mtp/layer/mlp/down` and the
+      five `dflash2/layers/*/mlp/down`. `qwen3_6_27b.v3.ninfer` has exactly one (the MTP layer) and
+      `qwen3_6_27b_nvfp4.v3.ninfer`'s text tower is NVFP4. The draft heads run at draft widths, and
+      every width up to 40 keeps the K-split capacity rung this change did not touch.
+
+      Measured accordingly and it is a wash, which is the right answer rather than a disappointing
+      one: `run_interleaved_ab.py`, arm order swapped every repetition, paired medians of 4,
+      `ninfer_bench -pg 2048,128 -r 2 --warmup 1 --kv-dtype int8 --max-ctx 4096` on
+      `qwen3_8_27b_dflash2.v3.ninfer`, both arms one commit apart in `src/ops/linear_add/q8` only:
+
+      | metric | median | min..max | positive |
+      |---|---:|---|---:|
+      | 27B prefill (pp2048) | -0.22% | -0.89%..+0.17% | 2/4 |
+      | 27B dense decode (tg128) | +0.16% | -0.24%..+0.36% | 3/4 |
+
+      Decode is the control here by construction: T=1 resolves to the same K-split capacity route in
+      both arms, so anything it shows is drift, and it shows 0.16%.
+
+      **So the win is banked, not spent.** It is claimed the moment a conversion puts the dense down
+      projection in Q8 -- which the fork's `q8_linear_add_admits` has always been ready for and the
+      route table now serves correctly. Before quoting the 1.7-2.3x anywhere, say which artifact it
+      would apply to.
+- [ ] **Two more dense k=6144 widths are mis-routed, and the pattern says there are more between
+      them.** Measured 2026-09-18 alongside the T=128 fix, same conditions (us, shipped route vs
+      best): **T=320** `mma_r64_c128` 434 against `mma_r128_c80` 343 (**-21%**) and `mma_r64_c64`
+      367; **T=448** `mma_r64_c128` 552 against `mma_r64_c112` 514 (-7%). Both are widths that are
+      *not* a multiple of 128, so the 128-wide tile pays for a half-empty trailing column tile --
+      the same effect the Q5 composite note describes one level up, and the same reason T=384, 512,
+      768 and 1024 (all multiples of 128 or close) keep `r64_c128` as the winner. Left alone rather
+      than fitted to two points: 272, 288, 304, 336..368, 400..432 and 464..496 were never sampled,
+      and a band table built from two measurements is how the T=128 miss got there in the first
+      place. Sweep the 257..512 range at a 16-column stride before touching it.
+- [x] **The same BF16 dequantization is live in plain `linear`, it is within budget at every shape
+      the artifact carries, and the suite can now see it.** The tiles were measured, not assumed,
+      and the answer is different from `linear_add`'s: the worst Q8 A16 route spends **0.75** of the
+      relative-L2 criterion, not 1.15, and **no route changed**. `::with_exact_group_scale` stays
+      unset in `linear`.
+
+      **The coverage gap was real and is closed.** `tests/ops/linear/linear_test_common.cpp`
+      compared `Comparison::Sampled`: thirty-two sampled rows against **thirty-two sampled columns**
+      per invocation, at most 1,024 elements no matter how wide the call. It is now
+      `Comparison::SampledRows` -- the same rows against *every* column, up to 32,768 elements --
+      and it is *cheaper* than what it replaced, because the oracle is evaluated once per shape at
+      the widest invocation and sliced by the narrower ones instead of being recomputed per call.
+      `ctest -R linear -j2` is 63 s for twenty-five tests and every qtype in it stays green.
+
+      **Sampling columns was not, in the end, what hid this.** Widening it moved the k=17408 tile
+      ratio from a scattered 0.60-0.66 to a flat 0.61; the step at the route boundary -- 0.42 on the
+      K-split rung, 0.61 on the tile above it -- was in the sampled numbers all along. Nobody had
+      read them, because nothing failed. The widening is still the right change: it is what makes
+      the step legible as a step rather than as scatter, and it is what a *future* decode error will
+      trip on.
+
+      The other half of the change is `ActivationSigns`, because the size of this particular error
+      turns out to depend on the fixture's activation as much as on the kernel. `linear`'s A16
+      activation is centered on zero, which lets a per-weight error cancel along K at the same rate
+      as the dot product it perturbs; `linear_add`'s is all-positive, which does not. Every Q8 shape
+      the artifact carries is now run both ways. They agree within 0.02 of the criterion on nine of
+      the ten; on [14336, 5120] the one-sign fixture reads 0.75 where the centered one reads 0.60.
+
+      **Measured** (sm_86, `NINFER_OP_REPORT_STATS=1`, worst relative-L2 ratio over T=1..1024, every
+      column; "K-split" is the rung below the first tiled band, "tile" the bands above it, and
+      "excess" is the tile's own contribution, sqrt(tile^2 - ksplit^2), all in units of the 2^-8
+      criterion):
+
+      | shape | tensors | K-split | tile | excess |
+      |---|---|---:|---:|---:|
+      | [14336, 5120] | `mtp/layer/attention/query_key_gate_value` | 0.43 | **0.75** | 0.61 |
+      | [34816, 5120] | 6x `mlp/gate_up` | 0.43 | 0.69 | 0.53 |
+      | [6144, 5120] | 5x dflash2 `attention/query_key_value` | 0.43 | 0.64 | 0.47 |
+      | [248320, 5120] | `text/output_head`, `text/token_embedding` | 0.46 | 0.63 | 0.43 |
+      | [4608, 4608] | `vision/merger/fc1` | 0.43 | 0.61 | 0.44 |
+      | [5120, 25600] | `dflash2/feature_projection` | 0.43 | 0.61 | 0.42 |
+      | [5120, 17408] | 6x `mlp/down` | 0.44 | 0.60 | 0.40 |
+      | [5120, 10240] | `mtp/input_projection` | 0.43 | 0.57 | 0.36 |
+      | [5120, 6144] | `mtp/layer/attention/output` | 0.43 | 0.52 | 0.29 |
+      | [5120, 4608] | `vision/merger/fc2` | 0.44 | 0.53 | 0.29 |
+
+      Worst gross ratio across these shapes: 0.52. The centered fixture is within 0.02 of these everywhere
+      except [14336, 5120], where it reads 0.60 against the biased 0.75.
+
+      **The excess does not grow with K**, which is the part of `linear_add`'s write-up that does
+      *not* generalize. It is 0.40 at K=17408 and 0.61 at K=5120 -- if anything the wrong way round.
+      An offline model of the same rounding (random int8 codes, the fixture's four 1.0625*2^e
+      scales, K from 5,120 to 51,200, both sign conventions) puts it at 0.40-0.43 and flat. So the
+      1.15 that `linear_add` measured at k=17408 is a resonance between *that* fixture's hashed code
+      pattern and its activation, not a K law. **Do not carry 1.15 to a third Op; re-measure.**
+
+      **So the entry closes with the routes as they shipped.** Nothing changed, so there was nothing
+      to weigh against DFlash2 or MTP acceptance -- and it would have measured nothing anyway: at
+      `--draft-tokens 3` or 4 every one of these tensors runs at T<=5 per decode step, which every
+      table routes to the K-split rung that decodes exactly. The tiles are reached only by prefill.
+      What is
+      worth knowing is that [14336, 5120] leaves only a quarter of the criterion in hand, and that
+      `text/output_head` is the one Q8 tensor on the target's own output path, where an error is not
+      absorbed by draft verification. If either moves, `::with_exact_group_scale` plus a
+      `with_min_blocks` is built and waiting; price the throughput before taking it.
+- [ ] **Trap to know before extending a schedule sweep.** Three Q8 `linear_add` launches -- decode,
+      exact-T split-K, medium split-K -- hardcode `kRows = 2048` (`q8_linear_add_gemm_splitk.cu`),
+      so at 5120 rows they compute the first 2,048 and return. The first dense sweep read that as a
+      2-8x win and it was entirely fictional. What caught it was the memory floor, not the code: a
+      5120x17408 Q8 weight is 89 MB and cannot be streamed in the 19.5 us those kernels appeared to
+      take. `schedule_sweep.cuh` documents the same failure for column domains; this is the
+      shape-domain version, and the bench now excludes them explicitly. **Sanity-check any new
+      schedule-sweep winner against bytes / 854 GB/s before believing it.**
+- [ ] **Not yet swept: the wider Q8 K-split cross product.** The sweep offered each capacity with
+      `ca`/`cg` activations, and eight K warps only at capacities 8 and 16. Eight warps also fit at
+      24 and 32 and won wherever it was offered, and staging (`ActiveOnly` / `RuntimeActive` /
+      `PaddedZero`) was only sampled. Three shapes still show their shipped route beating every
+      swept candidate at T=17..24, which is the signature of a rung the sweep did not offer.
+- [x] **End to end, the catch-up plus this retune is a wash on the published workloads -- no
+      regression from the merge, and no visible gain from the retune.** Pre-merge tip `42a24f21`
+      (reading the v2 artifacts) against the retuned branch (reading the v3 ones, identical weight
+      bytes), interleaved by `tools/bench/run_interleaved_ab.py` with the arm order swapped every
+      repetition, paired medians of 4 repetitions, `ninfer_bench -pg 2048,128 -r 2 --warmup 1
+      --kv-dtype int8 --max-ctx 4096`. Post-merge relative to pre-merge:
+
+      | configuration | median | min..max | positive |
+      |---|---:|---|---:|
+      | 27B plain decode | -0.05% | -0.66%..+0.72% | 2/4 |
+      | 27B MTP3 decode | +0.25% | +0.12%..+0.95% | 4/4 |
+      | 27B DFlash2 k=3 decode | +0.16% | -0.08%..+0.25% | 3/4 |
+      | 27B DFlash2 k=4 decode | +0.03% | -0.09%..+0.11% | 2/4 |
+      | 35B-A3B plain decode | +0.22% | -0.87%..+0.24% | 3/4 |
+      | 27B prefill (pp2048) | -0.14% | -0.58%..+0.25% | 2/4 |
+      | 35B-A3B prefill (pp2048) | +0.95% | -0.21%..+1.63% | 3/4 |
+
+      Every one of those is inside this box's own 3-5% between-process spread. **The merge cost
+      nothing measurable** -- which is the question that mattered, since the catch-up replaced a
+      great many kernels.
+- [x] **Quality is unchanged, to the digits the docs publish.** `ninfer-perplexity` on the quick
+      corpus (`ninfer-ppl-1m-v1`, 4,096/2,048 context/stride, INT8 KV, 261,167 tokens over 124
+      windows), both arms, 27B DFlash2:
+
+      | domain | pre-merge (v2) | post-merge + retune (v3) |
+      |---|---:|---:|
+      | chinese_reference | 5.003578 | 5.003578 |
+      | english_long_form | 6.892655 | 6.892655 |
+      | english_reference | 6.191690 | 6.191690 |
+      | ninfer_code | 1.652672 | 1.652672 |
+      | **overall** | **4.342425** | **4.342425** |
+
+      Identical in every domain, and `docs/performance.md` publishes 4.342425 for exactly this
+      configuration. The catch-up replaced a great many kernels and this retune moved thirty-odd
+      route bands; neither changed a digit.
+
+- [ ] **Why the retune does not show here, and what would show it.** `ops::linear` is not on the
+      27B or 35B hot path at these shapes. The dense FFN calls it **only on the MTP branch**
+      (`src/models/qwen3_5/execution/ffn.cpp`); the main path uses fused `linear_swiglu` and
+      `linear_add`, whose tables the catch-up left at this fork's own sm_86 values. What plain
+      `linear` does carry at decode is the vocabulary head (`248320x5120`), which is deliberately
+      outside this sweep, and the Vision `1152`-family, which is not exercised by these runs. So
+      the 1.2-3.8x the sweep measured is real at the widths it measured and simply is not reached
+      by `-pg 2048,128` on either model.
+
+      Three things would make it visible, in increasing order of effort: a **DFlash2 run at a
+      larger draft count or a serving cohort**, where the Q4 draft head (`131072x5120`) leaves the
+      capacity ladder and enters the 12..64 band that was 1.7-3.8x wrong; an **MTP configuration**,
+      which is the one path that routes the dense FFN through plain `linear`; and the **35B-A3B
+      prefill**, the only figure above that is positive at all (+0.95%) and the one whose shapes
+      (`2048x16384`, `5120x25600`, `5120x10240`) this sweep moved most. None of these has been
+      measured yet; the first is cheap and is the obvious next step.
+- [ ] **Re-measure the RTX 3090 context-cost presets.** They were re-keyed to v3 prefill signatures
+      without re-running `ninfer_context_cost_bench`; the coefficients are the 2026-09-14 fits. The
+      27B signatures are the ones this box reports for the upgraded artifacts, so a converted-from-
+      source artifact with different bindings will fall back to generic coefficients.
+- [ ] **A load-time transcode changes nothing in the prefill signature** (it is keyed on the stored
+      format), but `--mlp-a8-decode`-style execution choices are not in the signature either. If a
+      future preset needs to distinguish them, the signature is the place to say so.
+- [ ] **The multi-GPU split has only been run with `--devices 0,0` on this single-GPU box.** The
+      pinned-host crossing path, the compute-capability rejection and the actual capacity win need a
+      real second card (`scripts/multi-gpu-testing/`). `tests/test_cross_rank_staging.cu` now drives
+      that path directly with both ranks on device 0 -- byte integrity, capturability, and the
+      consumed-fence dependency read off the captured graph -- so what is left for a second card is
+      the PCIe cost and the device-to-device branch, not the protocol.
+- [ ] **A runtime race harness for the crossing buffer has no power on Windows.** Holding the
+      destination stream, with a spinning kernel or a blocking host function, also stops the driver
+      submitting the source stream's copies, so the source stalls whether or not the fence is
+      there (measured both ways). The graph assertion replaces it. On Linux the same test could
+      also be run as a real race; worth doing if this ever runs there.
+
 State as of 2026-09-09. Four passes: a profiling pass that closed six items and refuted five of its
 own hypotheses, a measurement-hygiene pass that closed three more, a counter pass that put a *cause*
 under the four biggest performance entries, and a kernel pass that shipped **two** speedups and

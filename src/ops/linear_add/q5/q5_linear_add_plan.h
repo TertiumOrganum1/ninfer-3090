@@ -1,5 +1,6 @@
 #pragma once
 
+#include "core/weight.h"
 #include "core/arena.h"
 
 #include <cuda_runtime.h>
@@ -10,7 +11,6 @@
 namespace ninfer::ops::detail {
 
 enum class Q5LinearAddScheduleId {
-    GemvResidual,
     Split2ExactResidual,
     MmaResidualR64C16,
     MmaResidualR64C24,
@@ -20,6 +20,7 @@ enum class Q5LinearAddScheduleId {
     MmaResidualR64C32S4,
     MmaResidualR64C128,
     SmallTMmaResidual,
+    MmaResidualR64C128Tail,
 };
 
 struct Q5LinearAddProblem {

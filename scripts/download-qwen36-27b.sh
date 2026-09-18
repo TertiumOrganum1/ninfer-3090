@@ -5,9 +5,9 @@ set -euo pipefail
 # from qwen3_8_27b, which is why having the latter does not satisfy the former: four real-model
 # tests -- ninfer_qwen3_6_27b_prefix_real_test, _score_real_test, _load_plan_test and the Qwen3.6
 # 27B half of the engine suite -- skip without it.
-revision='faaa0c140d0a92743872256a8b78a954b3984018'
-expected_size=17495365888
-expected_sha256='7b51600ffd10632b9660f56085efdd9b751d79733ad32036a652234b64bebe7b'
+revision='3e3d9a3951c452c1ca80bd7a2860c7f3bfc5a829'
+expected_size=17495538688
+expected_sha256='9b610a7d051e7c4dbf89adb604bd269d248b643c8f6c7ef75bdb871af92c6f6b'
 
 root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 model_dir="${NINFER_MODEL_DIR:-$root/models}"
@@ -52,6 +52,10 @@ if [ -f "$model" ]; then
     exit 0
   fi
   printf '%s\n' "Existing $model did not verify against revision $revision; fetching the pinned one." >&2
+  # A v2 file from an earlier release does not load any more, but it does not need to be fetched
+  # again either: tools/upgrade_ninfer_v2_to_v3.py rewrites it locally in a couple of minutes.
+  printf '%s\n' "If it is the v2 file from an earlier release, you can upgrade it instead of downloading:" \
+    "  python tools/upgrade_ninfer_v2_to_v3.py $model $model.v3 && mv $model.v3 $model" >&2
 fi
 
 printf '%s\n' 'Downloading the Qwen3.6-27B model (16.3 GiB)...'

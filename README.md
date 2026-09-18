@@ -36,6 +36,12 @@ rather than seven (+22.6%), two more route tables re-measured for `sm_86` (up to
 races fixed in paths that produced wrong output rather than an error. Previous:
 [v0.9.0](RELEASE_NOTES_0.9.0.md).
 
+> **Model files are now v3.** This release follows upstream NInfer onto the v3 `.ninfer` container.
+> A v2 file from an earlier release is refused at load; upgrade it in place of a re-download with
+> `python tools/upgrade_ninfer_v2_to_v3.py OLD.ninfer NEW.ninfer` (standard library only, works on
+> Windows and Linux, and keeps the weight bytes unchanged). See
+> [weight conversion](docs/weight-conversion.md#upgrade-an-existing-v2-artifact).
+
 ## Quick start
 
 **You do not need to build anything.** Grab the prebuilt archive for your platform from
@@ -626,18 +632,25 @@ crossings. 0 (offload everything) is the default and maximises capacity.
 
 | Model | Artifact | Size | Notes |
 |---|---|---:|---|
-| Qwen3.6-35B-A3B v2 | [pinned DFlash artifact](https://huggingface.co/neroued/Qwen3.6-35B-A3B-NInfer/tree/560f227e5a7104756d1a108201a8aa75654ea688) | 21.22 GiB | **Recommended; fetched by `download-qwen36-35b-a3b.{bat,sh}`. Carries the DFlash bundle for `--spec dflash`** |
-| Qwen3.6-35B-A3B v1 | [pinned compact artifact](https://huggingface.co/neroued/Qwen3.6-35B-A3B-NInfer/tree/c8b8c1c0df4c74df3c190c6aa3a7f24dc614721c) | 20.84 GiB | No DFlash bundle; the artifact used for the published RTX 3090 concurrency results (text C1-C6 at 4K and vision C1 at 32K) |
-| Qwen3.6-27B | [groupwise artifact](https://huggingface.co/neroued/Qwen3.6-27B-NInfer) | 16.29 GiB | Supported with more runtime headroom |
-| **Qwen3.8-27B** | [official NInfer groupwise artifact](https://huggingface.co/neroued/Qwen3.8-27B-NInfer) | 16.96 GiB | **Validated at C1, C2, C4 and C8/MTP3 with ReplaySSM** |
+| Qwen3.6-35B-A3B | [pinned v3 artifact](https://huggingface.co/neroued/Qwen3.6-35B-A3B-NInfer/tree/ee4495803bc4f8015b8a7e22d4cf9b67de8e27c6) | 21.23 GiB | **Recommended; fetched by `download-qwen36-35b-a3b.{bat,sh}`. Carries the DFlash bundle for `--spec dflash`** |
+| Qwen3.6-27B | [pinned v3 artifact](https://huggingface.co/neroued/Qwen3.6-27B-NInfer/tree/3e3d9a3951c452c1ca80bd7a2860c7f3bfc5a829) | 16.29 GiB | Supported with more runtime headroom |
+| **Qwen3.8-27B** | [pinned v3 artifact](https://huggingface.co/neroued/Qwen3.8-27B-NInfer/tree/1cbd84e7221e51186bd7f093a149912d2489625b) | 19.03 GiB | **Validated at C1, C2, C4 and C8/MTP3 with ReplaySSM. Carries the DFlash2 bundle for `--spec dflash2`** |
 
-NInfer-3090 v0.5 and newer recognize both v1 and v2 container magic. The 21.22 GiB v2 artifact adds
-DFlash weights and is what the download scripts now fetch.
+This release reads only the v3 `.ninfer` container. v1 and v2 files from earlier releases are
+refused at load. Upgrade an existing official v2 file in place of re-downloading it:
 
-**Its extra 0.38 GiB costs nothing in VRAM unless you ask for DFlash**, so the published RTX 3090
-concurrency results — measured against the smaller v1 artifact — still hold. Loading either
-revision with `--spec` unset reports byte-identical resident weights of 21,038,469,632 bytes;
-selecting `--spec dflash` is what maps the additional 410,053,632 bytes, and only then.
+```text
+python tools/upgrade_ninfer_v2_to_v3.py models/qwen3_8_27b.ninfer models/qwen3_8_27b.v3.ninfer
+```
+
+The upgrade needs only the Python standard library, runs on Windows and Linux, keeps every weight
+byte, and installs the maintained chat template. The published RTX 3090 figures in this repository
+were measured against the v2 revisions (`18dfc887` for Qwen3.8-27B, `c8b8c1c0`/`560f227e` for
+Qwen3.6-35B-A3B); their weight bytes are unchanged in v3.
+
+**Optional bundles cost nothing in VRAM unless selected**: the DFlash and DFlash2 weights are bound
+only with `--spec dflash`/`--spec dflash2`, so the resident-weight figures for other profiles
+still hold.
 
 ## Models and platform support
 
@@ -646,10 +659,10 @@ prebuilt archive, which includes the applications and required DLLs. Both platfo
 RTX 3090 or RTX 3090 Ti and a recent NVIDIA driver.
 
 Download the
-[pinned Qwen3.8 artifact](https://huggingface.co/neroued/Qwen3.8-27B-NInfer/tree/18dfc887423fa5aabf3cb56fac41490e462b3fab)
+[pinned Qwen3.8 v3 artifact](https://huggingface.co/neroued/Qwen3.8-27B-NInfer/tree/1cbd84e7221e51186bd7f093a149912d2489625b)
 as `models/qwen3_8_27b.ninfer`, or run `download-qwen38-27b.sh`/`.bat`, which verifies size and
-SHA-256 before putting the file in place. `18dfc887` is the revision every 27B number in this
-repository was measured against.
+SHA-256 before putting the file in place. The 27B numbers in this repository were measured against
+the v2 revision `18dfc887`, whose weights this v3 file carries unchanged.
 
 **Every downloader shipped here is pinned and verified, with one deliberate exception.** The Nix
 app `download-qwen36-35b-v2` tracks upstream `main`, which is what it is for — trying a newer
@@ -659,12 +672,11 @@ writes to its own filename, refuses to resume, and is not the artifact the tests
 figures use. Prefer a pinned downloader unless you specifically want a newer upstream build.
 
 For Qwen3.6-35B-A3B, download the
-[pinned container-v2 artifact](https://huggingface.co/neroued/Qwen3.6-35B-A3B-NInfer/tree/560f227e5a7104756d1a108201a8aa75654ea688)
+[pinned v3 artifact](https://huggingface.co/neroued/Qwen3.6-35B-A3B-NInfer/tree/ee4495803bc4f8015b8a7e22d4cf9b67de8e27c6)
 for DFlash support, or run `download-qwen36-35b-a3b.bat`/`.sh` instead, which verifies size and
-SHA-256 before putting the file in place. Releases v0.5 and newer also read the smaller
-container-v1 file, which lacks DFlash and carries no resident-memory advantage over this one. An
-`artifact magic is not NInfer version 1` message means the executable is outdated, not that the
-current model download is necessarily corrupt.
+SHA-256 before putting the file in place. A load error about the container version means either an
+older executable reading a v3 file, or this executable reading a v1/v2 file that needs
+`tools/upgrade_ninfer_v2_to_v3.py`.
 
 Developers can build from source on Windows or Linux. Windows uses Visual Studio 2022 and vcpkg.
 Linux uses GCC 13 with system packages or the pinned vcpkg manifest. Both builds require CUDA 12.8

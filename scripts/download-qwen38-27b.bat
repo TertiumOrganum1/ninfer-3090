@@ -8,9 +8,9 @@ rem This script pinned the revision in its URL but verified nothing it received,
 rem straight onto the final path: a truncated or corrupt 17 GB download was accepted silently. The
 rem size and hash below are what HuggingFace reports for this revision. Structure matches
 rem download-qwen36-27b.bat deliberately, so the two cannot drift.
-set "REVISION=18dfc887423fa5aabf3cb56fac41490e462b3fab"
-set "EXPECTED_SIZE=18210531328"
-set "EXPECTED_SHA256=eec39564993d6e9c7d5e383382a760f093465c9d163ec9a1bd6b80199514bf3e"
+set "REVISION=1cbd84e7221e51186bd7f093a149912d2489625b"
+set "EXPECTED_SIZE=20437521664"
+set "EXPECTED_SHA256=81f924d440c27261d820c19a9f8d45794c5aee410f8a68bd358133fa8c0375da"
 
 set "ROOT=%~dp0"
 set "MODEL_DIR=%ROOT%models"
@@ -32,9 +32,11 @@ if exist "%MODEL%" (
     exit /b 0
   )
   echo Existing %MODEL% did not verify against revision %REVISION%; fetching the pinned one.
+  echo If it is the v2 file from an earlier release, you can upgrade it instead of downloading:
+  echo   python tools\upgrade_ninfer_v2_to_v3.py "%MODEL%" "%MODEL%.v3" ^&^& move /y "%MODEL%.v3" "%MODEL%"
 )
 
-echo Downloading the Qwen3.8-27B model (17.0 GiB)...
+echo Downloading the Qwen3.8-27B model (19.0 GiB)...
 curl.exe -L -C - --fail --output "%PART%" "https://huggingface.co/neroued/Qwen3.8-27B-NInfer/resolve/%REVISION%/qwen3_8_27b.ninfer"
 if errorlevel 1 (
   echo Download failed. Run this file again to resume.

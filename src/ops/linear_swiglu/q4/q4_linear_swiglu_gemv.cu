@@ -1,10 +1,11 @@
+#include "core/weight.h"
 #include "ops/linear_swiglu/q4/q4_linear_swiglu_kernels.h"
 
 #include "ops/common/math.cuh"
 #include "ops/common/memory.cuh"
 #include "ops/common/warp.cuh"
 #include "core/device.h" // CUDA_CHECK
-#include "ops/linear/q4/q4_small_t_mma.cuh"
+#include "ops/linear/q4/q4_ksplit_mma.cuh"
 #include "ops/linear/q4/q4_small_t_mma_i8.cuh"
 
 #include <cuda_bf16.h>
@@ -117,9 +118,9 @@ void launch_small_t_active(const Tensor& x, const Weight& w, Tensor& out, cudaSt
     constexpr int kBlocks = kIntermediate / (Q4SwiGluSmallTRows::kOutputRowsPerTile *
                                              Layout::kRowTiles);
     const Q4SwiGluSmallTEpilogue epilogue{static_cast<__nv_bfloat16*>(out.data), x.ne[1]};
-    q4_small_t_mma_launch<Q4SwiGluSmallTGeometry, TileCols, ActiveCols, Q4SwiGluSmallTEpilogue,
-                          Q4SwiGluSmallTRows, Masked, Tile::kKWarps, Tile::kStages,
-                          Tile::kTilesPerWarp, Tile::kMinBlocks>(
+    q4_ksplit_mma_launch<Q4SwiGluSmallTGeometry, TileCols, ActiveCols, Q4SwiGluSmallTEpilogue,
+                         Q4SwiGluSmallTRows, Masked, Tile::kKWarps, Tile::kStages,
+                         Tile::kTilesPerWarp, Tile::kMinBlocks>(
         kBlocks, stream, static_cast<const __nv_bfloat16*>(x.data),
         static_cast<const std::uint8_t*>(w.qdata), static_cast<const std::uint8_t*>(w.scales),
         static_cast<__nv_bfloat16*>(out.data), epilogue, Q4SwiGluSmallTRows{}, x.ne[1]);

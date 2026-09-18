@@ -1,5 +1,8 @@
 #include "artifact/transcode.h"
 
+#include "artifact/schema.h"
+#include "core/weight_view.h"
+
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -102,31 +105,33 @@ struct TargetCodec {
     int qmax = 0;
 };
 
-TargetCodec target_codec(DeviceTranscode transcode) {
-    switch (transcode) {
-    case DeviceTranscode::W8G32ToQ4G64:
+TargetCodec target_codec(QType target) {
+    switch (target) {
+    case QType::Q4_G64_FP16:
         return {4, -8, 7};
-    case DeviceTranscode::W8G32ToQ6G64:
+    case QType::Q6_G64_FP16:
         return {6, -32, 31};
-    case DeviceTranscode::None:
+    default:
         break;
     }
-    throw ArtifactError("transcode has no target codec");
+    throw ArtifactError("row-split transcode target must be Q4_G64_FP16 or Q6_G64_FP16");
 }
 
-void transcode_rows(const TargetCodec& codec, const RowSplitGeometry& source_geometry,
-                    const RowSplitGeometry& target_geometry, std::span<const std::byte> source,
+void transcode_rows(const TargetCodec& codec, const WeightGeometry& source_geometry,
+                    const WeightGeometry& target_geometry, std::span<const std::byte> source,
                     std::span<std::byte> destination, std::uint64_t row_begin,
                     std::uint64_t row_end) {
     const std::uint64_t padded_columns = source_geometry.padded_columns;
-    const std::uint64_t target_groups  = target_geometry.groups_per_row;
-    const std::uint64_t source_groups  = source_geometry.groups_per_row;
+    const std::uint64_t target_groups  = target_geometry.padded_columns / target_geometry.group_size;
+    const std::uint64_t source_groups  = source_geometry.padded_columns / source_geometry.group_size;
+    const std::uint64_t low_bytes_per_group  = target_geometry.code_bytes_per_row / target_groups;
+    const std::uint64_t high_bytes_per_group = target_geometry.high_bytes_per_row / target_groups;
     const std::byte* const source_codes  = source.data();
-    const std::byte* const source_scales = source.data() + source_geometry.scale_plane_offset;
+    const std::byte* const source_scales = source.data() + source_geometry.scale_offset;
     std::byte* const low                 = destination.data();
     std::byte* const high =
-        codec.bits == 6 ? destination.data() + target_geometry.high_plane_offset : nullptr;
-    std::byte* const scales = destination.data() + target_geometry.scale_plane_offset;
+        codec.bits == 6 ? destination.data() + target_geometry.high_offset : nullptr;
+    std::byte* const scales = destination.data() + target_geometry.scale_offset;
 
     std::array<float, kTargetGroup> weights{};
     std::array<int, kTargetGroup> codes{};
@@ -179,7 +184,7 @@ void transcode_rows(const TargetCodec& codec, const RowSplitGeometry& source_geo
             }
 
             const std::uint64_t group_index = row * target_groups + group;
-            std::byte* const low_group      = low + group_index * target_geometry.low_bytes_per_group;
+            std::byte* const low_group      = low + group_index * low_bytes_per_group;
             for (int index = 0; index < kTargetGroup; ++index) {
                 const auto unsigned_code = static_cast<std::uint32_t>(codes[index]) &
                                            ((1U << codec.bits) - 1U);
@@ -188,7 +193,7 @@ void transcode_rows(const TargetCodec& codec, const RowSplitGeometry& source_geo
                                                                                  : nibble);
                 if (high != nullptr) {
                     const int bit = index * 2;
-                    high[group_index * target_geometry.high_bytes_per_group + (bit >> 3)] |=
+                    high[group_index * high_bytes_per_group + (bit >> 3)] |=
                         static_cast<std::byte>(((unsigned_code >> 4U) & 0x03U) << (bit & 7));
                 }
             }
@@ -199,42 +204,27 @@ void transcode_rows(const TargetCodec& codec, const RowSplitGeometry& source_geo
 
 } // namespace
 
-NumericFormat transcode_source_format(DeviceTranscode transcode) {
-    if (transcode == DeviceTranscode::None) {
-        throw ArtifactError("DeviceTranscode::None has no source format");
-    }
-    return NumericFormat::W8G32_F16S;
+bool row_split_transcode_supported(QType source, QType target) noexcept {
+    return source == QType::Q8_G32_FP16 &&
+           (target == QType::Q4_G64_FP16 || target == QType::Q6_G64_FP16);
 }
 
-NumericFormat transcode_target_format(DeviceTranscode transcode) {
-    switch (transcode) {
-    case DeviceTranscode::W8G32ToQ4G64:
-        return NumericFormat::Q4G64_F16S;
-    case DeviceTranscode::W8G32ToQ6G64:
-        return NumericFormat::Q6G64_F16S;
-    case DeviceTranscode::None:
-        break;
-    }
-    throw ArtifactError("DeviceTranscode::None has no target format");
-}
-
-void transcode_row_split(DeviceTranscode transcode, std::span<const std::uint64_t> shape,
+void transcode_row_split(QType target, std::span<const std::uint64_t> shape,
                          std::span<const std::byte> source, std::span<std::byte> destination) {
-    const TargetCodec codec = target_codec(transcode);
-    const RowSplitGeometry source_geometry =
-        row_split_geometry(transcode_source_format(transcode), shape);
-    const RowSplitGeometry target_geometry =
-        row_split_geometry(transcode_target_format(transcode), shape);
-    if (source.size() != source_geometry.encoded_bytes ||
-        destination.size() != target_geometry.encoded_bytes) {
+    const TargetCodec codec = target_codec(target);
+    const WeightGeometry source_geometry =
+        weight_geometry(QType::Q8_G32_FP16, QuantLayout::RowSplit, shape);
+    const WeightGeometry target_geometry = weight_geometry(target, QuantLayout::RowSplit, shape);
+    if (source.size() != source_geometry.bytes || destination.size() != target_geometry.bytes) {
         throw ArtifactError("transcode payload sizes do not match the tensor shape");
     }
-    if (source_geometry.padded_columns % kTargetGroup != 0) {
+    if (source_geometry.padded_columns % kTargetGroup != 0 ||
+        source_geometry.padded_columns != target_geometry.padded_columns) {
         throw ArtifactError("transcode requires padded columns divisible by 64");
     }
     std::fill(destination.begin(), destination.end(), std::byte{0});
 
-    const std::uint64_t rows = source_geometry.rows;
+    const std::uint64_t rows = shape[0];
     const std::uint64_t workers =
         std::clamp<std::uint64_t>(std::thread::hardware_concurrency(), 1, std::max<std::uint64_t>(rows, 1));
     if (workers == 1) {

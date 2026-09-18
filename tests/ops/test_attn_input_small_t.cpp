@@ -52,9 +52,9 @@ int main() {
         options.row_split_codes = qw::RowSplitCodePattern::Hashed;
         options.row_split_scale = qw::RowSplitScalePattern::Small;
         qw::PackedWeight host_qk =
-            qw::make_patterned_weight(QType::Q4G64_F16S, kParent, kHidden, 0xa771U, options);
+            qw::make_patterned_weight(QType::Q4_G64_FP16, kParent, kHidden, 0xa771U, options);
         qw::PackedWeight host_gv =
-            qw::make_patterned_weight(QType::Q5G64_F16S, kParent, kHidden, 0xa772U, options);
+            qw::make_patterned_weight(QType::Q5_G64_FP16, kParent, kHidden, 0xa772U, options);
         ninfer::test::GuardedDeviceBuffer device_qk(host_qk.payload.size());
         ninfer::test::GuardedDeviceBuffer device_gv(host_gv.payload.size());
         device_qk.copy_from_host(host_qk.payload.data(), host_qk.payload.size());
@@ -71,11 +71,11 @@ int main() {
         }
         const std::vector<double> qk_oracle = oracle::project(
             qw::decode_row_split_lowbit(host_qk.payload, kParent, kHidden, kHidden,
-                                        QType::Q4G64_F16S),
+                                        QType::Q4_G64_FP16),
             kParent, kHidden, activation, kMaxTokens);
         const std::vector<double> gv_oracle = oracle::project(
             qw::decode_row_split_lowbit(host_gv.payload, kParent, kHidden, kHidden,
-                                        QType::Q5G64_F16S),
+                                        QType::Q5_G64_FP16),
             kParent, kHidden, activation, kMaxTokens);
 
         ninfer::test::GuardedDeviceBuffer device_x(activation.size() * 2);

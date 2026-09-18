@@ -2,7 +2,7 @@
 //
 // Integer-activation route for the Qwen3.8/3.6-27B mlp/gate_up LinearSwiGLU, on sm_86.
 //
-// Reads the artifact's native Q4G64_F16S row-split weight with no repack: for Q4 that layout's
+// Reads the artifact's native Q4_G64_FP16 row-split weight with no repack: for Q4 that layout's
 // code plane is exactly row-major [n][k/2] with two codes per byte, and its scale plane exactly
 // row-major [n][k/64] FP16, so Weight::qdata and Weight::scales can be indexed directly.
 //
@@ -14,6 +14,7 @@
 // against upstream's own kA8QuantizationAllowance of 4% for A8 activation compute (see
 // tests/ops/linear/linear_test_common.cpp). It is opt-in for that reason.
 
+#include "core/weight.h"
 #include "core/arena.h"
 #include "core/tensor.h"
 

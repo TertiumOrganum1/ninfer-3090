@@ -78,10 +78,16 @@ broad -- true per token, not true per prefill chunk.
   expert matmuls back to back -- one crossing out and one back, rather than two of each.
 - **Ordering** uses per-rank streams and fences, never a host sync: record on the producer, wait on
   the consumer, issue the copy on the consumer's stream.
-- **Loading** binds every rank against the same artifact, with the tensors a rank does not own
-  placed `ValidateOnly`: the file is validated in full on each rank while only that rank's bytes
-  are uploaded. `materialize()` already takes a `DeviceContext`, so each rank runs under
-  `ScopedDeviceRank`.
+- **Loading** is one binding pass over one artifact. Each device object carries the rank that owns
+  it (`Binder::device_rank`), the plan records a device capacity per rank, and `materialize()`
+  allocates one arena per rank and uploads that rank's objects under `ScopedDeviceRank` with its own
+  staging pass — an H2D copy and the event retiring its slot both belong to the destination device.
+  Every parameter is bound and validated exactly as on one GPU, so `bind_view`, `Model` and
+  `Parameters` are unchanged.
+- **Overlay Vision residency and a multi-device split are mutually exclusive**, and the combination
+  is rejected at startup rather than half-served: the evict-ranked tail exists so a Vision window can
+  borrow weight memory on the card that runs Vision, and an offloaded rank holds expert blocks with
+  nothing lendable.
 
 ## The trap
 

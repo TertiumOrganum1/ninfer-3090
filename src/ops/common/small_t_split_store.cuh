@@ -1,6 +1,6 @@
 #pragma once
 
-// Epilogue for the Q4 and Q5 small-T MMA kernels (q4_small_t_mma.cuh, q5_small_t_mma.cuh) when one
+// Epilogue for the Q4 and Q5 small-T MMA kernels (q4_ksplit_mma.cuh, q5_small_t_mma.cuh) when one
 // weight matrix feeds two column-major outputs: rows [0, split) go to `head`, rows [split, rows)
 // to `tail`, each with its own leading dimension. split == rows makes it a plain strided store.
 // A lane stores v.x = (row, col0), v.y = (row, col0 + 1), v.z = (row + 8, col0) and

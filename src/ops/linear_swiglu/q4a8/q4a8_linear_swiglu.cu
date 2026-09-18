@@ -242,7 +242,7 @@ __global__ __launch_bounds__(kThreads) void q4a8_swiglu_kernel(
 bool q4a8_tokens_supported(std::int32_t tokens) { return tokens >= kBN && tokens % kBN == 0; }
 
 bool q4a8_swiglu_supported(const Weight& gate_up, std::int32_t tokens) {
-    return gate_up.qtype == QType::Q4G64_F16S && gate_up.layout == QuantLayout::RowSplit &&
+    return gate_up.qtype == QType::Q4_G64_FP16 && gate_up.layout == QuantLayout::RowSplit &&
            gate_up.n == kRows && gate_up.k == kCols && gate_up.group == kGroup &&
            gate_up.qdata != nullptr && gate_up.scales != nullptr && tokens >= kBN &&
            tokens % kBN == 0;

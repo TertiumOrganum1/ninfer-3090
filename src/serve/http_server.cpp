@@ -573,7 +573,7 @@ void HttpServer::attach(GenerationService& service) {
         throw std::logic_error("HTTP generation service is already attached");
     }
     const ninfer::LoadSummary load = service.load_summary();
-    public_model_id_               = resolve_public_model_id(options_, load.model_id);
+    public_model_id_               = resolve_public_model_id(options_, load.model_name);
     service_                       = &service;
     // memory_summary() takes the Engine execution lock; read it once here, never per /v1/load poll.
     const ninfer::MemorySummary memory = service.memory_summary();

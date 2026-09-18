@@ -58,6 +58,9 @@ struct EvictableKVPool::Impl {
     std::vector<std::size_t> sizes;
     std::vector<std::size_t> lent; // granule indices currently mapped at the overlay range
     bool poisoned = false;
+    // Test seam; see inject_lease_fault.
+    LeaseFault fault       = LeaseFault::None;
+    std::size_t fault_rank = 0;
 
     explicit Impl(DeviceContext& context) : device(context) {}
 
@@ -75,8 +78,47 @@ struct EvictableKVPool::Impl {
     }
 
     void map_overlay(std::size_t piece, std::size_t rank) {
+        check_fault(rank, LeaseFault::Overlay);
         NINFER_CU_CHECK(cuMemMap(overlay + rank * granularity, sizes[piece], 0, handles[piece], 0));
+        check_fault(rank, LeaseFault::Access);
         set_access(overlay + rank * granularity, sizes[piece]);
+    }
+
+    void check_fault(std::size_t rank, LeaseFault stage) {
+        if (fault != stage || fault_rank != rank) { return; }
+        fault = LeaseFault::None;
+        throw std::runtime_error("injected evictable KV lease fault");
+    }
+
+    // Undoes a lease that threw while moving `rank` to the overlay range. Ranks below it are
+    // mapped there and counted in `lent`; `homeless` says `rank` itself has already lost its home
+    // mapping. Every touched piece must end up home again: the caller only learns that the lease
+    // failed, and a granule left unmapped faults the next kernel that writes a page inside it.
+    void unwind_lease(std::span<const std::size_t> granules, std::size_t rank,
+                      bool homeless) noexcept {
+        try {
+            for (std::size_t done = 0; done < rank; ++done) {
+                NINFER_CU_CHECK(cuMemUnmap(overlay + done * granularity, granularity));
+                map_home(granules[done]);
+            }
+            if (homeless) {
+                // The overlay mapping of this piece may or may not exist, and unmapping a range
+                // that carries nothing is a harmless error here; losing its home mapping is not.
+                (void)cuMemUnmap(overlay + rank * granularity, granularity);
+                map_home(granules[rank]);
+            }
+        } catch (const std::exception& error) {
+            poisoned = true;
+            std::fprintf(stderr,
+                         "ninfer: evictable KV lease rollback failed (%s); the KV cache is no "
+                         "longer trustworthy\n",
+                         error.what());
+        } catch (...) {
+            poisoned = true;
+            std::fprintf(stderr, "ninfer: evictable KV lease rollback failed; the KV cache is no "
+                                 "longer trustworthy\n");
+        }
+        lent.clear();
     }
 };
 
@@ -236,17 +278,36 @@ EvictableKVPool::Transaction EvictableKVPool::lease(std::span<const std::size_t>
     // entirely inside free KV pages, so no in-flight kernel reads or writes it and other lanes
     // keep running while the window is open.
     const auto start = Clock::now();
+    // Reserved up front so no push_back below can throw between a piece's two mappings.
     impl.lent.reserve(granules.size());
-    for (std::size_t rank = 0; rank < granules.size(); ++rank) {
-        const std::size_t piece = granules[rank];
-        NINFER_CU_CHECK(cuMemUnmap(impl.home + impl.offsets[piece], impl.sizes[piece]));
-        impl.map_overlay(piece, rank);
-        impl.lent.push_back(piece);
+    // A piece is homeless between its home unmap and its overlay mapping, and the lease as a whole
+    // is half-applied until the last piece lands. Neither state may survive a failure: the window
+    // never opens, so nothing else would ever put those granules back.
+    std::size_t rank = 0;
+    bool homeless    = false;
+    try {
+        for (; rank < granules.size(); ++rank) {
+            const std::size_t piece = granules[rank];
+            impl.check_fault(rank, LeaseFault::Unmap);
+            NINFER_CU_CHECK(cuMemUnmap(impl.home + impl.offsets[piece], impl.sizes[piece]));
+            homeless = true;
+            impl.map_overlay(piece, rank);
+            impl.lent.push_back(piece);
+            homeless = false;
+        }
+    } catch (...) {
+        impl.unwind_lease(granules, rank, homeless);
+        throw;
     }
     return Transaction(*this,
                        DeviceSpan{reinterpret_cast<void*>(impl.overlay),
                                   granules.size() * impl.granularity},
                        stream, seconds_since(start));
+}
+
+void EvictableKVPool::inject_lease_fault(std::size_t rank, LeaseFault stage) noexcept {
+    impl_->fault      = stage;
+    impl_->fault_rank = rank;
 }
 
 void EvictableKVPool::give_back(Transaction& transaction) noexcept {

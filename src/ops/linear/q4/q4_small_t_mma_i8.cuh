@@ -1,5 +1,5 @@
 // Int8 tensor-core small-T kernel for the C8 cohort-decode regime, the counterpart of
-// q4_small_t_mma.cuh. Weight storage stays Q4G64 (4 bits/code, the same artifact bytes);
+// q4_ksplit_mma.cuh. Weight storage stays Q4G64 (4 bits/code, the same artifact bytes);
 // activations are quantised to s8 with one scale per (token, 64-k group), matching the weight's own
 // group size, and both operands feed mma.sync.aligned.m16n8k32.row.col.s32.s8.s8.s32. The same
 // instruction and rescale are proven at the 128-token prefill tile in
@@ -112,11 +112,11 @@ struct Q4SmallTI8Storage {
 };
 
 // Geometry/TileCols/ActiveCols/Epilogue/RowPolicy/KWarps/Stages/TilesPerWarp mirror
-// q4_small_t_mma_kernel's parameter list exactly. x_codes/x_scales are the pre-quantised
+// q4_ksplit_mma_kernel's parameter list exactly. x_codes/x_scales are the pre-quantised
 // activations (q4_small_t_quantize_activations below); codes/scales are the artifact's native
 // Q4G64 planes, unchanged.
 template <class Geometry, int TileCols, int ActiveCols, class Epilogue = Q4SmallTMmaI8StoreEpilogue,
-          class RowPolicy = Q4SmallTMmaIdentityRows, bool MaskedColumns = false, int KWarps = 2,
+          class RowPolicy = Q4KSplitIdentityRows, bool MaskedColumns = false, int KWarps = 2,
           int Stages = 2, int TilesPerWarp = 1>
 __launch_bounds__(256) __global__
     void q4_small_t_mma_i8_kernel(const std::int8_t* __restrict__ x_codes,
@@ -306,7 +306,7 @@ __launch_bounds__(256) __global__
     cp_wait<0>();
 
     // K-warp reduction: odd warps publish, even ones fold, warp 0 sums the rest. Identical to
-    // q4_small_t_mma.cuh's tree; operates on plain floats so it is dtype-agnostic.
+    // q4_ksplit_mma.cuh's tree; operates on plain floats so it is dtype-agnostic.
     __syncthreads();
     auto* partial   = shared.partial;
     const auto slot = [&](int w, int t, int nt) {
@@ -399,7 +399,7 @@ inline void q4_small_t_quantize_activations(const __nv_bfloat16* x, std::int32_t
 }
 
 template <class Geometry, int TileCols, int ActiveCols, class Epilogue = Q4SmallTMmaI8StoreEpilogue,
-          class RowPolicy = Q4SmallTMmaIdentityRows, bool MaskedColumns = false, int KWarps = 2,
+          class RowPolicy = Q4KSplitIdentityRows, bool MaskedColumns = false, int KWarps = 2,
           int Stages = 2, int TilesPerWarp = 1>
 void q4_small_t_mma_i8_launch(int blocks, cudaStream_t stream, const std::int8_t* x_codes,
                               const __half* x_scales, const std::uint8_t* codes,

@@ -19,7 +19,7 @@ int main() {
         };
         const int failures = run_profile(
             "LinearSwiGLU Q4_A8INT",
-            {QType::Q4G64_F16S, 34816, 5120, 17408, 1409U, ActivationCompute::A8Int},
+            {QType::Q4_G64_FP16, 34816, 5120, 17408, 1409U, ActivationCompute::A8Int},
             kTokenCases);
         std::cout << (failures == 0 ? "OK" : "FAIL") << " LinearSwiGLU Q4_A8INT correctness\n";
         return failures == 0 ? 0 : 1;

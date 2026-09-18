@@ -1,3 +1,4 @@
+#include "core/weight.h"
 #include "ops/linear/linear_test_common.h"
 
 #include "core/arena.h"
@@ -103,7 +104,8 @@ std::vector<std::int32_t> sampled_indices(std::int32_t extent) {
 }
 
 std::vector<std::uint16_t> make_activation(std::int32_t k, std::int32_t t, std::uint32_t seed,
-                                           ActivationCompute activation_compute) {
+                                           ActivationCompute activation_compute,
+                                           ActivationSigns activation_signs) {
     const std::size_t elements = checked_elements(k, t, "activation");
     std::vector<std::uint16_t> result(elements);
     for (std::int32_t token = 0; token < t; ++token) {
@@ -124,8 +126,12 @@ std::vector<std::uint16_t> make_activation(std::int32_t k, std::int32_t t, std::
                 coordinate *= 0x846ca68bU;
                 coordinate ^= coordinate >> 16;
             }
-            const int raw     = static_cast<int>(coordinate & 0xffU);
-            const float value = static_cast<float>(raw - 128) * (1.0F / 256.0F);
+            const float value =
+                activation_signs == ActivationSigns::Centered
+                    ? static_cast<float>(static_cast<int>(coordinate & 0xffU) - 128) *
+                          (1.0F / 256.0F)
+                    : static_cast<float>(32 + static_cast<int>(coordinate & 0x5fU)) *
+                          (1.0F / 256.0F);
             result[static_cast<std::size_t>(token) * k + column] = test::f32_to_bf16(value);
         }
     }
@@ -206,30 +212,30 @@ int compare_output(std::string_view label, std::span<const double> actual,
 
 } // namespace
 
-quantized_weight::PackedWeight make_q4g64_f16s_weight(std::int32_t n, std::int32_t k,
-                                                      std::uint32_t seed) {
-    return quantized_weight::make_patterned_weight(QType::Q4G64_F16S, n, k, seed,
+quantized_weight::PackedWeight make_q4_g64_fp16_weight(std::int32_t n, std::int32_t k,
+                                                       std::uint32_t seed) {
+    return quantized_weight::make_patterned_weight(QType::Q4_G64_FP16, n, k, seed,
                                                    {quantized_weight::RowSplitScalePattern::Small,
                                                     quantized_weight::RowSplitCodePattern::Hashed});
 }
 
-quantized_weight::PackedWeight make_q5g64_f16s_weight(std::int32_t n, std::int32_t k,
-                                                      std::uint32_t seed) {
-    return quantized_weight::make_patterned_weight(QType::Q5G64_F16S, n, k, seed,
+quantized_weight::PackedWeight make_q5_g64_fp16_weight(std::int32_t n, std::int32_t k,
+                                                       std::uint32_t seed) {
+    return quantized_weight::make_patterned_weight(QType::Q5_G64_FP16, n, k, seed,
                                                    {quantized_weight::RowSplitScalePattern::Small,
                                                     quantized_weight::RowSplitCodePattern::Hashed});
 }
 
-quantized_weight::PackedWeight make_q6g64_f16s_weight(std::int32_t n, std::int32_t k,
-                                                      std::uint32_t seed) {
-    return quantized_weight::make_patterned_weight(QType::Q6G64_F16S, n, k, seed,
+quantized_weight::PackedWeight make_q6_g64_fp16_weight(std::int32_t n, std::int32_t k,
+                                                       std::uint32_t seed) {
+    return quantized_weight::make_patterned_weight(QType::Q6_G64_FP16, n, k, seed,
                                                    {quantized_weight::RowSplitScalePattern::Small,
                                                     quantized_weight::RowSplitCodePattern::Hashed});
 }
 
-quantized_weight::PackedWeight make_w8g32_f16s_weight(std::int32_t n, std::int32_t k,
-                                                      std::uint32_t seed) {
-    return quantized_weight::make_patterned_weight(QType::W8G32_F16S, n, k, seed,
+quantized_weight::PackedWeight make_q8_g32_fp16_weight(std::int32_t n, std::int32_t k,
+                                                       std::uint32_t seed) {
+    return quantized_weight::make_patterned_weight(QType::Q8_G32_FP16, n, k, seed,
                                                    {quantized_weight::RowSplitScalePattern::Small,
                                                     quantized_weight::RowSplitCodePattern::Hashed});
 }
@@ -243,7 +249,7 @@ quantized_weight::PackedWeight make_nvfp4_weight(std::int32_t n, std::int32_t k,
 }
 
 quantized_weight::PackedWeight make_fp8_weight(std::int32_t n, std::int32_t k, std::uint32_t seed) {
-    return quantized_weight::make_patterned_weight(QType::FP8_E4M3FN_ROW_BF16S, n, k, seed);
+    return quantized_weight::make_patterned_weight(QType::FP8_E4M3FN_ROW_BF16, n, k, seed);
 }
 
 void cpu_linear_gemm_fp64(const float* weight, const float* activation, double* output,
@@ -305,11 +311,12 @@ int run_shape(std::string_view label, ActivationCompute activation_compute,
 
     const std::vector<std::int32_t> oracle_rows =
         shape.comparison == Comparison::Full ? all_indices(shape.n) : sampled_indices(shape.n);
+    const auto oracle_n = static_cast<std::int32_t>(oracle_rows.size());
     quantized_weight::PackedWeight host_weight = generator(shape.n, shape.k, shape.seed);
     const std::vector<float> oracle_weight =
         quantized_weight::materialize_rows_fp32(host_weight, oracle_rows);
-    const std::vector<std::uint16_t> activation_bits =
-        make_activation(shape.k, maximum->t, shape.seed + 1U, activation_compute);
+    const std::vector<std::uint16_t> activation_bits = make_activation(
+        shape.k, maximum->t, shape.seed + 1U, activation_compute, shape.activation_signs);
 
     DeviceBuffer device_activation(activation_bits.size() * sizeof(std::uint16_t));
     device_activation.copy_from_host(activation_bits.data(), device_activation.bytes);
@@ -317,14 +324,18 @@ int run_shape(std::string_view label, ActivationCompute activation_compute,
     device_weight.copy_from_host(host_weight.payload.data(), device_weight.bytes);
     const Weight weight = host_weight.device_weight(device_weight.p);
 
-    std::vector<double> full_reference;
-    if (shape.comparison == Comparison::Full) {
-        const std::vector<std::int32_t> columns = all_indices(maximum->t);
+    // One oracle, evaluated at the widest invocation and sliced by every narrower one: the
+    // activation of token j does not depend on how many tokens the call carries, so column j of the
+    // reference is the same for every T that reaches it. That is what makes comparing *every*
+    // column affordable -- it is one GEMM per shape rather than one per invocation, and it is
+    // cheaper than the thirty-two-column oracle it replaces, which was recomputed per call.
+    const std::vector<std::int32_t> oracle_columns = all_indices(maximum->t);
+    std::vector<double> reference_all(checked_elements(oracle_n, maximum->t, "oracle reference"));
+    {
         const std::vector<float> activation =
-            materialize_activation(activation_bits, shape.k, columns);
-        full_reference.resize(checked_elements(shape.n, maximum->t, "full reference"));
-        cpu_linear_gemm_fp64(oracle_weight.data(), activation.data(), full_reference.data(),
-                             shape.n, shape.k, maximum->t);
+            materialize_activation(activation_bits, shape.k, oracle_columns);
+        cpu_linear_gemm_fp64(oracle_weight.data(), activation.data(), reference_all.data(), oracle_n,
+                             shape.k, maximum->t);
     }
 
     int failures = 0;
@@ -376,39 +387,23 @@ int run_shape(std::string_view label, ActivationCompute activation_compute,
                 }
 
                 failures += output.verify_guards(case_label);
-                const std::vector<std::int32_t> columns = shape.comparison == Comparison::Full
-                                                              ? all_indices(invocation.t)
-                                                              : sampled_indices(invocation.t);
+                const std::span<const std::int32_t> columns(oracle_columns.data(),
+                                                            static_cast<std::size_t>(invocation.t));
                 OutputRead actual = read_output(output.data(), shape.n, invocation.t, oracle_rows,
                                                 columns, case_label);
                 failures += actual.failures;
 
-                if (shape.comparison == Comparison::Full) {
-                    std::span<const double> reference(
-                        full_reference.data(),
-                        checked_elements(shape.n, invocation.t, "reference prefix"));
-                    std::vector<double> negative_reference;
-                    if (replay == 1) {
-                        negative_reference.assign(reference.begin(), reference.end());
-                        for (double& value : negative_reference) value = -value;
-                        reference = negative_reference;
-                    }
-                    failures +=
-                        compare_output(case_label, actual.selected, reference, activation_compute);
-                } else {
-                    std::vector<float> activation =
-                        materialize_activation(activation_bits, shape.k, columns);
-                    if (replay == 1)
-                        for (float& value : activation) value = -value;
-                    std::vector<double> reference(checked_elements(
-                        static_cast<std::int32_t>(oracle_rows.size()),
-                        static_cast<std::int32_t>(columns.size()), "sampled reference"));
-                    cpu_linear_gemm_fp64(oracle_weight.data(), activation.data(), reference.data(),
-                                         static_cast<std::int32_t>(oracle_rows.size()), shape.k,
-                                         static_cast<std::int32_t>(columns.size()));
-                    failures +=
-                        compare_output(case_label, actual.selected, reference, activation_compute);
+                std::span<const double> reference(
+                    reference_all.data(),
+                    checked_elements(oracle_n, invocation.t, "reference prefix"));
+                std::vector<double> negative_reference;
+                if (replay == 1) {
+                    negative_reference.assign(reference.begin(), reference.end());
+                    for (double& value : negative_reference) value = -value;
+                    reference = negative_reference;
                 }
+                failures +=
+                    compare_output(case_label, actual.selected, reference, activation_compute);
                 if (replay == 1) {
                     std::vector<std::uint16_t> after(activation_bits.size());
                     device_activation.copy_to_host(after.data(), device_activation.bytes);
@@ -445,6 +440,28 @@ int run_shape(std::string_view label, ActivationCompute activation_compute,
         if (weight_after != host_weight.payload) {
             std::cerr << label << ": linear modified its persistent weight\n";
             ++failures;
+        }
+    }
+    return failures;
+}
+
+int verify_workspace_envelopes(QType qtype, std::int32_t n, std::int32_t k) {
+    int failures = 0;
+    for (auto policy :
+         {ops::LinearPolicy::A16Only, ops::LinearPolicy::AllowA8, ops::LinearPolicy::AllowA4}) {
+        for (auto [first, last] : {std::pair{1, 4}, std::pair{2, 4}, std::pair{1, 128},
+                                   std::pair{9, 25}, std::pair{24, 129}}) {
+            const auto capacity =
+                ops::linear_workspace_capacity_bytes(qtype, n, k, policy, first, last);
+            for (int t = first; t <= last; ++t) {
+                const auto point = ops::linear_workspace_capacity_bytes(qtype, n, k, policy, t, t);
+                if (point > capacity) {
+                    std::cerr << "Linear workspace interval [" << first << ',' << last
+                              << "] cannot cover T=" << t << " for [" << n << ',' << k << "]\n";
+                    ++failures;
+                    break;
+                }
+            }
         }
     }
     return failures;

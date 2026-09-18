@@ -10,9 +10,9 @@ set -euo pipefail
 # are what HuggingFace reports for this revision (X-Linked-Size and X-Linked-ETag on the resolve
 # URL), which is also what the local artifact every published measurement was taken against hashes
 # to. Structure matches download-qwen36-27b.sh deliberately, so the two cannot drift.
-revision='18dfc887423fa5aabf3cb56fac41490e462b3fab'
-expected_size=18210531328
-expected_sha256='eec39564993d6e9c7d5e383382a760f093465c9d163ec9a1bd6b80199514bf3e'
+revision='1cbd84e7221e51186bd7f093a149912d2489625b'
+expected_size=20437521664
+expected_sha256='81f924d440c27261d820c19a9f8d45794c5aee410f8a68bd358133fa8c0375da'
 
 root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 model_dir="${NINFER_MODEL_DIR:-$root/models}"
@@ -52,9 +52,13 @@ if [ -f "$model" ]; then
     exit 0
   fi
   printf '%s\n' "Existing $model did not verify against revision $revision; fetching the pinned one." >&2
+  # A v2 file from an earlier release does not load any more, but it does not need to be fetched
+  # again either: tools/upgrade_ninfer_v2_to_v3.py rewrites it locally in a couple of minutes.
+  printf '%s\n' "If it is the v2 file from an earlier release, you can upgrade it instead of downloading:" \
+    "  python tools/upgrade_ninfer_v2_to_v3.py $model $model.v3 && mv $model.v3 $model" >&2
 fi
 
-printf '%s\n' 'Downloading the Qwen3.8-27B model (17.0 GiB)...'
+printf '%s\n' 'Downloading the Qwen3.8-27B model (19.0 GiB)...'
 if ! curl -L -C - --fail --output "$part" \
   "https://huggingface.co/neroued/Qwen3.8-27B-NInfer/resolve/$revision/qwen3_8_27b.ninfer"; then
   printf '%s\n' 'Download failed. Run this script again to resume.' >&2

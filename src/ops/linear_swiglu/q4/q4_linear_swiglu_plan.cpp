@@ -1,3 +1,4 @@
+#include "core/weight.h"
 #include "ops/linear_swiglu/q4/q4_linear_swiglu_plan.h"
 
 #include "ninfer/ops/linear.h"
@@ -35,7 +36,7 @@ constexpr std::array<RouteSpec, 5> kRoutes{{
     {{1, 1}, Q4LinearSwiGluScheduleId::GemvPair},
     // Re-measured 2026-09-11 on an RTX 3090 under Linux after the small-T MMA's rewrite (padded code
     // rows, then a permuted k order with 64-bit code loads and no int-to-float decode -- see
-    // q4_small_t_mma.cuh). Cold, median of 31 (us):
+    // q4_ksplit_mma.cuh, formerly q4_small_t_mma.cuh). Cold, median of 31 (us):
     //
     //   T            2      4      8     12     16     20     24     25     32
     //   small_t  118.8  120.8  123.9  164.9  201.7  268.3  290.8  358.4  431.1
@@ -107,6 +108,10 @@ constexpr std::array<RouteSpec, 5> kRoutes{{
     //
     // With this the alternation is gone completely and 49..end is one route. That was the
     // suspicious thing about upstream's table to begin with.
+    //
+    // Upstream's 5b4303c0 (RTX 5090) re-split 33..end around its retuned Q4 linear routes, adding
+    // MmaSplitHalfPairR32C128Tail for 129..168. That schedule is kept executable but is not routed
+    // here: it has not been measured on sm_86.
     {{49, kAnyCols}, Q4LinearSwiGluScheduleId::MmaSplitHalfPairR32C128},
 }};
 
@@ -160,6 +165,8 @@ const char* q4_linear_swiglu_schedule_name(Q4LinearSwiGluScheduleId schedule) no
         return "linear_swiglu.q4.materialized";
     case Q4LinearSwiGluScheduleId::MmaSplitHalfPairR32C128:
         return "linear_swiglu.q4.mma.split_half_pair.r32.c128";
+    case Q4LinearSwiGluScheduleId::MmaSplitHalfPairR32C128Tail:
+        return "linear_swiglu.q4.mma.split_half_pair.r32.c128.narrow_tail";
     case Q4LinearSwiGluScheduleId::SmallTTiledI8:
         return "linear_swiglu.q4.mma.small_t.tiled_i8";
     case Q4LinearSwiGluScheduleId::SmallTTiledMasked:
@@ -194,6 +201,7 @@ Q4LinearSwiGluPlan q4_linear_swiglu_resolve_plan(const Q4LinearSwiGluProblem& pr
             plan.workspace_bytes = materialized_workspace_bytes(problem.gate_up_rows, problem.cols);
             return plan;
         case Q4LinearSwiGluScheduleId::MmaSplitHalfPairR32C128:
+        case Q4LinearSwiGluScheduleId::MmaSplitHalfPairR32C128Tail:
             return plan;
         case Q4LinearSwiGluScheduleId::SmallTTiledI8:
         case Q4LinearSwiGluScheduleId::SmallTTiledMasked:
@@ -262,6 +270,9 @@ void q4_linear_swiglu_execute_schedule(Q4LinearSwiGluScheduleId schedule, const 
     }
     case Q4LinearSwiGluScheduleId::MmaSplitHalfPairR32C128:
         q4_linear_swiglu_mma_split_half_pair_r32_c128_launch(x, w, out, stream);
+        return;
+    case Q4LinearSwiGluScheduleId::MmaSplitHalfPairR32C128Tail:
+        q4_linear_swiglu_mma_split_half_pair_r32_c128_tail_launch(x, w, out, stream);
         return;
     case Q4LinearSwiGluScheduleId::SmallTTiledI8:
         q4_linear_swiglu_small_t_tiled_i8_launch(x, w, out, ws, stream);

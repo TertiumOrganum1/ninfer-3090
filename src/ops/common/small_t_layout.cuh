@@ -2,7 +2,7 @@
 
 namespace ninfer::ops::detail {
 
-// Warp layout of the small-T MMA kernels (q4_small_t_mma.cuh, q5_small_t_mma.cuh). A CTA is eight
+// Warp layout of the small-T MMA kernels (q4_ksplit_mma.cuh, q5_small_t_mma.cuh). A CTA is eight
 // warps: KWarps of them split each K slab, one 64-k quantization group apiece, and the CTA covers
 // 8 / KWarps sixteen-row MMA tiles, one per set of KWarps warps. Every tile reads the same staged
 // activation slab, so a CTA stages T columns of activations once per 16 * 8 / KWarps weight rows.

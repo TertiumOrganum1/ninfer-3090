@@ -2,7 +2,7 @@
 
 #include "core/device.h"
 #include "ops/common/small_t_split_store.cuh"
-#include "ops/linear/q4/q4_small_t_mma.cuh"
+#include "ops/linear/q4/q4_ksplit_mma.cuh"
 #include "ops/linear/q5/q5_small_t_mma.cuh"
 
 #include <cuda_bf16.h>
@@ -53,12 +53,12 @@ void launch_qk(const Tensor& x, const Weight& w, Tensor& qk, cudaStream_t stream
                                     leading_dimension(qk),
                                     kQkRows,
                                     x.ne[1]};
-    q4_small_t_mma_launch<GdnQkGeometry, TileCols, TileCols, SmallTSplitStore,
-                          Q4SmallTMmaIdentityRows, true, KWarps, Stages>(
+    q4_ksplit_mma_launch<GdnQkGeometry, TileCols, TileCols, SmallTSplitStore,
+                         Q4KSplitIdentityRows, true, KWarps, Stages>(
         kQkRows / SmallTLayout<KWarps>::kRowsPerCta, stream,
         static_cast<const __nv_bfloat16*>(x.data), static_cast<const std::uint8_t*>(w.qdata),
         static_cast<const std::uint8_t*>(w.scales), static_cast<__nv_bfloat16*>(qk.data),
-        epilogue, Q4SmallTMmaIdentityRows{}, x.ne[1]);
+        epilogue, Q4KSplitIdentityRows{}, x.ne[1]);
 }
 
 } // namespace

@@ -33,7 +33,7 @@ void sweep_for_k(std::int32_t hidden, const ninfer::bench::SweepOptions& base) {
     const std::int32_t max_tokens =
         *std::max_element(base.tokens.begin(), base.tokens.end());
     ninfer::bench::PackedQuantizedWeight packed = ninfer::bench::make_row_split_weight(
-        QType::Q5G64_F16S, kRows, hidden, hidden, {0x31, 0xa5, 0x3c00});
+        QType::Q5_G64_FP16, kRows, hidden, hidden, {0x31, 0xa5, 0x3c00});
     ninfer::DeviceBuffer input(static_cast<std::size_t>(hidden) * max_tokens * 2);
     ninfer::DeviceBuffer residual(static_cast<std::size_t>(kRows) * max_tokens * 2);
 
@@ -46,9 +46,9 @@ void sweep_for_k(std::int32_t hidden, const ninfer::bench::SweepOptions& base) {
     };
 
     std::vector<ninfer::bench::SweepEntry> schedules{
-        // gemv and split2_exact are decode-shaped routes registered for narrow extents; past
-        // their domain they do not fail, they just stop being meaningful.
-        {"gemv_residual", make(&detail::q5_linear_add_gemv_residual_launch), 1},
+        // split2_exact is a decode-shaped route registered for narrow extents; past its domain it
+        // does not fail, it just stops being meaningful. (The gemv residual kernel was removed
+        // upstream; split2 took T=1 from it on sm_86 before that.)
         {"split2_exact", make(&detail::q5_linear_add_split2_exact_launch), 10},
         {"small_t_mma", make(&detail::q5_linear_add_small_t_mma_launch), 32},
         {"mma_r64_c16", make(&detail::q5_linear_add_mma_r64_c16_launch), 0},
@@ -72,7 +72,7 @@ void sweep_for_k(std::int32_t hidden, const ninfer::bench::SweepOptions& base) {
         return routed.c_str();
     };
     const std::size_t workspace_capacity = ninfer::ops::linear_add_workspace_capacity_bytes(
-        QType::Q5G64_F16S, kRows, hidden, 1, max_tokens);
+        QType::Q5_G64_FP16, kRows, hidden, 1, max_tokens);
     ninfer::WorkspaceArena workspace(std::max<std::size_t>(workspace_capacity, 256));
     options.public_op = [&](std::int32_t tokens, cudaStream_t stream) {
         Tensor x(input.p, DType::BF16, {hidden, tokens});

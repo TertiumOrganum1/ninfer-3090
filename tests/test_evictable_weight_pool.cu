@@ -57,18 +57,15 @@ int main() {
         const std::size_t tail_bytes  = 3 * kChunk;                // chunks at 3c, 4c, 5c
 
         ninfer::EvictableWeightPool pool(device, ninfer::EvictableWeightPool::Config{
-                                                     .arena_bytes           = arena_bytes,
-                                                     .evictable_tail_bytes  = tail_bytes,
-                                                     .window_capacity_bytes = 2 * kChunk,
+                                                     .arena_bytes          = arena_bytes,
+                                                     .evictable_tail_bytes = tail_bytes,
                                                  });
 
         int failures                   = 0;
         const ninfer::DeviceSpan arena = pool.arena();
         failures += expect(arena.bytes == arena_bytes, "arena span covers the configured bytes");
-        failures += expect(pool.window_capacity_bytes() == 2 * kChunk,
-                           "window capacity rounds to whole chunks");
-        failures += expect(pool.mirror_bytes() == arena_bytes - 4 * kChunk,
-                           "mirror covers exactly the window's weight bytes");
+        failures += expect(pool.window_capacity_bytes() == 0 && pool.mirror_bytes() == 0,
+                           "no window exists before the mirror capture");
 
         std::vector<std::uint32_t> pattern(arena_bytes / sizeof(std::uint32_t));
         for (std::size_t i = 0; i < pattern.size(); ++i) {
@@ -82,8 +79,18 @@ int main() {
             (void)pool.evict(kChunk, device.stream);
         } catch (const std::logic_error&) { early_rejected = true; }
         failures += expect(early_rejected, "evict before the mirror capture is rejected");
-        pool.capture_window_mirror(device.stream);
+        bool oversize_window_rejected = false;
+        try {
+            pool.capture_window_mirror(4 * kChunk, device.stream);
+        } catch (const std::invalid_argument&) { oversize_window_rejected = true; }
+        failures += expect(oversize_window_rejected && !pool.mirror_captured(),
+                           "a window wider than the tail is rejected");
+        pool.capture_window_mirror(kChunk + 1, device.stream);
         failures += expect(pool.mirror_captured(), "mirror capture is recorded");
+        failures += expect(pool.window_capacity_bytes() == 2 * kChunk,
+                           "window capacity rounds to whole chunks");
+        failures += expect(pool.mirror_bytes() == arena_bytes - 4 * kChunk,
+                           "mirror covers exactly the window's weight bytes");
 
         const void* stable_base = arena.data;
         std::vector<std::uint32_t> readback(pattern.size());
@@ -159,16 +166,6 @@ int main() {
         } catch (const std::invalid_argument&) { oversize_rejected = true; }
         failures += expect(oversize_rejected, "evict beyond the window capacity is rejected");
         failures += expect(!pool.transaction_open(), "rejected evict leaves the pool resident");
-
-        bool oversize_window_rejected = false;
-        try {
-            ninfer::EvictableWeightPool too_wide(device, ninfer::EvictableWeightPool::Config{
-                                                             .arena_bytes           = arena_bytes,
-                                                             .evictable_tail_bytes  = tail_bytes,
-                                                             .window_capacity_bytes = 4 * kChunk,
-                                                         });
-        } catch (const std::invalid_argument&) { oversize_window_rejected = true; }
-        failures += expect(oversize_window_rejected, "a window wider than the tail is rejected");
 
         return failures == 0 ? 0 : 1;
     } catch (const std::exception& error) {
