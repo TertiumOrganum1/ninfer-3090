@@ -79,15 +79,26 @@ void validate_policy(LinearPolicy policy) {
     case LinearPolicy::A16Only:
     case LinearPolicy::AllowA8:
     case LinearPolicy::AllowA4:
+    // The split Q4/Q5 pair has an integer-activation route; the single-parent forms decline it
+    // below, where no such route is registered for their qtypes.
+    case LinearPolicy::AllowA8Int:
+    case LinearPolicy::AllowA8IntDecode:
         return;
     }
     throw std::invalid_argument("attn_input_proj: invalid compute policy");
+}
+
+// No single-parent qtype registers an integer-activation route, and their resolvers reject a policy
+// they do not know, so the integer policies read as A16Only there.
+LinearPolicy without_integer(LinearPolicy policy) {
+    return allows_a8_int(policy) ? LinearPolicy::A16Only : policy;
 }
 
 void dispatch_single_parent(const Tensor& x, const Weight& weight, Tensor& q, Tensor& gate,
                             Tensor& k, Tensor& v, LinearPolicy policy, WorkspaceArena* workspace,
                             cudaStream_t stream) {
     validate_policy(policy);
+    policy = without_integer(policy);
     if (weight.qtype == QType::BF16) {
         constexpr std::int32_t kHidden = 5120;
         constexpr std::int32_t kQRows  = 6144;
@@ -206,6 +217,57 @@ std::size_t attn_input_proj_workspace_capacity_bytes(QType parent_qtype, std::in
         break;
     }
     throw std::invalid_argument("attn_input_proj workspace: unsupported parent qtype");
+}
+
+namespace {
+
+// Shape checks both split overloads owe their callers.
+void require_split_profile(const Tensor& x, const Weight& query_key_weight,
+                           const Weight& gate_value_weight, Tensor& q, Tensor& gate, Tensor& k,
+                           Tensor& v) {
+    constexpr std::int32_t kHidden = 5120;
+    constexpr std::int32_t kQRows  = 6144;
+    constexpr std::int32_t kKvRows = 1024;
+    const std::int32_t cols        = x.ne[1];
+    require_matrix(x, kHidden, cols, "x");
+    require_matrix(q, kQRows, cols, "q");
+    require_matrix(gate, kQRows, cols, "gate");
+    require_matrix(k, kKvRows, cols, "k");
+    require_matrix(v, kKvRows, cols, "v");
+    require_rowsplit(query_key_weight, QType::Q4_G64_FP16, kQRows + kKvRows, "query/key weight");
+    require_rowsplit(gate_value_weight, QType::Q5_G64_FP16, kQRows + kKvRows, "gate/value weight");
+}
+
+} // namespace
+
+void attn_input_proj(const Tensor& x, const Weight& query_key_weight,
+                     const Weight& gate_value_weight, Tensor& q, Tensor& gate, Tensor& k, Tensor& v,
+                     LinearPolicy policy, WorkspaceArena& workspace, cudaStream_t stream) {
+    validate_policy(policy);
+    require_split_profile(x, query_key_weight, gate_value_weight, q, gate, k, v);
+    if (allows_a8_int(policy) &&
+        detail::q4_q5_attn_input_a8_supported(query_key_weight, gate_value_weight, x.ne[1])) {
+        detail::q4_q5_attn_input_a8_launch(x, query_key_weight, gate_value_weight, q, gate, k, v,
+                                           workspace, stream);
+        return;
+    }
+    detail::q4_q5_attn_input_dispatch(x, query_key_weight, gate_value_weight, q, gate, k, v,
+                                      stream);
+}
+
+std::size_t attn_input_proj_split_workspace_capacity_bytes(
+    QType query_key_qtype, std::int32_t query_key_rows, QType gate_value_qtype,
+    std::int32_t gate_value_rows, std::int32_t input_rows, LinearPolicy policy,
+    std::int32_t min_tokens, std::int32_t max_tokens) {
+    validate_policy(policy);
+    if (min_tokens <= 0 || max_tokens < min_tokens) {
+        throw std::invalid_argument("attn_input_proj workspace: invalid token interval");
+    }
+    const bool registered = query_key_qtype == QType::Q4_G64_FP16 && query_key_rows == 7168 &&
+                            gate_value_qtype == QType::Q5_G64_FP16 && gate_value_rows == 7168 &&
+                            input_rows == 5120;
+    if (!allows_a8_int(policy) || !registered) { return 0; }
+    return detail::q4_q5_attn_input_a8_workspace_capacity_bytes(min_tokens, max_tokens);
 }
 
 void attn_input_proj(const Tensor& x, const Weight& query_key_weight,

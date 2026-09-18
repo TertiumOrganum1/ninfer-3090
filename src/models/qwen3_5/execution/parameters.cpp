@@ -136,10 +136,13 @@ public:
         if (const auto* a = std::get_if<AttentionWeights>(&w.mixer)) {
             LinearParameters attention_output = linear(a->output);
             integer_route(attention_output, QType::Q5_G64_FP16, 5120, 6144);
-            out.mixer = AttentionParameters{
-                ops::prepare_attn_input_proj_weights(model_.input(a->query), model_.input(a->key),
-                                                     model_.input(a->gate), model_.input(a->value)),
-                tensor(a->query_norm), tensor(a->key_norm), std::move(attention_output)};
+            ops::ProjectionWeights attention_projection = ops::prepare_attn_input_proj_weights(
+                model_.input(a->query), model_.input(a->key), model_.input(a->gate),
+                model_.input(a->value));
+            integer_route_pair(attention_projection, QType::Q4_G64_FP16, 7168, QType::Q5_G64_FP16,
+                               7168, 5120);
+            out.mixer = AttentionParameters{std::move(attention_projection), tensor(a->query_norm),
+                                            tensor(a->key_norm), std::move(attention_output)};
             out.projection_prefetch =
                 prefetch(std::get<AttentionParameters>(out.mixer).projection, a->query);
         } else {
