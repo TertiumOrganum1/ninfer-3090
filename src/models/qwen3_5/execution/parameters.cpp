@@ -23,6 +23,22 @@ class Prepare {
 public:
     explicit Prepare(const Model& model) : model_(model) {}
 
+    // The integer-activation route is an sm_86 addition: it feeds groupwise-int weights to the s8
+    // tensor cores, which Ampere has and which no A16 route uses. It is registered per exact shape
+    // rather than per format, because a registered route exists only for the profiles a kernel was
+    // written for; any other projection keeps what its Use permits.
+    void integer_route(LinearParameters& p, QType format, std::int32_t n, std::int32_t k) const {
+#if defined(NINFER_SM8X_COMPAT)
+        if (!model_.options().prefill_a8) { return; }
+        if (p.policy == ops::LinearPolicy::A16Only && p.weight.qtype == format &&
+            p.weight.n == n && p.weight.k == k) {
+            p.policy = ops::LinearPolicy::AllowA8Int;
+        }
+#else
+        (void)p; (void)format; (void)n; (void)k;
+#endif
+    }
+
     LinearParameters linear(WeightId id) const {
         return with_context(model_.weight(id).name,
                             [&] { return ops::prepare_linear_weight(model_.input(id)); });
@@ -59,23 +75,8 @@ public:
                                                  model_.input(w.gate), model_.input(w.up));
                                          }),
                             linear(w.down)};
-#if defined(NINFER_SM8X_COMPAT)
-        // The integer-activation route is an sm_86 addition: it feeds groupwise-int weights to the
-        // s8 tensor cores, which Ampere has and which no A16 route uses. It is registered only for
-        // the 27B Dense MLP pair, so the policy is keyed on those exact shapes rather than the
-        // format alone; any other projection keeps what its Use permits.
-        const auto integer_route = [enabled = model_.options().prefill_a8](
-                                       LinearParameters& p, QType format, std::int32_t n,
-                                       std::int32_t k) {
-            if (!enabled) { return; }
-            if (p.policy == ops::LinearPolicy::A16Only && p.weight.qtype == format &&
-                p.weight.n == n && p.weight.k == k) {
-                p.policy = ops::LinearPolicy::AllowA8Int;
-            }
-        };
         integer_route(out.gate_up, QType::Q4_G64_FP16, 34816, 5120);
         integer_route(out.down, QType::Q5_G64_FP16, 5120, 17408);
-#endif
         // --mlp-a8-decode only widens a gate_up that already admits integer activations: the flag
         // must not conjure an integer route on a build or shape that has none.
         out.verify_gate_up_policy =
@@ -113,15 +114,19 @@ public:
         out.post_attention_norm = tensor(w.post_attention_norm);
         out.ffn                 = ffn(w);
         if (const auto* a = std::get_if<AttentionWeights>(&w.mixer)) {
+            LinearParameters attention_output = linear(a->output);
+            integer_route(attention_output, QType::Q5_G64_FP16, 5120, 6144);
             out.mixer = AttentionParameters{
                 ops::prepare_attn_input_proj_weights(model_.input(a->query), model_.input(a->key),
                                                      model_.input(a->gate), model_.input(a->value)),
-                tensor(a->query_norm), tensor(a->key_norm), linear(a->output)};
+                tensor(a->query_norm), tensor(a->key_norm), std::move(attention_output)};
             out.projection_prefetch =
                 prefetch(std::get<AttentionParameters>(out.mixer).projection, a->query);
         } else {
-            const auto& g = std::get<GdnWeights>(w.mixer);
-            out.mixer     = GdnParameters{
+            const auto& g              = std::get<GdnWeights>(w.mixer);
+            LinearParameters gdn_output = linear(g.output);
+            integer_route(gdn_output, QType::Q5_G64_FP16, 5120, 6144);
+            out.mixer = GdnParameters{
                 ops::prepare_gdn_input_proj_weights(model_.input(g.query), model_.input(g.key),
                                                         model_.input(g.value), model_.input(g.z)),
                 ops::prepare_gdn_gating_proj_weights(model_.input(g.a_projection),
@@ -130,7 +135,7 @@ public:
                 tensor(g.dt_bias),
                 tensor(g.convolution),
                 tensor(g.norm),
-                linear(g.output)};
+                std::move(gdn_output)};
             out.projection_prefetch =
                 prefetch(std::get<GdnParameters>(out.mixer).projection, g.query);
         }

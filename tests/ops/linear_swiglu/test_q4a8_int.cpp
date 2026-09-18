@@ -209,9 +209,10 @@ int run_gate_up_small_t_i8(std::int32_t kTokens) {
     return failures;
 }
 
-int run_down(std::int32_t tokens) {
+// kCols selects the registered profile: 17408 is mlp/down, 6144 the attention o_proj and GDN
+// out_proj. They share one kernel, so both widths have to be checked against the oracle.
+int run_down(std::int32_t tokens, std::int32_t kCols = 17408) {
     constexpr std::int32_t kRows = 5120;
-    constexpr std::int32_t kCols = 17408;
 
     const PackedWeight host_weight =
         qw::make_patterned_weight(QType::Q5_G64_FP16, kRows, kCols, 5501U);
@@ -229,14 +230,15 @@ int run_down(std::int32_t tokens) {
     test::GuardedDeviceBuffer device_residual(res_elements * sizeof(std::uint16_t));
     device_residual.copy_from_host(residual0.data(), res_elements * sizeof(std::uint16_t));
 
-    WorkspaceArena workspace(
-        std::max<std::size_t>(ops::detail::q5a8_add_workspace_capacity_bytes(tokens, tokens), 256));
+    WorkspaceArena workspace(std::max<std::size_t>(
+        ops::detail::q5a8_add_workspace_capacity_bytes(kCols, tokens, tokens), 256));
     Tensor x(device_x.data(), DType::BF16, {kCols, tokens});
     Tensor residual(device_residual.data(), DType::BF16, {kRows, tokens});
     ops::detail::q5a8_add_launch(x, weight, residual, workspace, nullptr);
     test::cuda_check(cudaDeviceSynchronize(), "synchronize q5a8 add");
 
-    const std::string label = "LinearAdd Q5_A8INT T=" + std::to_string(tokens);
+    const std::string label =
+        "LinearAdd Q5_A8INT K=" + std::to_string(kCols) + " T=" + std::to_string(tokens);
     int failures            = 0;
     failures += device_residual.verify_guards(label);
 
@@ -277,6 +279,11 @@ int run_admission() {
         qw::make_patterned_weight(QType::Q5_G64_FP16, 5120, 17408, 2U);
     const PackedWeight wrong_shape =
         qw::make_patterned_weight(QType::Q4_G64_FP16, 4096, 5120, 3U);
+    // The mixer output projections: same kernel, narrower K.
+    const PackedWeight q5_mixer =
+        qw::make_patterned_weight(QType::Q5_G64_FP16, 5120, 6144, 4U);
+    const PackedWeight q5_unregistered =
+        qw::make_patterned_weight(QType::Q5_G64_FP16, 5120, 8192, 5U);
 
     void* fake = reinterpret_cast<void*>(static_cast<std::uintptr_t>(4096));
     struct Case {
@@ -298,6 +305,8 @@ int run_admission() {
         {"q5 declines partial tile", ops::detail::q5a8_add_supported(q5.device_weight(fake), 129), false},
         {"q5 declines a Q4 weight", ops::detail::q5a8_add_supported(q4.device_weight(fake), 128), false},
         {"q5 declines a null high plane", ops::detail::q5a8_add_supported(q5.device_weight(nullptr), 128), false},
+        {"q5 accepts the 6144 mixer output", ops::detail::q5a8_add_supported(q5_mixer.device_weight(fake), 128), true},
+        {"q5 declines an unregistered K", ops::detail::q5a8_add_supported(q5_unregistered.device_weight(fake), 128), false},
     };
     for (const Case& c : cases) {
         if (c.got != c.want) {
@@ -317,6 +326,7 @@ int main() {
         for (const std::int32_t tokens : {128, 256, 512}) {
             failures += run_gate_up(tokens);
             failures += run_down(tokens);
+            failures += run_down(tokens, 6144);
         }
         // Every band of the T=2..32 dispatch, including widths that exercise column masking.
         for (const std::int32_t t : {2, 5, 8, 9, 16, 17, 24, 25, 31, 32}) {

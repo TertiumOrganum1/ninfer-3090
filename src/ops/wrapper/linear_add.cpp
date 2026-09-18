@@ -119,13 +119,17 @@ std::size_t linear_add_workspace_capacity_bytes(QType qtype, std::int32_t output
     if (qtype == QType::Q5_G64_FP16) {
         const std::size_t a16 = detail::q5_linear_add_capacity_workspace_bytes(
             output_rows, input_rows, input_rows, min_tokens, max_tokens);
-        if (!allows_a8_int(policy) || output_rows != 5120 || input_rows != 17408) { return a16; }
+        const bool integer_shape =
+            output_rows == 5120 && (input_rows == 17408 || input_rows == 6144);
+        if (!allows_a8_int(policy) || !integer_shape) { return a16; }
         if (min_tokens == max_tokens) {
             return detail::q5a8_tokens_supported(min_tokens)
-                       ? detail::q5a8_add_workspace_capacity_bytes(min_tokens, max_tokens)
+                       ? detail::q5a8_add_workspace_capacity_bytes(input_rows, min_tokens,
+                                                                   max_tokens)
                        : a16;
         }
-        return std::max(a16, detail::q5a8_add_workspace_capacity_bytes(min_tokens, max_tokens));
+        return std::max(a16, detail::q5a8_add_workspace_capacity_bytes(input_rows, min_tokens,
+                                                                       max_tokens));
     }
     if (qtype == QType::NVFP4) {
         const bool supported = (output_rows == detail::Nvfp4N5120K6144::kOutputRows &&

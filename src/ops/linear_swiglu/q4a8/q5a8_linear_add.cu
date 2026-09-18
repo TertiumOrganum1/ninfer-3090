@@ -20,10 +20,12 @@
 namespace ninfer::ops::detail {
 namespace {
 
-constexpr std::int32_t kRows   = 5120;
-constexpr std::int32_t kCols   = 17408;
-constexpr std::int32_t kGroup  = 64;
-constexpr std::int32_t kGroups = kCols / kGroup; // 272
+// Both registered profiles are 5120 output rows over a group-64 Q5 RowSplit weight; they differ
+// only in K. mlp/down is 17408 wide, the attention o_proj and GDN out_proj are 6144.
+constexpr std::int32_t kRows      = 5120;
+constexpr std::int32_t kGroup     = 64;
+constexpr std::int32_t kDownCols  = 17408;
+constexpr std::int32_t kMixerCols = 6144;
 
 constexpr int kBM      = 128;
 constexpr int kBN      = 128;
@@ -71,10 +73,12 @@ __device__ __forceinline__ void unpack_q5(unsigned packed, unsigned high, unsign
     w1 = __vsub4(lo1 ^ 0x10101010u, 0x10101010u);
 }
 
+template <std::int32_t kCols>
 __global__ void quantize_down_activations(const __nv_bfloat16* __restrict__ x, std::int32_t tokens,
                                           std::int8_t* __restrict__ codes,
                                           __half* __restrict__ scales) {
-    const std::int32_t token = blockIdx.x;
+    constexpr std::int32_t kGroups = kCols / kGroup;
+    const std::int32_t token       = blockIdx.x;
     if (token >= tokens) { return; }
     for (std::int32_t g = threadIdx.x; g < kGroups; g += blockDim.x) {
         const __nv_bfloat16* src = x + static_cast<std::size_t>(token) * kCols + g * kGroup;
@@ -94,11 +98,13 @@ __global__ void quantize_down_activations(const __nv_bfloat16* __restrict__ x, s
     }
 }
 
+template <std::int32_t kCols>
 __global__ __launch_bounds__(kThreads) void q5a8_add_kernel(
     const std::uint8_t* __restrict__ w_codes, const std::uint8_t* __restrict__ w_high,
     const __half* __restrict__ w_scales, const std::int8_t* __restrict__ x_codes,
     const __half* __restrict__ x_scales, __nv_bfloat16* __restrict__ residual,
     std::int32_t tokens) {
+    constexpr std::int32_t kGroups = kCols / kGroup;
     extern __shared__ char smem[];
     std::int8_t* const sa = reinterpret_cast<std::int8_t*>(smem);
     std::int8_t* const sb = sa + kBM * kSRow;
@@ -252,16 +258,23 @@ bool q5a8_tokens_supported(std::int32_t tokens) { return tokens >= kBN && tokens
 
 bool q5a8_add_supported(const Weight& down, std::int32_t tokens) {
     return down.qtype == QType::Q5_G64_FP16 && down.layout == QuantLayout::RowSplit &&
-           down.n == kRows && down.k == kCols && down.group == kGroup && down.qdata != nullptr &&
-           down.qhigh != nullptr && down.scales != nullptr && tokens >= kBN && tokens % kBN == 0;
+           down.n == kRows && (down.k == kDownCols || down.k == kMixerCols) &&
+           down.group == kGroup && down.qdata != nullptr && down.qhigh != nullptr &&
+           down.scales != nullptr && tokens >= kBN && tokens % kBN == 0;
 }
 
-std::size_t q5a8_add_workspace_capacity_bytes(std::int32_t min_tokens, std::int32_t max_tokens) {
+std::size_t q5a8_add_workspace_capacity_bytes(std::int32_t input_rows, std::int32_t min_tokens,
+                                              std::int32_t max_tokens) {
     if (min_tokens <= 0 || max_tokens < min_tokens) {
         throw std::invalid_argument("q5a8 add workspace: invalid token interval");
     }
-    const std::size_t t = static_cast<std::size_t>(max_tokens);
-    return ((t * kCols + 255) / 256) * 256 + ((t * kGroups * sizeof(__half) + 255) / 256) * 256;
+    if (input_rows != kDownCols && input_rows != kMixerCols) {
+        throw std::invalid_argument("q5a8 add workspace: unregistered input width");
+    }
+    const std::size_t t      = static_cast<std::size_t>(max_tokens);
+    const std::size_t groups = static_cast<std::size_t>(input_rows) / kGroup;
+    return ((t * static_cast<std::size_t>(input_rows) + 255) / 256) * 256 +
+           ((t * groups * sizeof(__half) + 255) / 256) * 256;
 }
 
 void q5a8_add_launch(const Tensor& x, const Weight& down, Tensor& residual,
@@ -271,25 +284,34 @@ void q5a8_add_launch(const Tensor& x, const Weight& down, Tensor& residual,
         throw std::invalid_argument("q5a8 add: unsupported profile");
     }
 
-    auto scope             = workspace.scope();
-    const DeviceSpan codes = workspace.alloc_bytes(static_cast<std::size_t>(tokens) * kCols);
-    const DeviceSpan scales =
-        workspace.alloc_bytes(static_cast<std::size_t>(tokens) * kGroups * sizeof(__half));
-
-    quantize_down_activations<<<tokens, 128, 0, stream>>>(
-        reinterpret_cast<const __nv_bfloat16*>(x.data), tokens,
-        reinterpret_cast<std::int8_t*>(codes.data), reinterpret_cast<__half*>(scales.data));
+    auto scope = workspace.scope();
+    const DeviceSpan codes =
+        workspace.alloc_bytes(static_cast<std::size_t>(tokens) * static_cast<std::size_t>(down.k));
+    const DeviceSpan scales = workspace.alloc_bytes(static_cast<std::size_t>(tokens) *
+                                                    (static_cast<std::size_t>(down.k) / kGroup) *
+                                                    sizeof(__half));
 
     const dim3 grid(kRows / kBM, tokens / kBN);
     const std::size_t smem = static_cast<std::size_t>(kBM) * kSRow +
                              static_cast<std::size_t>(kBN) * kSRow +
                              (kBM + kBN) * sizeof(__half);
-    q5a8_add_kernel<<<grid, kThreads, smem, stream>>>(
-        static_cast<const std::uint8_t*>(down.qdata), static_cast<const std::uint8_t*>(down.qhigh),
-        static_cast<const __half*>(down.scales),
-        reinterpret_cast<const std::int8_t*>(codes.data),
-        reinterpret_cast<const __half*>(scales.data),
-        reinterpret_cast<__nv_bfloat16*>(residual.data), tokens);
+    const auto launch = [&]<std::int32_t kCols>() {
+        quantize_down_activations<kCols><<<tokens, 128, 0, stream>>>(
+            reinterpret_cast<const __nv_bfloat16*>(x.data), tokens,
+            reinterpret_cast<std::int8_t*>(codes.data), reinterpret_cast<__half*>(scales.data));
+        q5a8_add_kernel<kCols><<<grid, kThreads, smem, stream>>>(
+            static_cast<const std::uint8_t*>(down.qdata),
+            static_cast<const std::uint8_t*>(down.qhigh),
+            static_cast<const __half*>(down.scales),
+            reinterpret_cast<const std::int8_t*>(codes.data),
+            reinterpret_cast<const __half*>(scales.data),
+            reinterpret_cast<__nv_bfloat16*>(residual.data), tokens);
+    };
+    if (down.k == kDownCols) {
+        launch.template operator()<kDownCols>();
+    } else {
+        launch.template operator()<kMixerCols>();
+    }
     CUDA_CHECK(cudaGetLastError());
 }
 
