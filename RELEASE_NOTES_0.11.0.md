@@ -155,8 +155,8 @@ probabilities (priced, then dropped), and a panel-major weight layout that is co
 | `README.md`, `SHA256SUMS.txt`, `LICENSE`, `VERSION` | the guide, checksums for every file, licence |
 
 The Windows archive also carries the DLLs it needs: FFmpeg, libcurl, zlib, and NVIDIA's cuBLAS runtime
-(`cublas64_12.dll` and `cublasLt64_12.dll`, redistributable under the CUDA Toolkit EULA), so no CUDA
-Toolkit is required. **New requirement on Linux:** the binaries now link the cuBLAS runtime, so install
+(`cublas64_12.dll` and `cublasLt64_12.dll`, redistributed under the CUDA Toolkit EULA, whose text is
+included as `NVIDIA-CUDA-EULA.txt`), so no CUDA Toolkit is required. **New requirement on Linux:** the binaries now link the cuBLAS runtime, so install
 the CUDA 12.8 runtime libraries including cuBLAS (`sudo apt install cuda-libraries-12-8` from NVIDIA's
 repository), plus FFmpeg 6 and libcurl. They are built on Ubuntu 24.04, so glibc 2.38 or newer. Model
 artifacts are not included: `download-model` fetches the Qwen3.6-35B-A3B (21 GB), Qwen3.8-27B (19 GB, the DFlash2 bundle,

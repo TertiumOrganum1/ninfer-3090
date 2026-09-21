@@ -16,8 +16,12 @@ changed.
 - Microsoft Visual C++ 2022 runtime
 
 Everything else is in the archive: the FFmpeg and libcurl DLLs, and NVIDIA's cuBLAS runtime
-(`cublas64_12.dll`, `cublasLt64_12.dll`, redistributable under the CUDA Toolkit EULA). You do **not**
-need the CUDA Toolkit installed.
+(`cublas64_12.dll`, `cublasLt64_12.dll`). You do **not** need the CUDA Toolkit installed.
+
+**Licensing.** NInfer is Apache-2.0 (`LICENSE`). The two cuBLAS DLLs are NVIDIA's, not part of NInfer:
+they are redistributed under the terms of the NVIDIA CUDA Toolkit EULA (`NVIDIA-CUDA-EULA.txt`,
+Attachment A), for use only with the NInfer executables in this folder, and they are not covered by the
+Apache licence.
 
 Model artifacts are **not** included — they are 17–21 GB each. The downloaders below fetch them.
 
@@ -60,7 +64,8 @@ API key blank.
 | `ninfer_bench.exe` | throughput benchmark against the public Engine route |
 | `download-model.bat` | pinned, resumable artifact downloads with verification |
 | `run.bat` | serving profiles: `run.bat <model> [profile]`, or double-click it to pick a model |
-| `*.dll` | the FFmpeg and libcurl runtime dependencies |
+| `*.dll` | the FFmpeg and libcurl runtime dependencies, and NVIDIA's cuBLAS (`cublas64_12.dll`, `cublasLt64_12.dll`) |
+| `NVIDIA-CUDA-EULA.txt` | the licence under which the two cuBLAS DLLs are redistributed |
 | `SHA256SUMS.txt` | checksums for every file in this directory |
 
 ## Overrides
