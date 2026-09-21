@@ -307,6 +307,10 @@ std::string usage_text(std::string_view program) {
         << "  --device <id>               CUDA device ordinal (default: 0)\n"
         << "  --no-cuda-graph             use eager decode\n"
         << "  --no-prefill-a8             full prefill tiles keep their A16 routes\n"
+        << "  --prefill-cublas            hand wide prefill GEMMs to cuBLAS (quality trade; wants a "
+           "larger --prefill-chunk)\n"
+        << "  --no-prefill-cublas-projections  keep attention/GDN input projections off that route\n"
+        << "  --lookup-ngram <n>          context-lookup drafting from the last n tokens (0 = off)\n"
         << "  --profile-measured          bracket one measured repetition with CUDA profiler API\n"
         << "  -o, --output <table|json|csv>  output format (default: table)\n"
         << "  --output-file <path>        write report to a file\n"
@@ -362,7 +366,7 @@ BenchOptions parse_args(int argc, char** argv) {
         } else if (arg == "--no-prefill-a8") {
             options.prefill_a8 = false;
         } else if (arg == "--lookup-ngram") {
-            options.lookup_ngram = parse_u32(value("--lookup-ngram"), "lookup-ngram");
+            options.speculative.lookup_ngram = parse_u32(value("--lookup-ngram"), "lookup-ngram");
         } else if (arg == "--prefill-cublas") {
             options.prefill_cublas = true;
         } else if (arg == "--no-prefill-cublas-projections") {

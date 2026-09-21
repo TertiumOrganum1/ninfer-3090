@@ -123,8 +123,11 @@ trade at +0.082% and rejected one at +0.69%.
 
 **Two things had to be true for the quality to land there.** The weight side is cheap because int8
 buys four more bits per code while only losing per-group scale granularity: measured on the real
-artifact it costs 8e-3 to 1.0e-2 relative L2, against the 9e-3 to 2.0e-2 this fork already accepts
-from per-group activation quantisation (`tools/w4_row_scale_error.cpp`). The activation side was
+artifact it costs 9.7e-3 to 1.1e-2 relative L2 (the median per projection kind; the worst single
+tensor is 1.5e-2), against the 9e-3 to 2.0e-2 this fork already accepts from per-group activation
+quantisation (`tools/w4_row_scale_error.cpp`, using the route's own row scale with channel
+equalisation off). An earlier figure of 8e-3 to 1.0e-2 came from a clipping search the route cannot
+perform, and was the best case rather than the route. The activation side was
 *not* cheap until the channels were equalised -- activation outliers concentrate in a few input
 channels, so a token's absmax is set by those and everything else is quantised against far too
 large a step. Folding a per-channel scale out of the activations and into the weights is exact

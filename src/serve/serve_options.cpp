@@ -89,6 +89,7 @@ std::string serve_usage_text(const char* argv0) {
            "[--lm-head-draft] [--lm-head-q4|--lm-head-q6] [--embedding-q4|--embedding-q6] [--mtp-experts-q4] "
            "[--gdn-state-fp16] "
            "[--mlp-a8-decode] [--no-prefill-a8] "
+           "[--prefill-cublas [--no-prefill-cublas-projections]] [--lookup-ngram N] "
            "[--no-thinking] [--preserve-thinking] [--cors] "
            "[--temperature F] [--top-p F] [--top-k N] [--min-p F] [--presence-penalty F] "
            "[--frequency-penalty F] [--seed N] [--greedy]\n"
@@ -114,6 +115,13 @@ std::string serve_usage_text(const char* argv0) {
            "       --kv-capacity auto leaves " +
            std::to_string(kDefaultKvCapacityHeadroomBytes / (1024ULL * 1024ULL)) +
            " MiB of sizing headroom\n"
+           "       --prefill-cublas hands wide prefill GEMMs to cuBLAS: a large prefill speedup for a "
+           "small perplexity cost (docs/performance.md), off by default, and it wants a larger "
+           "--prefill-chunk to pay; --no-prefill-cublas-projections keeps the attention and GDN "
+           "input projections off that route\n"
+           "       --lookup-ngram N adds context-lookup drafting alongside --spec: the last N tokens "
+           "are matched against the sequence so far and what followed is proposed; it is exact, and "
+           "0 (the default) disables it\n"
            "       --no-prefix-reuse disables compatible-prefix caching (enabled by default)\n"
            "       --auto-prefix-grid offers shared candidates on a token grid so unrelated "
            "callers whose prompts start alike share a cached prefix without any client hint; a grid "
@@ -373,7 +381,7 @@ ServeOptions parse_serve_options(int argc, char** argv) {
         } else if (arg == "--no-prefill-a8") {
             options.prefill_a8 = false;
         } else if (arg == "--lookup-ngram") {
-            options.lookup_ngram = static_cast<std::uint32_t>(
+            options.speculative.lookup_ngram = static_cast<std::uint32_t>(
                 parse_nonnegative_int(require_value("--lookup-ngram"), "lookup-ngram"));
         } else if (arg == "--prefill-cublas") {
             options.prefill_cublas = true;

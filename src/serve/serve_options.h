@@ -65,9 +65,8 @@ struct ServeOptions {
     bool gdn_state_fp16     = false;
     bool mlp_a8_decode      = false;
     bool prefill_a8         = true;
-    std::uint32_t lookup_ngram = 0;
     bool prefill_cublas     = false;
-    bool prefill_cublas_projections     = true;
+    bool prefill_cublas_projections = true;
     bool allow_prefix_reuse = true;
     // Offer shared-prefix candidates on a content-independent token grid so unrelated callers whose
     // prompts merely start alike converge on the same frontier. Off by default: it adds host-side

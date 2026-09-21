@@ -79,6 +79,10 @@ std::string usage_text() {
            "        only, and scoring runs the prefill phase)\n"
            "       (--no-prefill-a8 is the opposite: scoring runs the prefill phase, so this is\n"
            "        how the integer prefill routes' perplexity cost is measured)\n"
+           "       [--prefill-cublas [--no-prefill-cublas-projections]]\n"
+           "       (--prefill-cublas scores through the cuBLAS prefill route, which is how its\n"
+           "        perplexity cost is measured; the projections flag keeps the attention and GDN\n"
+           "        input projections off it)\n"
            "       [--log-level trace|debug|info|warning|error|critical|off]\n";
 }
 

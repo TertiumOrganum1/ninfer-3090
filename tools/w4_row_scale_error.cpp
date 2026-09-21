@@ -13,9 +13,17 @@
 //   * the relative L2 error of reconstructing each weight as int8-with-one-row-scale, against the
 //     exact values its Q4/Q5 group-64 encoding represents.
 //
-// The second number is the one that matters. It is an upper bound on what the route costs on the
-// weight side; the activation side (one scale per token rather than per group) is a separate
-// question this does not touch.
+// The second number is the one that matters, and it is measured with the route's own quantiser
+// (dequantise_row_to_int8 in ops/linear_swiglu/q4cublas/w4_cublas_prefill.cu): the row scale comes
+// from the group scales alone, `max_g(scale[g]) * half / 127`, with no pass over the values and no
+// clipping, and codes are rounded to nearest and clamped to +-127. A ratio-searched scale is also
+// reported, as `searched`, but only as a lower bound the route does not reach -- it clips outliers
+// to buy back error, which the bound-derived scale never does.
+//
+// Channel scales are taken as one. The route's channel equalisation depends on the activations of
+// the chunk being run, which this tool has none of; alpha = 0 is exactly the route without it. The
+// activation side (one scale per token rather than per group) is a separate question this does not
+// touch.
 //
 // Build: see tools/CMakeLists.txt -- it links ninfer_artifact.
 //
@@ -69,12 +77,30 @@ float half_to_float(std::uint16_t bits) {
 }
 
 struct Stats {
-    double sum_sq_error = 0.0;
+    double sum_sq_error = 0.0;          // the route's row scale
+    double sum_sq_error_searched = 0.0; // best of a clipping-ratio search: not reachable by the route
     double sum_sq_value = 0.0;
     double worst_row_relative = 0.0;
+    double worst_row_searched = 0.0;
     double spread_max = 1.0;
     std::vector<std::uint64_t> spread_buckets; // <2x, <4x, <8x, <16x, <32x, >=32x
 };
+
+// Half the code range: a signed Q4 code is in [-8, 7], Q5 in [-16, 15], Q6 in [-32, 31].
+int code_half(QType format) {
+    return format == QType::Q6_G64_FP16 ? 32 : (format == QType::Q5_G64_FP16 ? 16 : 8);
+}
+
+// Squared error of rounding `values` to int8 with one scale, clamped to +-127 as the kernel does.
+double row_error(const std::vector<float>& values, float row_scale) {
+    double error = 0.0;
+    for (const float v : values) {
+        const float q = std::clamp(std::rint(v / row_scale), -127.0F, 127.0F);
+        const float r = q * row_scale;
+        error += static_cast<double>(v - r) * (v - r);
+    }
+    return error;
+}
 
 // One row's exact values, as the group-64 encoding represents them.
 void decode_row(const std::byte* codes, const std::byte* high, const std::byte* scales,
@@ -151,44 +177,51 @@ void analyse(const Reader& reader, ObjectHandle handle, const std::string& name)
                                                                         : spread < 32 ? 4 : 5;
         ++stats.spread_buckets[static_cast<std::size_t>(bucket)];
 
-        // One scale per row. Plain absmax/127 is the obvious choice and the wrong one: clipping a
-        // few outliers buys back more than it costs, which is why transcode_row_split already
-        // searches ratios per group rather than taking absmax. The same search applies here, so
-        // the number below is what a materialiser would actually achieve, not a strawman.
-        float absmax = 0.0F;
-        for (const float v : values) { absmax = std::max(absmax, std::fabs(v)); }
-        double row_error = 0.0;
+        // One scale per row, derived the way the route derives it: from the group scales alone.
+        // Every code of group g is at most `half` steps of scale[g], so the row's absmax is
+        // bounded by max_g(scale[g]) * half without reading a value.
+        float peak = 0.0F;
+        for (const float s : group_scale) { peak = std::max(peak, s); }
+        const float bound     = peak * static_cast<float>(code_half(g.format));
+        const float row_scale = bound > 0.0F ? bound / 127.0F : 1.0F;
         double row_value = 0.0;
         for (const float v : values) { row_value += static_cast<double>(v) * v; }
+        const double error = row_error(values, row_scale);
+
+        // The lower bound: the best of a search over clipped scales, which the route cannot take
+        // because it never looks at the values. Kept to show how much of the error is the choice
+        // of scale rather than the eight bits.
+        float absmax = 0.0F;
+        for (const float v : values) { absmax = std::max(absmax, std::fabs(v)); }
+        double searched = error;
         if (absmax > 0.0F) {
-            double best = -1.0;
+            searched = -1.0;
             for (int step = 0; step < 25; ++step) {
-                const float ratio     = 0.70F + 0.02F * static_cast<float>(step);
-                const float row_scale = absmax * ratio / 127.0F;
-                double error          = 0.0;
-                for (const float v : values) {
-                    const float q = std::clamp(std::round(v / row_scale), -127.0F, 127.0F);
-                    const float r = q * row_scale;
-                    error += static_cast<double>(v - r) * (v - r);
-                }
-                if (best < 0.0 || error < best) { best = error; }
+                const float ratio = 0.70F + 0.02F * static_cast<float>(step);
+                const double e    = row_error(values, absmax * ratio / 127.0F);
+                if (searched < 0.0 || e < searched) { searched = e; }
             }
-            row_error = best;
         }
-        stats.sum_sq_error += row_error;
+        stats.sum_sq_error += error;
+        stats.sum_sq_error_searched += searched;
         stats.sum_sq_value += row_value;
         if (row_value > 0.0) {
             stats.worst_row_relative =
-                std::max(stats.worst_row_relative, std::sqrt(row_error / row_value));
+                std::max(stats.worst_row_relative, std::sqrt(error / row_value));
+            stats.worst_row_searched =
+                std::max(stats.worst_row_searched, std::sqrt(searched / row_value));
         }
     }
 
     const double relative =
         stats.sum_sq_value > 0.0 ? std::sqrt(stats.sum_sq_error / stats.sum_sq_value) : 0.0;
+    const double relative_searched =
+        stats.sum_sq_value > 0.0 ? std::sqrt(stats.sum_sq_error_searched / stats.sum_sq_value) : 0.0;
     std::printf("%-46s rows=%-7d groups=%-5d sampled=%-5d  relL2=%.3e  worstRow=%.3e  "
+                "searched=%.3e (worst %.3e)  "
                 "spreadMax=%.1fx  [<2x %llu, <4x %llu, <8x %llu, <16x %llu, <32x %llu, >=32x %llu]\n",
                 name.c_str(), rows, groups, sampled, relative, stats.worst_row_relative,
-                stats.spread_max,
+                relative_searched, stats.worst_row_searched, stats.spread_max,
                 static_cast<unsigned long long>(stats.spread_buckets[0]),
                 static_cast<unsigned long long>(stats.spread_buckets[1]),
                 static_cast<unsigned long long>(stats.spread_buckets[2]),
@@ -208,7 +241,9 @@ int main(int argc, char** argv) {
     try {
         Reader reader(argv[1]);
         std::printf("# int8 with one scale per row, against the exact group-64 values\n");
-        std::printf("# relL2 is the reconstruction error the cuBLAS route would pay on weights\n");
+        std::printf("# relL2 is the reconstruction error of the route's own row scale (channel scales "
+                    "one)\n");
+        std::printf("# searched is a clipping-ratio lower bound the route does not reach\n");
         const auto& directory = reader.directory();
         for (std::size_t i = 0; i < directory.objects.size(); ++i) {
             const std::string name = object_id(directory.objects[i]);

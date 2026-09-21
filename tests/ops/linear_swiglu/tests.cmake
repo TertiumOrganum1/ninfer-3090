@@ -28,3 +28,9 @@ ninfer_add_op_test(ninfer_linear_swiglu_q4_a8int_test
 ninfer_add_op_test(ninfer_linear_swiglu_q4a8_int_test
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/test_q4a8_int.cpp"
   LIBRARIES ninfer_ops)
+
+# The cuBLAS prefill route (LinearPolicy::AllowPrefillCublas) across linear_swiglu, linear_add and
+# the attention/GDN split projections, against an FP64 oracle.
+ninfer_add_op_test(ninfer_w4_cublas_prefill_test
+  SOURCES "${CMAKE_CURRENT_LIST_DIR}/test_w4_cublas_prefill.cpp"
+  LIBRARIES ninfer_ops)

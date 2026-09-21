@@ -61,17 +61,24 @@ printf '\nStarting in %s seconds. Press Ctrl+C to cancel.\n' "$START_DELAY_SECON
 sleep "$START_DELAY_SECONDS"
 
 cd -- "$repo"
-NINFER_BENCH_SERVER="$server" \
-NINFER_BENCH_MODEL="$model" \
-NINFER_BENCH_MAX_CONTEXT="$MAX_CONTEXT" \
-NINFER_BENCH_OUTPUT_TOKENS="$OUTPUT_TOKENS" \
-NINFER_BENCH_PREFILL_CHARS="$PREFILL_PROMPT_CHARACTERS" \
-NINFER_BENCH_COHORTS="$COHORTS" \
-NINFER_BENCH_KV_DTYPE="$KV_DTYPE" \
-NINFER_BENCH_SPEC="$SPEC" \
-${DRAFT_TOKENS:+NINFER_BENCH_DRAFT_TOKENS="$DRAFT_TOKENS"} \
-NINFER_BENCH_PREFILL_CUBLAS="$PREFILL_CUBLAS" \
-${PREFILL_CHUNK:+NINFER_BENCH_PREFILL_CHUNK="$PREFILL_CHUNK"} \
+# The draft window and the prefill chunk default inside the Python script (they depend on the
+# backend and on the cuBLAS route), so they are passed only when set. A conditional NAME=value
+# cannot sit in the command prefix: bash recognises assignment words before expansion, so the
+# expanded word would be run as a command name.
+env_overrides=()
+if [[ -n "$DRAFT_TOKENS" ]]; then env_overrides+=("NINFER_BENCH_DRAFT_TOKENS=$DRAFT_TOKENS"); fi
+if [[ -n "$PREFILL_CHUNK" ]]; then env_overrides+=("NINFER_BENCH_PREFILL_CHUNK=$PREFILL_CHUNK"); fi
+env \
+  NINFER_BENCH_SERVER="$server" \
+  NINFER_BENCH_MODEL="$model" \
+  NINFER_BENCH_MAX_CONTEXT="$MAX_CONTEXT" \
+  NINFER_BENCH_OUTPUT_TOKENS="$OUTPUT_TOKENS" \
+  NINFER_BENCH_PREFILL_CHARS="$PREFILL_PROMPT_CHARACTERS" \
+  NINFER_BENCH_COHORTS="$COHORTS" \
+  NINFER_BENCH_KV_DTYPE="$KV_DTYPE" \
+  NINFER_BENCH_SPEC="$SPEC" \
+  NINFER_BENCH_PREFILL_CUBLAS="$PREFILL_CUBLAS" \
+  ${env_overrides[@]+"${env_overrides[@]}"} \
   uv run tools/bench/run_qwen38_windows_3090_benchmarks.py
 
 printf '\nBENCHMARK COMPLETE. Open the results directory printed above.\n'

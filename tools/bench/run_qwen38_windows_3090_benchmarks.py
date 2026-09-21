@@ -239,7 +239,8 @@ def main() -> None:
     configuration = {
         "server": str(SERVER), "model": str(MODEL), "max_context": MAX_CONTEXT,
         "output_tokens": OUTPUT_TOKENS, "prefill_prompt_characters": PREFILL_PROMPT_CHARACTERS,
-        "mtp_draft_tokens": 3, "cohorts": COHORTS, "kv_dtype": KV_DTYPE,
+        "spec": SPEC, "draft_tokens": int(DRAFT_TOKENS), "prefill_cublas": PREFILL_CUBLAS,
+        "prefill_chunk": int(PREFILL_CHUNK), "cohorts": COHORTS, "kv_dtype": KV_DTYPE,
     }
     (OUTPUT_ROOT / "configuration.json").write_text(json.dumps(configuration, indent=2), encoding="utf-8")
     generation_prompt = "Write a detailed technical guide to reliable local GPU inference. Continue until the requested output limit."

@@ -22,8 +22,9 @@ namespace ninfer::ops::detail {
 //
 // **It is a quality trade and that is why it is opt-in.** cuBLAS reduces over the whole of K, so it
 // cannot see a scale per 64 columns: the weight carries one scale per row and the activations one
-// per token. The weight half measures 8e-3 to 1.0e-2 relative L2 against the exact group-64 values
-// on the real 27B artifact (tools/w4_row_scale_error.cpp), comparable to the 9e-3 to 2.0e-2 this
+// per token. The weight half measures 9.7e-3 to 1.1e-2 relative L2 against the exact group-64 values
+// on the real 27B artifact, the median per projection kind and 1.5e-2 for the worst tensor
+// (tools/w4_row_scale_error.cpp, with the route's own row scale), comparable to the 9e-3 to 2.0e-2 this
 // fork already accepts from per-group activation quantisation; the activation half is the trade
 // this fork has twice declined, at 1.2e-2 rising to 1.29e-1 on outlier-heavy inputs. Whether the
 // two together are affordable is a perplexity question, which is why nothing here is on by default.

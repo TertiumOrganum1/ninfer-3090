@@ -66,9 +66,8 @@ struct BenchOptions {
     int device            = 0;
     bool use_cuda_graph   = true;
     bool prefill_a8       = true;
-    std::uint32_t lookup_ngram = 0;
     bool prefill_cublas   = false;
-    bool prefill_cublas_projections   = true;
+    bool prefill_cublas_projections = true;
     bool profile_measured = false;
     OutputFormat output   = OutputFormat::Table;
     std::string output_file;

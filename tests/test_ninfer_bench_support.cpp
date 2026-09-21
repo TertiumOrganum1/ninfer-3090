@@ -166,6 +166,23 @@ int test_cli_contract() {
     failures += expect(k8v4.kv_cache == ninfer::KvCacheStorage::Fp8KeyNvfp4Value, "K8V4 KV");
     failures += expect(qb::usage_text("ninfer_bench").find("nvfp4|k8v4") != std::string::npos,
                        "benchmark help omits new KV modes");
+    const qb::BenchOptions route_defaults =
+        parse_for_test({"ninfer_bench", "--weights", "model.ninfer"});
+    failures += expect(!route_defaults.prefill_cublas && route_defaults.prefill_cublas_projections &&
+                           route_defaults.speculative.lookup_ngram == 0,
+                       "cuBLAS prefill or context lookup on by default");
+    const qb::BenchOptions route =
+        parse_for_test({"ninfer_bench", "--weights", "model.ninfer", "--spec", "mtp",
+                        "--draft-tokens", "3", "--lookup-ngram", "5", "--prefill-cublas",
+                        "--no-prefill-cublas-projections"});
+    failures += expect(route.prefill_cublas && !route.prefill_cublas_projections &&
+                           route.speculative.lookup_ngram == 5 &&
+                           route.speculative.backend == ninfer::SpeculativeBackend::Mtp,
+                       "benchmark cuBLAS prefill and context-lookup controls");
+    for (const char* flag : {"--prefill-cublas", "--no-prefill-cublas-projections", "--lookup-ngram"}) {
+        failures += expect(qb::usage_text("ninfer_bench").find(flag) != std::string::npos,
+                           std::string("benchmark help omits ") + flag);
+    }
     failures += expect_string(qb::kv_cache_name(ninfer::KvCacheStorage::Nvfp4Group16), "nvfp4",
                               "NVFP4 report name");
     failures += expect_string(qb::kv_cache_name(ninfer::KvCacheStorage::Fp8KeyNvfp4Value), "k8v4",
