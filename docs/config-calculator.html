@@ -475,7 +475,7 @@ const DATA = {
 
   models: {
     "27b": {
-      /* Measured against the official groupwise-int artifact fetched by download-qwen38-27b
+      /* Measured against the official groupwise-int artifact fetched by download-model qwen38-27b
          (weights_id "groupwise-int"). The runtime also recognizes other weight profiles (see
          src/runtime/engine/context_cost_defaults.cpp), with different resident weightsBytes;
          these figures do not apply to a differently-quantized weight artifact of this model. */
@@ -512,7 +512,7 @@ const DATA = {
     },
     "35b": {
       /* Measured against the pinned 560f227e groupwise-int artifact fetched by
-         download-qwen36-35b-a3b.{sh,bat}; see the note on the 27B entry above. */
+         download-model.{sh,bat} qwen36-35b-a3b; see the note on the 27B entry above. */
       label: "Qwen3.6-35B-A3B (MoE, groupwise-int weights)",
       weightsBytes: 21038469632,
       workspaceBytes: 109453312,

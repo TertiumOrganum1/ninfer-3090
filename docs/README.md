@@ -59,6 +59,7 @@ other references own narrower contracts:
 | [Operational logging](maintainer/logging.md) | log ownership, presentation, severity and data policy |
 | [Linear benchmark](maintainer/linear-benchmark.md) | pure Linear measurement, metrics and suites |
 | [Linear tuning and reports](maintainer/linear-tuning.md) | tuning ranges, priority points, dispatch tradeoffs and final performance report format |
+| [Launcher profiles](maintainer/launcher-profiles.md) | `run`, `download-model` and `package-release`, the serving profile per model, and the measurements behind each default |
 
 Model cards contain official artifact facts and source provenance. The
 [conversion guide](weight-conversion.md) is the entry point for making an artifact. Exact config

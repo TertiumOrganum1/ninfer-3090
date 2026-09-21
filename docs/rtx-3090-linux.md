@@ -111,25 +111,27 @@ The `scripts/` directory contains Bash versions of each Windows download, launch
 script. Download scripts save models under `scripts/models` by default:
 
 ```bash
-./scripts/download-qwen38-27b.sh
-./scripts/download-qwen36-35b-a3b.sh
-./scripts/download-qwen36-27b.sh
+./scripts/download-model.sh qwen38-27b
+./scripts/download-model.sh qwen36-35b-a3b
+./scripts/download-model.sh qwen36-27b
 ```
 
-Set `NINFER_MODEL_DIR` to use another model directory. Each launcher also accepts a model path:
+Set `NINFER_MODEL_DIR` to use another model directory. `run.sh` serves either model, and
+`NINFER_MODEL` points it at a model path anywhere:
 
 ```bash
-./scripts/run-qwen38-c1.sh /path/to/qwen3_8_27b.ninfer
-./scripts/run-qwen38-c8.sh /path/to/qwen3_8_27b.ninfer
-./scripts/run-qwen38-vision.sh /path/to/qwen3_8_27b.ninfer
-./scripts/run-qwen36-35b-vision.sh /path/to/qwen3_6_35b_a3b.ninfer
+./scripts/run.sh qwen38-27b
+./scripts/run.sh qwen36-35b-a3b
+NINFER_MODEL=/path/to/qwen3_8_27b.ninfer ./scripts/run.sh qwen38-27b int8
 ```
 
-The launchers use `build-sm86/apps/ninfer-serve` when the executable is not beside the script.
-Set `NINFER_SERVER` to select another executable.
+The launcher uses `build-linux/apps/ninfer-serve` when the executable is not beside the script.
+Set `NINFER_SERVER` to select another executable. Profiles and the measurements behind them are in
+[launcher profiles](maintainer/launcher-profiles.md).
 
-The `package-release-v*.sh` scripts create Linux `tar.gz` archives from their matching historical
-build directories. The PowerShell scripts continue to create Windows ZIP archives.
+`scripts/package-release.sh` creates the Linux `tar.gz` archive for the release named in `VERSION`,
+and `scripts/package-release.ps1` the Windows ZIP; `build.sh --package` and `build.ps1 -Package` run
+them after a build.
 
 ## Validation
 

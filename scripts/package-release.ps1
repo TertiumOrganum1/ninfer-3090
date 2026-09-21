@@ -1,13 +1,34 @@
+# Build the Windows release archive for the version in the repository's VERSION file.
+#
+#   $env:NINFER_BUILD_ROOT = 'C:\ninfer\build-ninja'; .\scripts\package-release.ps1
+#   .\scripts\build.ps1 -Package         configure + build, then this
+#
+# There is one packager, not one per release. Everything version-specific is derived from VERSION,
+# whose content is the full release tag (for example 0.10.0-rtx3090): the text before the first '-'
+# names RELEASE_NOTES_<version>.md and the checksum file, and the whole tag names the archive. To cut
+# a release, bump VERSION and write its release notes; there is nothing here to copy and edit.
 $ErrorActionPreference = 'Stop'
 
-$ReleaseTag = '0.9.1-rtx3090'
 $RepoRoot = Split-Path -Parent $PSScriptRoot
+
+$VersionFile = Join-Path $RepoRoot 'VERSION'
+if (-not (Test-Path -LiteralPath $VersionFile)) { throw "Missing $VersionFile" }
+$ReleaseTag = (Get-Content -LiteralPath $VersionFile -Raw).Trim()
+if (-not $ReleaseTag) { throw "$VersionFile is empty" }
+$ReleaseVersion = $ReleaseTag.Split('-')[0]
+$ReleaseNotes = "RELEASE_NOTES_$ReleaseVersion.md"
+# Checked before anything is deleted or built into dist, so a forgotten release-notes file costs
+# nothing rather than a finished archive that has to be thrown away.
+if (-not (Test-Path -LiteralPath (Join-Path $RepoRoot $ReleaseNotes))) {
+    throw "Missing $(Join-Path $RepoRoot $ReleaseNotes): write the release notes for $ReleaseTag before packaging it"
+}
+
 $BuildRoot = if ($env:NINFER_BUILD_ROOT) { $env:NINFER_BUILD_ROOT } else { Join-Path $RepoRoot 'build-ninja' }
 $DistRoot = Join-Path $RepoRoot 'dist'
 $ProductName = "ninfer-rtx3090-windows-x64-$ReleaseTag"
 $ProductRoot = Join-Path $DistRoot $ProductName
 $ArchivePath = Join-Path $DistRoot "$ProductName.zip"
-$ChecksumPath = Join-Path $DistRoot 'SHA256SUMS-v0.9.1-windows.txt'
+$ChecksumPath = Join-Path $DistRoot "SHA256SUMS-v$ReleaseVersion-windows.txt"
 
 # Ninja is a single-config generator, so release binaries land directly under
 # apps\ / bench\ rather than an apps\Release\ subdirectory.
@@ -42,12 +63,17 @@ Get-ChildItem -LiteralPath (Join-Path $BuildRoot 'apps') -Filter '*.dll' | ForEa
 Copy-Item -LiteralPath (Join-Path $RepoRoot 'VERSION') -Destination $ProductRoot
 Copy-Item -LiteralPath (Join-Path $RepoRoot 'LICENSE') -Destination $ProductRoot
 # The archive README must describe the archive. docs\rtx-3090-windows.md is written for a checkout
-# -- it points at scripts\download-qwen*.bat, and the packager copies those to the archive root --
-# so a user following it from inside the archive got a missing-file error.
+# -- it points at scripts\download-model.bat, and the packager copies that script to the archive
+# root -- so a user following it from inside the archive got a missing-file error.
 Copy-Item -LiteralPath (Join-Path $RepoRoot 'docs\release-archive-windows.md') -Destination (Join-Path $ProductRoot 'README.md')
-Copy-Item -LiteralPath (Join-Path $RepoRoot 'RELEASE_NOTES_0.9.1.md') -Destination $ProductRoot
-Get-ChildItem -LiteralPath (Join-Path $RepoRoot 'scripts') -Filter '*.bat' | Where-Object Name -match '^(download|run)-qwen' |
-    ForEach-Object { Copy-Item -LiteralPath $_.FullName -Destination $ProductRoot }
+Copy-Item -LiteralPath (Join-Path $RepoRoot $ReleaseNotes) -Destination $ProductRoot
+# Explicit rather than matched by pattern, so a new script is shipped only once someone has decided
+# it belongs in the archive.
+foreach ($script in @('run.bat', 'download-model.bat')) {
+    $source = Join-Path $RepoRoot "scripts\$script"
+    if (-not (Test-Path -LiteralPath $source)) { throw "Missing release script: $source" }
+    Copy-Item -LiteralPath $source -Destination $ProductRoot
+}
 
 $innerHashes = Get-ChildItem -LiteralPath $ProductRoot -File | Sort-Object Name | ForEach-Object {
     $hash = Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256

@@ -23,30 +23,33 @@ Model artifacts are **not** included — they are 17–21 GB each. The downloade
 From the directory you unpacked, two commands:
 
 ```bash
-./download-qwen36-35b-a3b.sh           # ~21 GB, resumable, verifies size and SHA256
-./run-qwen36-35b-a3b-c1-maxctx.sh      # serves on http://127.0.0.1:8080/v1
+./download-model.sh qwen36-35b-a3b     # ~21 GB, resumable, verifies size and SHA256
+./run.sh qwen36-35b-a3b                # serves on http://127.0.0.1:8080/v1
 ```
 
-The downloader writes into `models/` beside these files, which is where every launcher looks. Set
-`NINFER_MODEL_DIR` to keep artifacts elsewhere, or `NINFER_MODEL` to point one launcher at a single
+The downloader writes into `models/` beside these files, which is where the launcher looks. Set
+`NINFER_MODEL_DIR` to keep artifacts elsewhere, or `NINFER_MODEL` to point the launcher at a single
 file.
 
-That launcher is the headless profile: two lanes, `rk8v4` KV, MTP3 speculation plus the draft head,
-and vision in overlay residency, with `NINFER_CONTEXT` defaulting to 262,144.
+That is the headless profile: two lanes, `rk8v4` KV, MTP3 speculation plus the draft head, and
+vision in overlay residency, with `NINFER_CONTEXT` defaulting to 262,144.
 
-Read its header before assuming that context holds. Speculation is not free context — the MTP head
-is 856 MiB and the draft head another 136 MiB, roughly 130,000 rk8v4 tokens of KV — so the launcher
-documents `NINFER_SPEC=none` as what actually reaches the native 262,144 maximum, at about
-183 tok/s instead of 240–280. Drop a rung (196608 / 131072 / 114688 / 98304 / 81920) if startup
-refuses. For the dense 27B instead:
+Do not assume that context holds. Speculation is not free context — the MTP head is 856 MiB and the
+draft head another 136 MiB, roughly 130,000 rk8v4 tokens of KV — so `NINFER_SPEC=none` is what
+actually reaches the native 262,144 maximum, at about 183 tok/s instead of 240–280. Drop a rung
+(196608 / 131072 / 114688 / 98304 / 81920) if startup refuses. For the dense 27B instead:
 
 ```bash
-./download-qwen38-27b.sh               # ~17 GB
-./run-qwen38-c1-maxctx.sh              # two lanes, 212,992 tokens each
+./download-model.sh qwen38-27b         # ~19 GB, the DFlash2 bundle; it also carries the MTP weights
+./run.sh qwen38-27b                    # one lane, 131,072 tokens, DFlash2 (fastest)
 ```
 
-`run-qwen38-c1.sh` and `run-qwen38-c8.sh` are the older INT8 profiles — one user at 65,536 tokens,
-and eight concurrent users at 8,192 each.
+For the longest context instead, `NINFER_SPEC=mtp ./run.sh qwen38-27b` runs the MTP profile at two
+lanes and 212,992 tokens each with a smaller prefill chunk and `--lm-head-q6`: slower decode, more
+context.
+
+`./run.sh qwen38-27b int8` and `./run.sh qwen38-27b c8` are the older INT8 profiles — one user at
+65,536 tokens, and eight concurrent users at 8,192 each.
 
 The endpoint is OpenAI-compatible, so anything that speaks `/v1/chat/completions` works. Leave the
 API key blank.
@@ -58,20 +61,20 @@ API key blank.
 | `ninfer-serve` | the server: OpenAI- and Anthropic-compatible HTTP APIs |
 | `ninfer` | one-shot CLI generation, for smoke tests and scripting |
 | `ninfer_bench` | throughput benchmark against the public Engine route |
-| `download-qwen*.sh` | pinned, resumable artifact downloads with verification |
-| `run-qwen*.sh` | serving profiles; see the table above |
+| `download-model.sh` | pinned, resumable artifact downloads with verification |
+| `run.sh` | serving profiles: `run.sh <model> [profile]` |
 | `SHA256SUMS.txt` | checksums for every file in this directory |
 
 ## Overrides
 
-Nothing here needs editing, but the two families differ and it is worth knowing which you are
-running. `NINFER_SERVER` and `NINFER_MODEL_DIR` work everywhere.
+Nothing here needs editing. `NINFER_SERVER`, `NINFER_MODEL_DIR`, `NINFER_MODEL`, `NINFER_HOST` and
+`NINFER_PORT` work for every profile.
 
-| launcher | overrides it reads |
+| profile | also reads |
 |---|---|
-| `run-qwen38-c1-maxctx.sh` | `NINFER_MODEL`, `NINFER_HOST`, `NINFER_PORT`, `NINFER_CONTEXT`, `NINFER_CONCURRENCY`, `NINFER_KV_CAPACITY`, `NINFER_KV_DTYPE`, `NINFER_SPEC`, `NINFER_VISION`, `NINFER_DRAFT_TOKENS` |
-| `run-qwen36-35b-a3b-c1-maxctx.sh` | the same, except `NINFER_KV_DTYPE` — that one is fixed at `rk8v4` |
-| `run-qwen38-c1.sh`, `run-qwen38-c8.sh`, the two vision launchers | `NINFER_SERVER` and `NINFER_MODEL_DIR` only, plus the artifact path as `$1`. Host, port and every serving flag are baked in at `127.0.0.1:8080` — unlike their Windows `.bat` counterparts, which do read `NINFER_HOST`/`NINFER_PORT`/`NINFER_MODEL`. Use a `-maxctx` launcher if you need to move the port. |
+| `run.sh <model>` (`tuned`) | `NINFER_CONTEXT`, `NINFER_CONCURRENCY`, `NINFER_KV_CAPACITY`, `NINFER_KV_DTYPE`, `NINFER_SPEC` (27B: `dflash2`, `mtp`, `none`; 35B: `mtp`, `none`), `NINFER_VISION`, `NINFER_VISION_RESIDENCY`, `NINFER_DRAFT_TOKENS`, `NINFER_PREFILL_CHUNK` |
+| `run.sh qwen38-27b int8`, `run.sh qwen38-27b c8` | nothing further; every serving flag is fixed |
+| `download-model.sh <model>` | `NINFER_MODEL_DIR`, `NINFER_SKIP_SHA256` |
 
 > `NINFER_HOST=0.0.0.0` exposes the server to your network **unauthenticated**. The launchers bind
 > `127.0.0.1` for that reason. If you set it, put something in front of it.
@@ -79,7 +82,8 @@ running. `NINFER_SERVER` and `NINFER_MODEL_DIR` work everywhere.
 ## If startup refuses
 
 The message names the numbers. Drop a context rung first —
-`NINFER_CONTEXT=196608`, then 131072, 114688, 98304, 81920. Speculation is the next lever
+`NINFER_CONTEXT=196608`, then 131072, 114688, 98304, 81920 (the default DFlash2 profile starts at
+131072, so begin at 114688 there). Speculation is the next lever
 (`NINFER_SPEC=none`), worth about 992 MiB at the cost of decode speed. Drop vision last: in overlay
 residency it costs almost nothing resident, and an `evictable pool window exceeds the evictable
 tail` message means the reservation is already tight rather than that the context is too large.

@@ -26,8 +26,15 @@ PREFILL_CHUNK="${NINFER_BENCH_PREFILL_CHUNK:-}"
 # ==================================================================
 
 repo="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
-if [[ "$SPEC" == 'dflash2' ]]; then default_model='qwen3_8_27b_dflash2.ninfer'; else default_model='qwen3_8_27b.ninfer'; fi
-model="${NINFER_BENCH_MODEL:-${NINFER_MODEL_DIR:-$repo/..}/$default_model}"
+# download-model.sh qwen38-27b fetches the DFlash2 bundle as qwen3_8_27b.ninfer, and it carries the
+# MTP weights too, so that one file runs every spec. A maintainer who keeps the bundle as a separate
+# qwen3_8_27b_dflash2.ninfer beside a dense qwen3_8_27b.ninfer gets it preferred for DFlash2.
+models_dir="${NINFER_MODEL_DIR:-$repo/..}"
+default_model='qwen3_8_27b.ninfer'
+if [[ "$SPEC" == 'dflash2' && -f "$models_dir/qwen3_8_27b_dflash2.ninfer" ]]; then
+  default_model='qwen3_8_27b_dflash2.ninfer'
+fi
+model="${NINFER_BENCH_MODEL:-$models_dir/$default_model}"
 server="${NINFER_BENCH_SERVER:-$repo/build-linux/apps/ninfer-serve}"
 
 if [[ ! -x "$server" ]]; then
@@ -37,7 +44,7 @@ if [[ ! -x "$server" ]]; then
 fi
 if [[ ! -f "$model" ]]; then
   printf 'ERROR: Model not found: %s\n' "$model" >&2
-  printf 'Download it first:  ./scripts/download-qwen38-27b.sh\n' >&2
+  printf 'Download it first:  ./scripts/download-model.sh qwen38-27b  (that file carries the DFlash2 weights)\n' >&2
   exit 1
 fi
 command -v uv >/dev/null || { printf 'ERROR: uv is not available in PATH.\n' >&2; exit 1; }
