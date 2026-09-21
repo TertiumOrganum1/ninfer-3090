@@ -40,10 +40,19 @@
 # The qwen3_8_27b.ninfer that download-model.sh fetches is the DFlash2 bundle and carries the MTP
 # weights too, so one file serves both.
 #
+# IF THE CARD IS BUSY. A desktop (or another job) holding VRAM can leave too little for the default
+# context. When the `tuned` profile is refused at startup for lack of GPU memory, this launcher steps
+# down on its own -- an eighth of the context at a time, up to five times, with a 2048 prefill chunk
+# and fewer host state slots -- and says what it did, so the first run starts instead of ending in an
+# error. It
+# only does that for the defaults: an explicit NINFER_CONTEXT, NINFER_PREFILL_CHUNK,
+# NINFER_HOST_STATE_SLOTS or NINFER_KV_CAPACITY is honoured as given and fails loudly, and
+# NINFER_FALLBACK=off turns the step-down off.
+#
 # OVERRIDES, from the environment. All profiles: NINFER_MODEL (artifact path), NINFER_MODEL_DIR,
 # NINFER_SERVER, NINFER_HOST, NINFER_PORT. `tuned` also: NINFER_CONTEXT, NINFER_CONCURRENCY,
 # NINFER_KV_CAPACITY, NINFER_KV_DTYPE, NINFER_SPEC, NINFER_DRAFT_TOKENS, NINFER_PREFILL_CHUNK,
-# NINFER_VISION (on|off), NINFER_VISION_RESIDENCY. Each spec's defaults (context, lanes, chunk)
+# NINFER_VISION (on|off), NINFER_VISION_RESIDENCY, NINFER_HOST_STATE_SLOTS. Each spec's defaults (context, lanes, chunk)
 # are the ones that fit; the context figures below are extrapolated for a headless card, so treat
 # the first start as the confirmation and drop a rung if it refuses:
 # 229376 / 212992 / 196608 / 163840 / 131072 / 114688 / 98304 / 65536.
@@ -197,10 +206,14 @@ if [[ "$profile" == 'tuned' ]]; then
     *) printf 'NINFER_VISION must be on or off, got %s\n' "$VISION" >&2; exit 2 ;;
   esac
   label="$label  |  $vision_label"
+  # Pinned host memory for the context cache: 74.5 MiB per slot on the 27B. Free on Linux; on Windows
+  # WDDM charges it against the card, so a busy desktop needs fewer (see the README on startup).
+  HOST_STATE_SLOTS="${NINFER_HOST_STATE_SLOTS:-32}"
   profile_args+=(
     --max-pending-requests 16 --pending-timeout-ms 600000
     ${vision_args[@]+"${vision_args[@]}"}
-    --max-private-continuations 8 --max-shared-prefixes 8 --host-state-slots 32 --host-kv-mib 8192
+    --max-private-continuations 8 --max-shared-prefixes 8 --host-state-slots "$HOST_STATE_SLOTS"
+    --host-kv-mib 8192
     --auto-prefix-grid
   )
 fi
@@ -219,13 +232,55 @@ fi
 printf '%s  |  %s\n' "$title" "$label"
 [[ -z "${prefill_note:-}" ]] || printf '%s\n' "$prefill_note"
 if [[ "$profile" == 'tuned' ]]; then
-  printf 'Cache: 8 shared / 8 private / 32 host states  |  automatic prefix grid on\n'
+  printf 'Cache: 8 shared / 8 private / %s host states  |  automatic prefix grid on\n' "$HOST_STATE_SLOTS"
 fi
 [[ -z "${hint:-}" ]] || printf '%s\n' "$hint"
 printf 'API: http://%s:%s/v1\n\n' "$HOST" "$PORT"
+
+# Step-down eligibility. Only the defaults of the tuned profile may be second-guessed; a value the
+# caller chose is theirs. A step-down pass is a re-run of this script with the overrides below set,
+# marked by NINFER_FALLBACK_RUNG, so the settings are rebuilt by the same code as a first run.
+ladder=0
+if [[ "$profile" == 'tuned' && "${NINFER_FALLBACK:-on}" != 'off' ]]; then
+  if [[ -n "${NINFER_FALLBACK_RUNG:-}" ]]; then
+    ladder=1
+  elif [[ -z "${NINFER_CONTEXT:-}${NINFER_PREFILL_CHUNK:-}${NINFER_HOST_STATE_SLOTS:-}${NINFER_KV_CAPACITY:-}" ]]; then
+    ladder=1
+  fi
+fi
 
 # --host-kv-mib 8192 is honoured in full here: on Linux this really does pin 8 GiB of host RAM, and
 # it is host RAM, not device memory. run.bat passes the same number and gets far less -- WDDM
 # charges a pinned host allocation against the card, so the runtime clamps to
 # (free VRAM - 1 GiB) / 2. See docs/maintainer/launcher-profiles.md.
-exec "$server" "$MODEL" --host "$HOST" --port "$PORT" "${profile_args[@]}"
+if (( ! ladder )); then
+  exec "$server" "$MODEL" --host "$HOST" --port "$PORT" "${profile_args[@]}"
+fi
+
+# Run the server with its output shown and kept, so a refusal for lack of memory can be told apart
+# from any other failure. Only that failure steps down; a crash or a bad artifact does not.
+rung="${NINFER_FALLBACK_RUNG:-0}"
+base_context="${NINFER_FALLBACK_BASE_CONTEXT:-$CONTEXT}"
+base_chunk="${NINFER_FALLBACK_BASE_CHUNK:-$PREFILL_CHUNK}"
+base_slots="${NINFER_FALLBACK_BASE_SLOTS:-$HOST_STATE_SLOTS}"
+server_log="$(mktemp)"
+trap 'rm -f -- "$server_log"' EXIT
+set +e
+"$server" "$MODEL" --host "$HOST" --port "$PORT" "${profile_args[@]}" 2>&1 | tee "$server_log"
+status="${PIPESTATUS[0]}"
+set -e
+if (( status != 0 && rung < 5 )) &&
+   grep -q -E 'runtime reservation requires|cudaMallocHost failed' "$server_log"; then
+  next=$((rung + 1))
+  next_context=$(( base_context * (8 - next) / 8 / 1024 * 1024 ))
+  next_chunk=$(( base_chunk < 2048 ? base_chunk : 2048 ))
+  next_slots=$(( base_slots >> ((next + 1) / 2) ))
+  printf '\nNot enough free GPU memory to start at context %s. Retrying at %s (prefill chunk %s, %s host state slots).\n' \
+    "$CONTEXT" "$next_context" "$next_chunk" "$next_slots"
+  printf 'Set NINFER_CONTEXT to choose your own, or NINFER_FALLBACK=off to fail instead.\n\n'
+  exec env NINFER_CONTEXT="$next_context" NINFER_PREFILL_CHUNK="$next_chunk" \
+    NINFER_HOST_STATE_SLOTS="$next_slots" NINFER_FALLBACK_RUNG="$next" \
+    NINFER_FALLBACK_BASE_CONTEXT="$base_context" NINFER_FALLBACK_BASE_CHUNK="$base_chunk" \
+    NINFER_FALLBACK_BASE_SLOTS="$base_slots" "$0" "$@"
+fi
+exit "$status"

@@ -46,9 +46,17 @@ rem
 rem OVERRIDES, from the environment. All profiles: NINFER_MODEL (artifact path), NINFER_MODEL_DIR,
 rem NINFER_SERVER, NINFER_HOST, NINFER_PORT. `tuned` also: NINFER_CONTEXT, NINFER_CONCURRENCY, NINFER_KV_DTYPE,
 rem NINFER_SPEC, NINFER_DRAFT_TOKENS, NINFER_PREFILL_CHUNK, NINFER_VISION (on^|off),
-rem NINFER_VISION_RESIDENCY. Windows keeps one lane by default: a desktop holds roughly 1.5 GiB of
+rem NINFER_VISION_RESIDENCY, NINFER_HOST_STATE_SLOTS. Windows keeps one lane by default: a desktop holds roughly 1.5 GiB of
 rem the card. Each spec's defaults (context, chunk) are the ones that fit; if startup refuses, drop
 rem a rung of NINFER_CONTEXT: 196608 / 163840 / 131072 / 114688 / 98304 / 65536.
+rem
+rem IF THE CARD IS BUSY. A desktop (or another job) holding VRAM can leave too little for the default
+rem context. When the `tuned` profile is refused at startup for lack of GPU memory, this launcher
+rem steps down on its own -- an eighth of the context at a time, up to five times, with a 2048
+rem prefill chunk and fewer host state slots -- and says what it did, so the first run starts instead
+rem of ending in an error. It only does that for the defaults: an explicit NINFER_CONTEXT, NINFER_PREFILL_CHUNK or
+rem NINFER_HOST_STATE_SLOTS is honoured as given and fails loudly, and NINFER_FALLBACK=off turns the
+rem step-down off.
 rem
 rem Loopback by default. 0.0.0.0 publishes an unauthenticated OpenAI-compatible endpoint to every
 rem network this machine is on, so it is opt-in per run rather than the shipped default:
@@ -58,6 +66,13 @@ rem ----------------------------------------------------------------------------
 
 set "MODEL_KEY=%~1"
 set "PROFILE=%~2"
+rem Step-down eligibility, decided once on the first pass: only the defaults of the tuned profile
+rem may be second-guessed. A step-down pass sets the overrides itself and jumps back to :model_known.
+if not defined RUNG (
+  set "RUNG=0"
+  set "LADDER=0"
+  if "%NINFER_CONTEXT%%NINFER_PREFILL_CHUNK%%NINFER_HOST_STATE_SLOTS%"=="" if /i not "%NINFER_FALLBACK%"=="off" set "LADDER=1"
+)
 if "%PROFILE%"=="" set "PROFILE=tuned"
 if "%MODEL_KEY%"=="" goto :choose_model
 :model_resolve
@@ -234,6 +249,10 @@ if not "%NINFER_VISION%"=="" set "VISION=%NINFER_VISION%"
 set "VISION_RESIDENCY=overlay"
 if not "%NINFER_VISION_RESIDENCY%"=="" set "VISION_RESIDENCY=%NINFER_VISION_RESIDENCY%"
 set "VISION_ARGS="
+rem Pinned host memory for the context cache: 74.5 MiB per slot on the 27B. WDDM charges it against
+rem the card, so a busy desktop needs fewer (see the README on startup).
+set "HOST_STATE_SLOTS=32"
+if not "%NINFER_HOST_STATE_SLOTS%"=="" set "HOST_STATE_SLOTS=%NINFER_HOST_STATE_SLOTS%"
 if /i "%VISION%"=="on" (
   set "VISION_ARGS=--vision --vision-residency %VISION_RESIDENCY%"
   set "LABEL=%LABEL%  ^|  vision (%VISION_RESIDENCY%)"
@@ -246,7 +265,7 @@ if /i "%VISION%"=="off" (
 echo NINFER_VISION must be on or off, got %VISION% 1>&2
 exit /b 2
 :vision_done
-set "PROFILE_ARGS=%PROFILE_ARGS% --max-pending-requests 16 --pending-timeout-ms 600000 %VISION_ARGS% --max-private-continuations 8 --max-shared-prefixes 8 --host-state-slots 32 --host-kv-mib 8192 --auto-prefix-grid"
+set "PROFILE_ARGS=%PROFILE_ARGS% --max-pending-requests 16 --pending-timeout-ms 600000 %VISION_ARGS% --max-private-continuations 8 --max-shared-prefixes 8 --host-state-slots %HOST_STATE_SLOTS% --host-kv-mib 8192 --auto-prefix-grid"
 
 :launch
 if not exist "%SERVER%" (
@@ -262,7 +281,7 @@ if not exist "%MODEL%" (
 
 echo %TITLE%  ^|  %LABEL%
 if not "%PREFILL_NOTE%"=="" echo %PREFILL_NOTE%
-if /i "%PROFILE%"=="tuned" echo Cache: 8 shared / 8 private / 32 host states  ^|  automatic prefix grid on
+if /i "%PROFILE%"=="tuned" echo Cache: 8 shared / 8 private / %HOST_STATE_SLOTS% host states  ^|  automatic prefix grid on
 if not "%HINT%"=="" echo %HINT%
 echo API: http://%HOST%:%PORT%/v1
 echo.
@@ -275,9 +294,49 @@ rem and because it is harmless here: the clamp takes what is actually free after
 rem allocated, so it costs no context, and prefix reuse falls back to device pages when the pin is
 rem zero. Do not read "8192" as a description of this machine. See
 rem docs\maintainer\launcher-profiles.md.
-"%SERVER%" "%MODEL%" --host %HOST% --port %PORT% %PROFILE_ARGS%
-endlocal
-exit /b %ERRORLEVEL%
+if /i not "%PROFILE%"=="tuned" set "LADDER=0"
+if "%LADDER%"=="0" (
+  "%SERVER%" "%MODEL%" --host %HOST% --port %PORT% %PROFILE_ARGS%
+  endlocal
+  exit /b %ERRORLEVEL%
+)
+
+rem Run the server with its output shown and kept, so a refusal for lack of memory can be told apart
+rem from any other failure. Only that failure steps down; a crash or a bad artifact does not. The log
+rem is written as ASCII on purpose: Tee-Object writes UTF-16, which findstr cannot search.
+if "%RUNG%"=="0" (
+  set "BASE_CONTEXT=%CONTEXT%"
+  set "BASE_CHUNK=%PREFILL_CHUNK%"
+  set "BASE_SLOTS=%HOST_STATE_SLOTS%"
+)
+set "SERVER_LOG=%TEMP%\ninfer-run-%RANDOM%%RANDOM%.log"
+"%SERVER%" "%MODEL%" --host %HOST% --port %PORT% %PROFILE_ARGS% 2>&1 | powershell -NoProfile -Command "$input | ForEach-Object { $_; Add-Content -LiteralPath '%SERVER_LOG%' -Value $_ -Encoding Ascii }"
+findstr /c:"runtime reservation requires" /c:"cudaMallocHost failed" "%SERVER_LOG%" >nul 2>&1
+if errorlevel 1 goto :server_done
+if %RUNG% GEQ 5 goto :server_done
+set /a NEXT=RUNG+1
+set /a NEXT_CONTEXT=BASE_CONTEXT*(8-NEXT)/8/1024*1024
+set "NEXT_CHUNK=%BASE_CHUNK%"
+if %BASE_CHUNK% GTR 2048 set "NEXT_CHUNK=2048"
+set /a "NEXT_SLOTS=BASE_SLOTS>>((NEXT+1)/2)"
+echo.
+echo Not enough free GPU memory to start at context %CONTEXT%. Retrying at %NEXT_CONTEXT% (prefill chunk %NEXT_CHUNK%, %NEXT_SLOTS% host state slots).
+echo Set NINFER_CONTEXT to choose your own, or NINFER_FALLBACK=off to fail instead.
+echo.
+del "%SERVER_LOG%" >nul 2>&1
+set "NINFER_CONTEXT=%NEXT_CONTEXT%"
+set "NINFER_PREFILL_CHUNK=%NEXT_CHUNK%"
+set "NINFER_HOST_STATE_SLOTS=%NEXT_SLOTS%"
+set "RUNG=%NEXT%"
+goto :model_known
+
+:server_done
+rem The pipe hides the server's own exit status, so report failure from what it logged.
+findstr /c:"FATAL" "%SERVER_LOG%" >nul 2>&1
+set "SERVER_STATUS=0"
+if not errorlevel 1 set "SERVER_STATUS=1"
+del "%SERVER_LOG%" >nul 2>&1
+endlocal & exit /b %SERVER_STATUS%
 
 :usage
 echo usage: run.bat ^<model^> [profile]

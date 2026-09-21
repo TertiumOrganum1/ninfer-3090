@@ -60,6 +60,19 @@ foreach ($product in $Products) {
 Get-ChildItem -LiteralPath (Join-Path $BuildRoot 'apps') -Filter '*.dll' | ForEach-Object {
     Copy-Item -LiteralPath $_.FullName -Destination $ProductRoot
 }
+# The executables import cublas64_12.dll (the cuBLAS prefill route), which imports cublasLt64_12.dll.
+# Neither is in the vcpkg apps\ directory: they come from the CUDA Toolkit, which a typical Windows
+# machine does not have, so without them every executable here fails to start with "cublas64_12.dll
+# was not found" -- before --prefill-cublas is even asked for. NVIDIA lists both as redistributable in
+# the CUDA Toolkit EULA. Take them from the toolkit that built the binaries.
+$CudaBin = if ($env:CUDA_PATH) { Join-Path $env:CUDA_PATH 'bin' } else { $null }
+foreach ($name in 'cublas64_12.dll', 'cublasLt64_12.dll') {
+    $found = if ($CudaBin) { Join-Path $CudaBin $name } else { $null }
+    if (-not $found -or -not (Test-Path -LiteralPath $found)) {
+        throw "Missing ${name}: set CUDA_PATH to the CUDA 12.x Toolkit that built the release (looked in $CudaBin)"
+    }
+    Copy-Item -LiteralPath $found -Destination $ProductRoot
+}
 Copy-Item -LiteralPath (Join-Path $RepoRoot 'VERSION') -Destination $ProductRoot
 Copy-Item -LiteralPath (Join-Path $RepoRoot 'LICENSE') -Destination $ProductRoot
 # The archive README must describe the archive. docs\rtx-3090-windows.md is written for a checkout

@@ -155,6 +155,11 @@ recorded="$(record override NINFER_CONTEXT=65536 NINFER_PREFILL_CHUNK=1024 NINFE
 expect_flags '27B overrides' "$recorded" '--max-context 65536' '--prefill-chunk 1024' '--max-concurrency 2'
 refuse_flag '27B overrides' "$recorded" '--vision'
 
+# The state-slot count is the override a busy Windows desktop needs (pinned host memory is charged
+# against the card there), and its default must not move.
+expect_flags '27B default slots' "$(record slots32 -- qwen38-27b)" '--host-state-slots 32'
+expect_flags '27B slots override' "$(record slots8 NINFER_HOST_STATE_SLOTS=8 -- qwen38-27b)" '--host-state-slots 8'
+
 # The banner reports what is being served: an explicit vision residency shows up in it, not the
 # default. (The stub server prints nothing, so stdout here is the launcher's own.)
 banner="$(clear_env NINFER_SERVER="$tmp/ninfer-serve" NINFER_TEST_ARGS="$tmp/unused.args" \
@@ -194,6 +199,65 @@ expect_exit 2 'profile the model lacks' clear_env "${serve_env[@]}" "$root/run.s
 expect_exit 2 'unknown profile' clear_env "${serve_env[@]}" "$root/run.sh" qwen38-27b fastest
 expect_exit 2 'unknown NINFER_SPEC' clear_env "${serve_env[@]}" NINFER_SPEC=bogus "$root/run.sh" qwen38-27b
 expect_exit 0 '--help' clear_env "${serve_env[@]}" "$root/run.sh" --help
+
+# Step-down ladder. A desktop holding VRAM can leave too little for the default context, and the
+# tuned profile is meant to start anyway: refused for lack of memory, it retries with a smaller
+# context, a 2048 chunk and fewer host state slots. The stub refuses (with the engine's own message)
+# until the requested context fits, and logs every attempt it is given.
+cat > "$tmp/ninfer-serve-tight" <<'TIGHT'
+#!/usr/bin/env bash
+context=''; previous=''
+for argument in "$@"; do [[ "$previous" == '--max-context' ]] && context="$argument"; previous="$argument"; done
+printf '%s\n' "$*" >> "$NINFER_TEST_LOG"
+if (( context > ${NINFER_TEST_FITS:-0} )); then
+  echo "${NINFER_TEST_FAILURE:-FATAL server failed during startup | requested Engine runtime reservation requires 5173992960 bytes, but only 1 bytes are available}"
+  exit 1
+fi
+TIGHT
+chmod +x "$tmp/ninfer-serve-tight"
+attempts() { # attempts <fits> [NAME=value ...] -> log of every attempt; sets $ladder_status
+  local fits="$1"; shift
+  ladder_log="$tmp/ladder.$RANDOM.log"; : > "$ladder_log"
+  ladder_status=0
+  clear_env NINFER_SERVER="$tmp/ninfer-serve-tight" NINFER_MODEL_DIR="$tmp" NINFER_TEST_LOG="$ladder_log" \
+    NINFER_TEST_FITS="$fits" ${@+"$@"} "$root/run.sh" qwen38-27b >/dev/null 2>&1 || ladder_status=$?
+}
+field() { # field <flag>: that flag's value on each logged attempt, space separated
+  awk -v flag="$1" '{ for (i = 1; i < NF; i++) if ($i == flag) printf "%s ", $(i + 1) } END { print "" }' "$ladder_log"
+}
+expect_eq() { # expect_eq <label> <got> <want>
+  [[ "$2" == "$3" ]] && return 0
+  printf 'run.sh ladder (%s): got "%s", expected "%s"\n' "$1" "$2" "$3" >&2
+  exit 1
+}
+
+attempts 100000
+expect_eq 'contexts stepped' "$(field --max-context)" '131072 114688 98304 '
+expect_eq 'chunk drops to 2048' "$(field --prefill-chunk)" '4096 2048 2048 '
+expect_eq 'slots halve' "$(field --host-state-slots)" '32 16 16 '
+expect_eq 'it started, so it exits 0' "$ladder_status" '0'
+
+attempts 1000
+expect_eq 'never fits: six attempts, then stops' "$(field --max-context)" '131072 114688 98304 81920 65536 49152 '
+expect_eq 'never fits: reports the failure' "$ladder_status" '1'
+
+# Values the caller chose are theirs, and a switch turns the ladder off: one attempt, loud failure.
+attempts 1000 NINFER_CONTEXT=131072
+expect_eq 'explicit context is not second-guessed' "$(field --max-context)" '131072 '
+attempts 1000 NINFER_HOST_STATE_SLOTS=32
+expect_eq 'explicit slots are not second-guessed' "$(field --max-context)" '131072 '
+attempts 1000 NINFER_FALLBACK=off
+expect_eq 'NINFER_FALLBACK=off' "$(field --max-context)" '131072 '
+
+# Only a memory refusal steps down. Any other startup failure is not something a smaller context fixes.
+attempts 1000 NINFER_TEST_FAILURE='FATAL server failed during startup | artifact is corrupt'
+expect_eq 'other failures do not retry' "$(field --max-context)" '131072 '
+
+# The reference profiles are fixed shapes and never step down.
+ladder_log="$tmp/ladder.fixed.log"; : > "$ladder_log"
+clear_env NINFER_SERVER="$tmp/ninfer-serve-tight" NINFER_MODEL_DIR="$tmp" NINFER_TEST_LOG="$ladder_log" \
+  NINFER_TEST_FITS=1000 "$root/run.sh" qwen38-27b int8 >/dev/null 2>&1 || true
+expect_eq 'int8 profile has no ladder' "$(field --max-context)" '65536 '
 
 # run.sh ships *inside* the release archive as well as living here, and README calls it the Linux
 # entry point. It once resolved both the server and the artifact from `dirname(script)/..` -- the
