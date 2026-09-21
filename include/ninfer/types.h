@@ -97,6 +97,12 @@ struct SpeculativeOptions {
     // Startup-fixed K: MTP 1..5; DFlash and DFlash2 1..15 (query width K+1).
     std::uint32_t draft_tokens = 0;
     ProposalHead proposal_head = ProposalHead::Full;
+    // Context-lookup drafting: match this many trailing tokens against the sequence so far and
+    // propose whatever followed the last time they appeared. 0 disables it. It costs no device
+    // work, it is exact (verify rejects a wrong guess), and it is strongest exactly where a draft
+    // head is weakest -- output that repeats the input. Used as a draft source alongside the
+    // configured backend, preferred whenever it finds a match.
+    std::uint32_t lookup_ngram = 0;
 };
 
 enum class StartupPhase : std::uint8_t {
@@ -223,6 +229,17 @@ struct EngineOptions {
     // Clearing it returns prefill to the A16 routes, which is the only way to measure what the
     // integer routes are worth on a whole request rather than per Op.
     bool prefill_a8                        = true;
+    // Hand wide prefill GEMMs to cuBLAS instead of this fork's integer mainloop: the weight is
+    // materialised as int8 with one scale per row and the activations quantised per token, which
+    // runs about twice as fast (ops/linear_swiglu/q4cublas/w4_cublas_prefill.h) and is a further
+    // quality trade on top of prefill_a8 -- hence off by default. Its dequantise pass is
+    // weight-sized, so it wants a large prefill_chunk to amortise; the two belong together.
+    bool prefill_cublas                    = false;
+    // Extends prefill_cublas to the attention and GDN input projections, which hold about a fifth
+    // of the linear parameters. Worth +13% prefill for +0.071% perplexity on top of what the route
+    // already costs, the GDN half carrying nearly all of both. Separable because that is a
+    // different trade from the MLP one and an owner may want only the cheaper half.
+    bool prefill_cublas_projections        = true;
     // Largest merged-token count one media item may occupy; larger media is downscaled at
     // preprocessing. Also bounds the overlay window.
     std::uint32_t vision_max_merged_tokens = 16384;

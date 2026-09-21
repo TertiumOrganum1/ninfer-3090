@@ -88,6 +88,23 @@ int main() {
     failures +=
         check(help.find("nvfp4") != std::string::npos && help.find("k8v4") != std::string::npos,
               "CLI help omits a production KV storage mode");
+    const ninfer::cli::Options route_defaults =
+        parse({"ninfer-cli", "model.ninfer", "--prompt", "hello"});
+    failures += check(!route_defaults.prefill_cublas && route_defaults.prefill_cublas_projections &&
+                          route_defaults.speculative.lookup_ngram == 0,
+                      "the cuBLAS prefill route or context lookup is on by default");
+    const ninfer::cli::Options route =
+        parse({"ninfer-cli", "model.ninfer", "--prompt", "hello", "--spec", "mtp", "--draft-tokens",
+               "3", "--lookup-ngram", "5", "--prefill-cublas", "--no-prefill-cublas-projections"});
+    failures += check(route.prefill_cublas && !route.prefill_cublas_projections &&
+                          route.speculative.lookup_ngram == 5 &&
+                          route.speculative.backend == ninfer::SpeculativeBackend::Mtp &&
+                          route.speculative.draft_tokens == 3,
+                      "CLI did not parse the cuBLAS prefill and context-lookup controls");
+    for (const char* flag : {"--prefill-cublas", "--no-prefill-cublas-projections", "--lookup-ngram"}) {
+        failures += check(help.find(flag) != std::string::npos,
+                          "CLI help omits an accepted prefill or drafting control");
+    }
     const ninfer::cli::Options logging =
         parse({"ninfer-cli", "model.ninfer", "--prompt", "hello", "--log-level", "debug"});
     failures += check(logging.log_level == ninfer::product::LogLevel::Debug,

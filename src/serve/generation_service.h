@@ -101,6 +101,10 @@ struct PreparedRequest {
     std::shared_ptr<RequestLifetime> lifetime;
 };
 
+// The Engine configuration a serve invocation selects. Separate from the service so the mapping
+// from parsed options to what the Engine is actually started with can be checked without a model.
+[[nodiscard]] ninfer::EngineOptions make_engine_options(const ServeOptions& options);
+
 class GenerationService {
 public:
     explicit GenerationService(ServeOptions options, StartupObserver startup_observer = {});

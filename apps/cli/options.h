@@ -42,6 +42,8 @@ struct Options {
     bool gdn_state_fp16 = false;
     bool mlp_a8_decode  = false;
     bool prefill_a8     = true;
+    bool prefill_cublas = false;
+    bool prefill_cublas_projections = true;
 
     bool raw_output      = false;
     bool print_token_ids = false;

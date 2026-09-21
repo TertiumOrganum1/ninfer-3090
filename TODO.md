@@ -1,5 +1,97 @@
 # TODO
 
+## Decode: two proven wins waiting on the attention work, 2026-09-19
+
+Both are measured, both are large, and both are deliberately parked until INT8 PV lands, because
+that change touches the same rounds and should be proven first.
+
+**1. RESOLVED 2026-09-19: DFlash2 is a single-stream optimisation only, and the sweep stays on MTP3.** Measured at `-pg 4096,256`,
+kv int8, on one 3090:
+
+  | config | decode tok/s | acceptance |
+  |---|---:|---:|
+  | plain, no speculation | 45.1 | - |
+  | **MTP3 -- what the scripts and published numbers use** | 144.9 | 0.96 |
+  | MTP5 | 182.7 | 0.95 |
+  | DFlash2 K=7 | 249.3 | 0.95 |
+  | **DFlash2 K=15** | **326.2** | 0.87 |
+
+  The mechanism, which explains the size of it: a 16-column verify round takes 20.9 ms against a
+  22.2 ms one-column plain step, because decode is memory bound at ~87% of roofline and both are
+  one sweep of the 15.9 GiB of weights. **Extra columns are nearly free; acceptance is the only
+  thing that converts them into tokens.** It also says where it stops -- at 0.868 per-token
+  acceptance the expected run saturates at 1/(1-0.868) = 7.6 tokens, which is why K=13 -> 15 moved
+  only 319 -> 326.
+
+  **Confirming it on real generation changed the answer, and this is why the corpus was not
+  enough.** Three prompts -- a reasoning question, a code question, a summarisation -- greedy, 400
+  tokens, mean tok/s: MTP3 124.3, MTP5 145.9, **DFlash2 K=7 172.3**, DFlash2 K=15 156.3. The
+  synthetic corpus says K=15 (326 against 249 for K=7) because it continues itself and acceptance
+  stays high; on real generation the extra columns stop being accepted and are paid for anyway, so
+  **K=15 loses to K=7**. The 2.25x above is a corpus artefact; the real number is 1.39x.
+
+  **The cohort measurement, done correctly.** Aggregate decode tok/s through the serve path,
+  thinking off, decode time read from the server's request log rather than a wall clock:
+
+  | C | MTP3 | DFlash2 K=7 | change | tokens/round |
+  |---:|---:|---:|---:|---|
+  | 1 | 135.0 | 187.1 | +38.6% | 3.51 / 5.57 |
+  | 2 | 238.2 | 313.5 | +31.6% | 3.51 / 5.82 |
+  | 4 | 387.4 | 406.2 | +4.9% | 3.54 / 5.63 |
+  | 8 | 522.8 | **does not fit** | - | - |
+
+  DFlash2 is faster at every level it can run, and the lead shrinks with concurrency exactly as the
+  mechanism predicts -- speculation pays because a multi-column round costs about one sweep of the
+  weights, and batching already amortises that sweep, so the baseline catches up. Acceptance itself
+  does not degrade: tokens per round holds flat across all levels.
+
+  What stops it is memory, not throughput. The draft weights are 18.3 GiB against 16.7; at C8 the
+  runtime reservation needs 4.64 GB against 3.78 GB free, a 4096-token KV still needs 4.24 GB, and
+  only 2048 fits -- too little for eight streams. **The sweep includes C8, so it stays on MTP3; a
+  C1-C4 deployment should use DFlash2.**
+
+  **An earlier version of this measurement said the opposite and it was wrong twice over**: it left
+  thinking mode on while the CLI comparisons had it off, which changes the generated text and so the
+  acceptance rate, and it timed wall clock per request, folding in HTTP, tokenisation, prefill and
+  queueing. Together those reported 98 tok/s where decode was actually 196, and made the serve path
+  look broken. It is not: whole-request host-exposed time is ~22 ms on a 2.2 s request, queue wait
+  ~1 ms, and serve decode matches the CLI to within 0.5% once the two are configured alike.
+
+**3. Adaptive draft window: the signal is free, acting on it is not.** Worth writing down because
+the idea is obvious and the obstacle is not.
+
+  The engine already reads `accepted_drafts` and `licensed_counts` back to the host every round, so a
+  running per-sequence acceptance estimate costs nothing, and the optimal K for a given acceptance
+  has a closed form. What is not free is *acting* on it: within a captured graph the round executes
+  K+1 columns whatever the live extent, because the tail is masked by `target_valid_columns` rather
+  than skipped. Shrinking the extent therefore saves no time at all.
+
+  Over-drafting does cost real time, which is what makes this tempting. On a low-acceptance workload
+  K = 3/7/12 measures 58.9/53.2/46.1 tok/s -- **28% between K=3 and K=12** -- but the only thing that
+  moved there was the *captured* K, not the extent.
+
+  So adaptation means several captured graph profiles selected per round. Profiles are already keyed
+  on (batch size, frontier bucket); adding a K dimension multiplies the captured set against a fixed
+  graph allowance (128 MiB at `-p 512 -n 8`, 288 MiB with more shapes). And at C>1 the lanes share
+  one graph, so they must agree on a K -- the max wastes the low-acceptance lanes, the min wastes the
+  high -- which erodes the benefit exactly as concurrency rises.
+
+  **Prize, honestly**: perfect *per-prompt* selection is only +1.5% over fixed K=7 on the three
+  prompts swept, because 7 is already optimal for two of them. Per-*round* adaptation should be worth
+  more, since acceptance varies within a generation and the low-acceptance spread is 28%, but that is
+  an extrapolation rather than a measurement.
+
+  **Cheapest version worth trying first**: two profiles, not N -- capture at K=3 and K=7, switch on
+  one acceptance threshold. The curve is flat in the middle, so two points take most of the spread
+  for one extra graph and one bit of per-sequence state.
+
+**2. Context-lookup drafting on the DFlash2 path -- smaller than it first looked.**
+`--lookup-ngram` is implemented and hooks the MTP branch only, where it is worth ~3-5% because that
+drafter already accepts 95-96%. The case for moving it to DFlash2 was K=15's 0.868 acceptance and a
+2.3x ceiling -- but K=15 is not the operating point on real generation, and at K=7 acceptance is
+0.95, which caps a perfect drafter at **+19%**. Worth doing, worth maybe half that in practice, and
+no longer the largest thing on this list.
+
 ## Open after the 2026-09-17 upstream catch-up (v3 artifacts, `src/models/qwen3_5`)
 
 The fork now sits on Neroued/ninfer `f76e19c0`. Everything below this section predates that merge;
@@ -3150,6 +3242,21 @@ ceiling, and neither has had any optimisation attempted.
       (~360 us on gate_up) and it is ~1.7x, bought with a coarser weight quantisation (one scale per
       row rather than per 64), per-token activation scales, and ~320 MB of scratch. Strictly worse
       than the layout change, which keeps 4-bit weights.
+
+      **RESOLVED, by leaving the kernel alone and changing who runs the GEMM.** The hand-written
+      line has a ceiling: with streaming perfectly hidden its compute path still costs 2,092 us, so
+      the best case is ~1.36x the shipped kernel -- parity with the stacks this entry is chasing,
+      not a lead. Handing the GEMM to cuBLAS instead is worth 1.7x end to end. Prefill went
+      1,634 -> 2,989 tok/s at pp4096 on one card in one session (+83%), for +0.156% perplexity,
+      behind `--prefill-cublas`. See `docs/performance.md` and
+      `src/ops/linear_swiglu/q4cublas/w4_cublas_prefill.h`, which carries the chunk trade-off table
+      and the two rejected experiments (overlapping the dequantise with the GEMM; inverting the
+      prefill loops).
+
+      The kernel work below stands as the record of why that was the right move, and the layout
+      work it produced is committed but parked: the panel-major layout is worth 12.5%, but only at
+      a 128x128/256-thread tile the engine does not use, and it trades the decode path for the
+      prefill path.
 
       **Marlin's design was then built and measured, and it does not pay.**
       `tools/w4a8_marlin_probe.cu` implements all of it at once over a permuted weight layout: the

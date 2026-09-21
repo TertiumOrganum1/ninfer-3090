@@ -117,7 +117,12 @@ int main() {
     const Shape shapes[] = {
         {"mlp/gate_up 34816x5120", 34816, 5120, 3824.6},
     };
-    const int t = 1024;
+#ifndef T_TOKENS
+#define T_TOKENS 1024
+#endif
+    // The dequantise pass is weight-sized and the GEMM is token-sized, so the overhead this route
+    // carries falls as the prefill chunk grows. That ratio is the whole question, hence the sweep.
+    const int t = T_TOKENS;
 
     cublasHandle_t handle;
     CHECK_BLAS(cublasCreate(&handle));

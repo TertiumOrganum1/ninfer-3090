@@ -63,6 +63,8 @@ struct Options {
     bool gdn_state_fp16                 = false;
     bool mlp_a8_decode                  = false;
     bool prefill_a8                     = true;
+    bool prefill_cublas                 = false;
+    bool prefill_cublas_projections     = true;
     ninfer::product::LogLevel log_level = ninfer::product::LogLevel::Info;
 };
 
@@ -77,6 +79,10 @@ std::string usage_text() {
            "        only, and scoring runs the prefill phase)\n"
            "       (--no-prefill-a8 is the opposite: scoring runs the prefill phase, so this is\n"
            "        how the integer prefill routes' perplexity cost is measured)\n"
+           "       [--prefill-cublas [--no-prefill-cublas-projections]]\n"
+           "       (--prefill-cublas scores through the cuBLAS prefill route, which is how its\n"
+           "        perplexity cost is measured; the projections flag keeps the attention and GDN\n"
+           "        input projections off it)\n"
            "       [--log-level trace|debug|info|warning|error|critical|off]\n";
 }
 
@@ -156,6 +162,10 @@ Options parse_options(int argc, char** argv) {
             out.mlp_a8_decode = true;
         } else if (option == "--no-prefill-a8") {
             out.prefill_a8 = false;
+        } else if (option == "--prefill-cublas") {
+            out.prefill_cublas = true;
+        } else if (option == "--no-prefill-cublas-projections") {
+            out.prefill_cublas_projections = false;
         } else if (option == "--log-level") {
             out.log_level = ninfer::product::parse_log_level(value("--log-level"));
         } else {
@@ -273,6 +283,8 @@ int run(const Options& options, const std::shared_ptr<spdlog::logger>& logger,
     engine_options.gdn_state_fp16   = options.gdn_state_fp16;
     engine_options.mlp_a8_decode    = options.mlp_a8_decode;
     engine_options.prefill_a8       = options.prefill_a8;
+    engine_options.prefill_cublas   = options.prefill_cublas;
+    engine_options.prefill_cublas_projections = options.prefill_cublas_projections;
     engine_options.startup_observer = startup_log.observer();
     ninfer::Engine engine(std::move(engine_options));
     const ninfer::LoadSummary load = engine.load_summary();

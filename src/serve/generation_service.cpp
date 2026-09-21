@@ -247,6 +247,42 @@ private:
 
 } // namespace
 
+ninfer::EngineOptions make_engine_options(const ServeOptions& options) {
+    ninfer::EngineOptions engine_options;
+    engine_options.artifact_path            = options.artifact_path;
+    engine_options.chat_template_path       = options.chat_template_path;
+    engine_options.device                   = options.device;
+    engine_options.max_context              = options.max_context;
+    engine_options.kv_capacity              = options.kv_capacity;
+    engine_options.max_concurrency          = options.max_concurrency;
+    engine_options.max_pending_requests     = options.max_pending_requests;
+    engine_options.pending_timeout_ms       = options.pending_timeout_ms;
+    engine_options.prefill_chunk            = options.prefill_chunk;
+    engine_options.kv_cache                 = options.kv_cache;
+    engine_options.enable_vision            = options.enable_vision;
+    engine_options.vision_residency         = options.vision_residency;
+    engine_options.vision_max_merged_tokens = options.vision_max_merged_tokens;
+    engine_options.use_cuda_graph           = options.use_cuda_graph;
+    engine_options.lm_head_q4               = options.lm_head_q4;
+    engine_options.lm_head_q6               = options.lm_head_q6;
+    engine_options.embedding_q4             = options.embedding_q4;
+    engine_options.embedding_q6             = options.embedding_q6;
+    engine_options.mtp_experts_q4           = options.mtp_experts_q4;
+    engine_options.gdn_state_fp16           = options.gdn_state_fp16;
+    engine_options.mlp_a8_decode            = options.mlp_a8_decode;
+    engine_options.prefill_a8               = options.prefill_a8;
+    engine_options.prefill_cublas           = options.prefill_cublas;
+    engine_options.prefill_cublas_projections = options.prefill_cublas_projections;
+    engine_options.speculative              = options.speculative;
+    engine_options.context_cache            = options.context_cache;
+    engine_options.devices                  = options.devices;
+    engine_options.context_cost.preset_path = options.context_cost_presets;
+    engine_options.media_cache_bytes        = options.media_cache_bytes;
+    engine_options.media_live_bytes         = options.media_live_bytes;
+    engine_options.media_preprocess_threads = options.media_preprocess_threads;
+    return engine_options;
+}
+
 GenerationService::GenerationService(ServeOptions options, StartupObserver startup_observer)
     : options_(std::move(options)) {
     // Inline ECC on GDDR6X GeForce cards reserves ~6.25% of VRAM for checksums and taxes
@@ -268,37 +304,8 @@ GenerationService::GenerationService(ServeOptions options, StartupObserver start
                                   "choice, disable it with `nvidia-smi -e 0` and reboot.");
         }
     }
-    ninfer::EngineOptions engine_options;
-    engine_options.artifact_path            = options_.artifact_path;
-    engine_options.chat_template_path       = options_.chat_template_path;
-    engine_options.device                   = options_.device;
-    engine_options.max_context              = options_.max_context;
-    engine_options.kv_capacity              = options_.kv_capacity;
-    engine_options.max_concurrency          = options_.max_concurrency;
-    engine_options.max_pending_requests     = options_.max_pending_requests;
-    engine_options.pending_timeout_ms       = options_.pending_timeout_ms;
-    engine_options.prefill_chunk            = options_.prefill_chunk;
-    engine_options.kv_cache                 = options_.kv_cache;
-    engine_options.enable_vision            = options_.enable_vision;
-    engine_options.vision_residency         = options_.vision_residency;
-    engine_options.vision_max_merged_tokens = options_.vision_max_merged_tokens;
-    engine_options.use_cuda_graph           = options_.use_cuda_graph;
-    engine_options.lm_head_q4               = options_.lm_head_q4;
-    engine_options.lm_head_q6               = options_.lm_head_q6;
-    engine_options.embedding_q4             = options_.embedding_q4;
-    engine_options.embedding_q6             = options_.embedding_q6;
-    engine_options.mtp_experts_q4           = options_.mtp_experts_q4;
-    engine_options.gdn_state_fp16           = options_.gdn_state_fp16;
-    engine_options.mlp_a8_decode            = options_.mlp_a8_decode;
-    engine_options.prefill_a8               = options_.prefill_a8;
-    engine_options.speculative              = options_.speculative;
-    engine_options.context_cache            = options_.context_cache;
-    engine_options.devices                  = options_.devices;
-    engine_options.context_cost.preset_path = options_.context_cost_presets;
-    engine_options.media_cache_bytes        = options_.media_cache_bytes;
-    engine_options.media_live_bytes         = options_.media_live_bytes;
-    engine_options.media_preprocess_threads = options_.media_preprocess_threads;
-    engine_options.startup_observer         = std::move(startup_observer);
+    ninfer::EngineOptions engine_options = make_engine_options(options_);
+    engine_options.startup_observer      = std::move(startup_observer);
     engine_           = std::make_unique<ninfer::Engine>(std::move(engine_options));
     request_capacity_ = std::make_shared<RequestCapacity>(
         static_cast<std::size_t>(options_.max_concurrency) + options_.max_pending_requests);

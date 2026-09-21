@@ -92,6 +92,53 @@ added to the findings in this section: only single-prompt smoke numbers exist on
 far, and pasting another architecture's corpus results beside them would read as agreement that
 has not been measured. DFlash2 rows will be added here once measured on a 3090.
 
+### Handing prefill GEMMs to cuBLAS (`--prefill-cublas`, opt-in)
+
+**Result.** Prompt processing is 43-83% faster again, for +0.156% perplexity. The weights are
+materialised as int8 with one scale per row and the GEMM is handed to cuBLAS, which runs this card's
+shapes about twice as fast as this fork's own integer mainloop can. Measured on one RTX 3090,
+Qwen3.8-27B groupwise-int, `--kv-dtype int8`, both arms on the same build and card in one session:
+
+| prefill tok/s | 1k | 4k | 16k | 51k |
+|---|---:|---:|---:|---:|
+| shipped integer-activation routes | 1,666.6 | 1,634.4 | 1,503.9 | 1,240.8 |
+| **`--prefill-cublas --prefill-chunk 4096`** | **2,379.8** | **2,988.7** | **2,609.0** | **1,904.1** |
+| change | +42.8% | +82.9% | +73.5% | +53.5% |
+
+Decode is untouched (45.1 against 45.7 tok/s, the route is gated to wide token counts), and the
+workspace grows from 155.6 MiB to 661.2 MiB.
+
+**It is off by default because it is a quality trade, not a free win.** cuBLAS reduces over the
+whole of K, so it cannot see a scale per 64 columns: the weight carries one scale per row and the
+activations one per token. Perplexity on `ninfer-ppl-1m-v1` (quick preset, kv int8) against 4.343155
+for the integer route:
+
+| | perplexity | change |
+|---|---:|---:|
+| MLP and out_proj on the route | 4.346284 | +0.072% |
+| plus the attention and GDN input projections | 4.349944 | +0.156% |
+
+The second step is `--no-prefill-cublas-projections` to decline. For scale, this fork has accepted a
+trade at +0.082% and rejected one at +0.69%.
+
+**Two things had to be true for the quality to land there.** The weight side is cheap because int8
+buys four more bits per code while only losing per-group scale granularity: measured on the real
+artifact it costs 9.7e-3 to 1.1e-2 relative L2 (the median per projection kind; the worst single
+tensor is 1.5e-2), against the 9e-3 to 2.0e-2 this fork already accepts from per-group activation
+quantisation (`tools/w4_row_scale_error.cpp`, using the route's own row scale with channel
+equalisation off). An earlier figure of 8e-3 to 1.0e-2 came from a clipping search the route cannot
+perform, and was the best case rather than the route. The activation side was
+*not* cheap until the channels were equalised -- activation outliers concentrate in a few input
+channels, so a token's absmax is set by those and everything else is quantised against far too
+large a step. Folding a per-channel scale out of the activations and into the weights is exact
+(`X[j,t]/s[j]` with `W[i,j]*s[j]` leaves the product unchanged) and took the cost from +0.474% to
++0.072%.
+
+**Chunk size is the knob.** The dequantise pass is weight-sized and the GEMM token-sized, so the
+route wants a large `--prefill-chunk` and the two settings belong together. The trade-off table,
+including what each chunk costs a concurrent decode lane, is in
+`src/ops/linear_swiglu/q4cublas/w4_cublas_prefill.h`.
+
 ### Integer activations for every registered prefill projection
 
 **Result.** Prompt processing is 22-29% faster than the previous state at every context length:
@@ -318,6 +365,84 @@ python tools/bench/run_chat_decode.py --model models/qwen3_8_27b.ninfer \
 with the eight prompts of syv-ai/qwen38-27b-rtx3090's `bench/prompts_real.jsonl` (that file is
 theirs and is not vendored here). `--concurrency 8` gives the C8 row. Both report decode as
 C × 1000 / mean TPOT from the server's own request log.
+
+### Recommended configurations (RTX 3090, Qwen3.8-27B)
+
+Every flag below is measured elsewhere in this file or in
+[quality-trade-experiments.md](maintainer/quality-trade-experiments.md). Nothing here is a guess.
+
+**Fastest at one stream, when context beyond ~130K is not needed:**
+
+```
+--spec dflash2 --draft-tokens 7 --lm-head-draft --prefill-cublas --prefill-chunk 4096 --kv-dtype rk8v4 --embedding-q4 --gdn-state-fp16
+```
+
+Prefill about 1.7x and decode about 1.39x against the previous defaults. Costs +0.156% perplexity
+from the cuBLAS route, +0.083% from rk8v4, and nothing measurable from the other two.
+
+**Longest context, still fast:**
+
+```
+--spec mtp --draft-tokens 3 --lm-head-draft --prefill-cublas --prefill-chunk 2048 --kv-dtype rk8v4 --embedding-q4 --lm-head-q6 --gdn-state-fp16
+```
+
+**200,000 tokens of context, verified by loading it.** MTP rather than DFlash2 because DFlash2's
+draft weights and its refusal of `--lm-head-q6` cost about 65K tokens between them -- the same
+configuration on DFlash2 loads at 130K and fails at 150K (needing 4.79 GB against 4.46 free) and at
+200K (6.09 GB against 4.45). Chunk 2048 rather than 4096 because the larger chunk costs ~300 MiB of
+workspace for its last 4% of prefill, and at this context that is the binding constraint.
+
+**Why these flags and not others:**
+
+| flag | what it buys | what it costs |
+|---|---|---|
+| `--kv-dtype rk8v4` | 23% less KV than int8 — 26,112 B/token against 33,792 | +0.083% perplexity, ~1% decode |
+| `--embedding-q4` | +24.3K tokens of context | nothing measurable (−0.062%, inside noise) |
+| `--lm-head-q6` | +12.9K tokens of context | +0.012%; **incompatible with DFlash/DFlash2** |
+| `--gdn-state-fp16` | halves the host state image, modest C8 gain | nothing measurable |
+| `--prefill-cublas` | prefill 1.63x–1.83x | +0.156% perplexity, ~500 MiB workspace |
+| `--lm-head-q4` | +24.3K tokens | **+0.69%** — larger than every KV format; not recommended |
+| `--kv-dtype nvfp4` | 45% less KV than int8 | +0.36% perplexity, 12% slower decode |
+
+**With vision**, add `--vision --vision-residency overlay`: the overlay residency keeps the tower in
+host memory and borrows device memory per image, which is what preserves the context budget above.
+Note that `--lm-head-q4` was silently skipped under overlay vision before 2026-09-14; `--lm-head-q6`
+and `--embedding-q4` transcode in the materializer and are captured from the final bytes, so they
+compose with it correctly.
+
+### Choosing a speculative backend by concurrency (RTX 3090, Qwen3.8-27B)
+
+**DFlash2 at K=7 is faster than MTP3 wherever it fits, and it stops fitting at C8.** Aggregate
+decode tok/s through the serving route, thinking off, greedy, decode time taken from the server's
+request log rather than a wall clock:
+
+| C | MTP3 | DFlash2 K=7 | change | tokens/round, MTP3 / DFlash2 |
+|---:|---:|---:|---:|---|
+| 1 | 135.0 | **187.1** | +38.6% | 3.51 / 5.57 |
+| 2 | 238.2 | **313.5** | +31.6% | 3.51 / 5.82 |
+| 4 | 387.4 | **406.2** | +4.9% | 3.54 / 5.63 |
+| 8 | **522.8** | does not fit | — | 3.53 / — |
+
+The lead shrinks with concurrency because speculation pays by making a multi-column round cost about
+one sweep of the weights, and batching already amortises that sweep across lanes, so the baseline
+catches up. Acceptance itself does not degrade: tokens per round holds flat at every level.
+
+What stops it at C8 is memory. The DFlash2 artifact carries the draft model — 18.3 GiB of weights
+against 16.7 — and the runtime reservation then needs 4.64 GB where 3.78 GB remains. A 4096-token KV
+still needs 4.24 GB; only 2048 fits, which is too little for eight streams to do useful work.
+
+**K is workload-dependent.** Swept on realistic generation, mean of a reasoning, a code and a
+summarisation prompt: K = 3/4/5/6/7/8/9/10/12 gives 128.0/146.0/159.0/169.6/**172.3**/163.7/163.3/
+160.2/159.2 tok/s. The peak is 7, matching the published shape `E = (1 - a^(K+1))/(1 - a)` and the
+5–8 band reported for EAGLE-class drafters. But the mean hides real spread — the reasoning prompt
+keeps improving to K=12 (204.5) while summarisation collapses there (119.6) — so a deployment
+serving one kind of work should sweep its own K. A synthetic corpus is no guide: `bench_corpus.ids`
+picks K=15, which loses on real generation.
+
+**DFlash2 also forfeits `--lm-head-q4/q6`**, which DFlash's candidate top-k cannot read
+(`src/models/qwen3_5/load/storage_trades.cpp`). Between the extra weights and the lost head trade it
+costs about 65K tokens of context on this card -- 130K against 200K, both verified by loading -- so
+the choice between it and MTP3 is a speed/context trade, not a free upgrade.
 
 ### Choosing a KV format (RTX 3090, Qwen3.8-27B)
 
