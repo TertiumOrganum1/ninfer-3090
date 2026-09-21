@@ -5,8 +5,8 @@
 
 # Shell scripts must be LF in the repository and in every checkout, not merely normalised on
 # commit. `core.autocrlf=input` was not enough: every .sh in scripts/ had CRLF committed, and
-# scripts/run-qwen36-35b-a3b-c1-maxctx.sh and scripts/run-qwen38-c1-maxctx.sh -- the two launchers
-# the README recommends as the Linux entry point -- would not parse on Linux at all:
+# the two Linux launchers the README recommends (then run-qwen36-35b-a3b-c1-maxctx.sh and
+# run-qwen38-c1-maxctx.sh, now replaced by scripts/run.sh) would not parse on Linux at all:
 #
 #     syntax error near unexpected token `$'in\r''
 #

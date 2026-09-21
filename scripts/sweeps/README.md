@@ -14,7 +14,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts\sweeps\kv-decode-vs-
 
 With `NINFER_MODEL_DIR` unset, `model-dir.ps1` picks the first directory that actually holds a
 `.ninfer`: the repository's own `models\` first, then `scripts\models\`, which is where
-`scripts\download-qwen*` put artifacts by default. Set the variable to use anything else -- an
+`scripts\download-model.*` put artifacts by default. Set the variable to use anything else -- an
 explicit value is taken verbatim, never probed, so a typo fails on the path you named.
 
 `Get-NInferModelDir` derives those candidates from `model-dir.ps1`'s own location, which is right

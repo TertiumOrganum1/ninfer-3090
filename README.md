@@ -62,11 +62,11 @@ grid) that takes prefix reuse from 8.4% to 98.3% on a multi-preamble workload.
 Download `ninfer-rtx3090-windows-x64-*.zip`, unzip it, and from that folder:
 
 ```powershell
-.\download-qwen36-35b-a3b.bat            # downloads qwen3_6_35b_a3b.ninfer (~21 GB, resumable)
-.\run-qwen36-35b-a3b-c1-maxctx.bat        # serves on 127.0.0.1:8080, 147,456-token context
+.\download-model.bat qwen36-35b-a3b       # downloads qwen3_6_35b_a3b.ninfer (~21 GB, resumable)
+.\run.bat qwen36-35b-a3b                   # serves on 127.0.0.1:8080, 147,456-token context
 ```
 
-`NINFER_HOST`, `NINFER_PORT`, `NINFER_MODEL` and `NINFER_SERVER` override it without editing the
+Double-clicking either file asks which model instead. `NINFER_HOST`, `NINFER_PORT`, `NINFER_MODEL` and `NINFER_SERVER` override it without editing the
 file; `set NINFER_HOST=0.0.0.0` exposes it to the LAN, unauthenticated.
 
 ### Headless Linux — full 256K context, two users, everything on
@@ -75,8 +75,8 @@ Download `ninfer-rtx3090-linux-x64-*.tar.gz`, unpack it, and from that folder:
 
 ```bash
 tar -xzf ninfer-rtx3090-linux-x64-*.tar.gz && cd ninfer-rtx3090-linux-x64-*/
-./download-qwen36-35b-a3b.sh             # downloads qwen3_6_35b_a3b.ninfer (~21 GB, resumable)
-./run-qwen36-35b-a3b-c1-maxctx.sh        # 2 lanes, 262,144 tokens, MTP3 + draft head, vision
+./download-model.sh qwen36-35b-a3b       # downloads qwen3_6_35b_a3b.ninfer (~21 GB, resumable)
+./run.sh qwen36-35b-a3b                  # 2 lanes, 262,144 tokens, MTP3 + draft head, vision
 ```
 
 That is the default on Linux because a headless 3090 fits it: two lanes at the native 262,144-token
@@ -128,29 +128,46 @@ The other common choice, and a dense model rather than an MoE, so it is slower p
 predictable. Same shape of command:
 
 ```powershell
-.\download-qwen38-27b.bat                 # downloads qwen3_8_27b.ninfer (~17 GB, resumable)
-.\run-qwen38-c1-maxctx.bat                # one user, 163,840 tokens, rk8v4, MTP3 + draft, vision
+.\download-model.bat qwen38-27b          # downloads qwen3_8_27b.ninfer (~19 GB, resumable)
+.\run.bat qwen38-27b                      # one user, 131,072 tokens, DFlash2, cuBLAS prefill, rk8v4, vision
 ```
 
 ```bash
-./download-qwen38-27b.sh
-./run-qwen38-c1-maxctx.sh                 # two users, 212,992 tokens each, same knobs
+./download-model.sh qwen38-27b
+./run.sh qwen38-27b                       # one user, 131,072 tokens, same flags
 ```
 
-The plain `run-qwen38-c1` and `run-qwen38-c8` launchers are still there, with the same profile
-defaults as before — `c1` serves 65,536 tokens of INT8 and leaves 2.85 GiB of the card unused — so
-prefer the `-maxctx` pair unless you specifically want INT8's quality default or `c8`'s eight-lane
-throughput profile. Like every launcher here, their host and port now default to `127.0.0.1:8080`
-and accept the same `NINFER_HOST`/`NINFER_PORT` overrides.
+The launcher's default is the fast profile: `--spec dflash2 --draft-tokens 7 --lm-head-draft
+--prefill-cublas --prefill-chunk 4096 --kv-dtype rk8v4 --embedding-q4 --gdn-state-fp16 --vision
+--vision-residency overlay`, about 1.7x the previous prefill and 1.39x the decode. It tops out near
+130K of context, because DFlash2's draft weights and its refusal of `--lm-head-q6` cost about 65K
+tokens. For the longest context, still fast, run it with `NINFER_SPEC=mtp` (Windows:
+`set NINFER_SPEC=mtp && run.bat qwen38-27b`; Linux: `NINFER_SPEC=mtp ./run.sh qwen38-27b`), which swaps in `--spec mtp --draft-tokens 3
+--lm-head-draft --prefill-cublas --prefill-chunk 2048 --kv-dtype rk8v4 --embedding-q4 --lm-head-q6
+--gdn-state-fp16 --vision --vision-residency overlay` and the larger context defaults below. Both
+sets are measured in [performance](docs/performance.md#recommended-configurations-rtx-3090-qwen38-27b).
+
+The older reference profiles are `run.sh qwen38-27b int8` (one user at 65,536 tokens of INT8, which
+leaves 2.85 GiB of the card unused) and `run.sh qwen38-27b c8` (eight lanes at 8K). Prefer the
+default `tuned` profile unless you specifically want INT8's quality default or `c8`'s aggregate
+throughput. Every profile's host and port default to `127.0.0.1:8080` and accept the same
+`NINFER_HOST`/`NINFER_PORT` overrides. The measurement history behind each default is in
+[launcher profiles](docs/maintainer/launcher-profiles.md).
 
 | Profile | lanes | context | KV | vision | runtime | free (desktop) |
 |---|---|---|---|---|---|---|
-| `run-qwen38-c1` (unchanged) | 1 | 65,536 | int8 | off | 2.73 GiB | 2.85 GiB |
-| **`run-qwen38-c1-maxctx`, Windows** | 1 | 163,840 | rk8v4 | overlay | 4.65 GiB | 1.63 GiB |
-| **`run-qwen38-c1-maxctx`, Linux** | 2 | 212,992 | rk8v4 | overlay | 6.15 GiB (est.) | headless only |
-| `NINFER_CONTEXT=196608` | 1 | 196,608 | rk8v4 | overlay | 5.49 GiB | 798 MiB |
+| `int8` profile | 1 | 65,536 | int8 | off | 2.73 GiB | 2.85 GiB |
+| **`tuned`** (default, DFlash2) | 1 | 131,072 | rk8v4 | overlay | not measured here | loads at 130K on a desktop 3090; 150K fails |
+| `NINFER_SPEC=mtp`, Windows | 1 | 163,840 | rk8v4 | overlay | 4.65 GiB | 1.63 GiB |
+| `NINFER_SPEC=mtp`, Linux | 2 | 212,992 | rk8v4 | overlay | 6.15 GiB (est.) | headless only |
+| `NINFER_SPEC=mtp NINFER_CONTEXT=196608` | 1 | 196,608 | rk8v4 | overlay | 5.49 GiB | 798 MiB |
 
-Both `-maxctx` rows run with `--embedding-q4 --gdn-state-fp16`, which the launchers pass: the token
+The three `mtp` rows were measured before the cuBLAS prefill route, whose workspace (543 MiB at
+chunk 2048) comes off the free figure; the `mtp` profile's `--lm-head-q6` returns 341 MiB. The
+DFlash2 profile takes one lane because its advantage is largest at one stream (+38.6% decode at C1,
++31.6% at C2) and the draft weights use the headroom a second lane would need.
+
+All `-maxctx` rows run with `--embedding-q4 --gdn-state-fp16`, which the launchers pass: the token
 embedding is stored as Q4 (-644 MiB of weights) and the GDN state as FP16 (-72 MiB per device state
 slot), both measured free on quality. The Windows figures were measured on the launcher's exact
 profile; before those flags the same card started 131,072 with 1.59 GiB free and 163,840 with
@@ -178,8 +195,8 @@ That is the model, not the tuning. The 27B spends 16 full-attention layers × 4 
 head_dim per token against the 35B-A3B's 10 × 2 × 256 — **3.2× the KV per token**, 27.07 KiB
 against roughly 7.8. The 35B-A3B reaches the native maximum because its KV is cheap.
 
-So the Linux launcher defaults to **212,992** — 6.15 GiB predicted at two lanes with the flags,
-leaving about +1.54 GiB (it was 6.43 GiB and +0.63 GiB before them). `NINFER_CONTEXT=196608` is the
+So the Linux launcher's `mtp` profile defaults to **212,992** — 6.15 GiB predicted at two lanes with
+the flags, leaving about +1.54 GiB (it was 6.43 GiB and +0.63 GiB before them). `NINFER_CONTEXT=196608` is the
 more cautious rung at about +1.96 GiB, and `NINFER_CONTEXT=262144` the aggressive one at about
 +0.27 GiB. All three are extrapolated rather than measured, since a desktop machine cannot start
 them, so treat the first headless start as the confirmation and drop a rung if it refuses.
@@ -208,10 +225,10 @@ Both platforms ship a prebuilt archive; building from source is optional and cov
 1. Download and unpack the latest
    [Linux release](https://github.com/ashalliants/ninfer-3090/releases/latest)
    (`ninfer-rtx3090-linux-x64-*.tar.gz`).
-2. Run `./download-qwen36-35b-a3b.sh` or `./download-qwen38-27b.sh` to fetch a model. Both pin a
-   HuggingFace revision, stage under a revision-scoped name so a resume can only ever continue the
+2. Run `./download-model.sh qwen36-35b-a3b` or `./download-model.sh qwen38-27b` to fetch a model
+   (`qwen36-27b` is the third). Each pins a HuggingFace revision, stage under a revision-scoped name so a resume can only ever continue the
    same artifact, and verify size and SHA-256 before promoting it. Interrupted downloads resume.
-3. Run a launcher — `./run-qwen36-35b-a3b-c1-maxctx.sh` is the recommended one.
+3. Run `./run.sh qwen36-35b-a3b` (recommended) or `./run.sh qwen38-27b` for the dense 27B.
 
 If you would rather build, the Dockerfile is the shortest path on Bazzite and other distributions:
 
@@ -226,20 +243,21 @@ The Linux guide covers the GPU check, the native Ubuntu build, model mounts and 
 1. Download and unzip the latest
    [Windows release](https://github.com/ashalliants/ninfer-3090/releases/latest)
    (`ninfer-rtx3090-windows-x64-*.zip`).
-2. Double-click `download-qwen36-35b-a3b.bat` or `download-qwen38-27b.bat` to download a model.
-   Both pin a HuggingFace revision, stage under a revision-scoped name so a resume can only ever
-   continue the same artifact, and verify size and SHA-256 before promoting it. Interrupted
-   downloads resume.
-3. Double-click one launcher:
+2. Double-click `download-model.bat` and pick a model (or run `download-model.bat qwen36-35b-a3b`,
+   `qwen38-27b` or `qwen36-27b` from a terminal). Each pins a HuggingFace revision, stages under a
+   revision-scoped name so a resume can only ever continue the same artifact, and verifies size and
+   SHA-256 before promoting it. Interrupted downloads resume.
+3. Double-click `run.bat` and pick a model, or run one of:
 
-| Launcher | Best for |
+| Command | Best for |
 |---|---|
-| `run-qwen36-35b-a3b-c1-maxctx.bat` | **Recommended.** Qwen3.6-35B-A3B, one user, 147K context, rk8v4, vision, tuned cache |
-| `run-qwen38-c1-maxctx.bat` | **Recommended for 27B.** Qwen3.8-27B, one user, 164K context, rk8v4, tuned cache |
-| `run-qwen38-c1.bat` | Qwen3.8-27B, one interactive user, INT8 quality default, 64K context |
-| `run-qwen38-c8.bat` | Qwen3.8-27B, multiple users or agents, highest aggregate throughput, 8K context |
-| `run-qwen38-vision.bat` | Qwen3.8 image understanding, one user, 32K context, MTP3 |
-| `run-qwen36-35b-vision.bat` | Image understanding with Qwen3.6-35B-A3B, one user, 32K context |
+| `run.bat qwen36-35b-a3b` | **Recommended.** Qwen3.6-35B-A3B, one user, 147K context, rk8v4, vision, tuned cache |
+| `run.bat qwen38-27b` | **Recommended for 27B.** Qwen3.8-27B, one user, 131K context, DFlash2, cuBLAS prefill, rk8v4, tuned cache; `NINFER_SPEC=mtp` for 164K and longer |
+| `run.bat qwen38-27b int8` | Qwen3.8-27B, one interactive user, INT8 quality default, 64K context |
+| `run.bat qwen38-27b c8` | Qwen3.8-27B, multiple users or agents, highest aggregate throughput, 8K context |
+
+The default profiles serve images too (vision in overlay residency), so there is no separate vision
+launcher.
 
 The API is then available at `http://127.0.0.1:8080/v1`. The Windows archive includes the required
 applications and DLLs.
@@ -256,11 +274,11 @@ defaults on a typical machine: MSVC 14.4x from **VS 2022 BuildTools** (CUDA 12.8
 ```powershell
 .\scripts\build.ps1                  # configure + build into build-ninja
 .\scripts\build.ps1 -Test            # ... and run the test suite
-.\scripts\build.ps1 -Package v080    # ... and build the release archive
+.\scripts\build.ps1 -Package         # ... and build the release archive
 ```
 
 ```bash
-./scripts/build.sh --test --package v080
+./scripts/build.sh --test --package
 ```
 
 ## Qwen3.8-27B support and RTX 3090 results
@@ -496,7 +514,8 @@ tokens at the 1 GiB headroom boundary, when decode throughput under speculation 
 ### Qwen3.8 vision
 
 The same Qwen3.8 artifact supports images. Start the server with `--vision`, MTP3, INT8 KV, and a
-32K maximum context. The Windows archive includes `run-qwen38-vision.bat` for this profile.
+32K maximum context. `run.bat qwen38-27b` already serves images (vision in overlay residency);
+this plain profile is `NINFER_SPEC=mtp`, `NINFER_KV_DTYPE=int8` and `NINFER_CONTEXT=32768`.
 
 A 1,920×1,080 image expanded to 2,074 prompt tokens and was read correctly. Measured TTFT was
 3.29 seconds, decode reached 98.1 tok/s, MTP acceptance was 96.7%, and startup retained 2.16 GiB
@@ -527,7 +546,7 @@ reducing measured prefill from 371 ms to 10 ms.
 
 The compact 35B artifact includes its vision encoder and accepts images through the same OpenAI-
 compatible API. Start the server with `--vision` and leave speculative decoding disabled. The
-Windows archive includes `run-qwen36-35b-vision.bat` for this profile.
+`run.bat qwen36-35b-a3b` already serves images; for this profile set `NINFER_SPEC=none`.
 
 The safe RTX 3090 profile is **one request, 32K maximum context, INT8 KV, vision enabled, and MTP
 disabled**. A current v0.6 test processed three 1,920×1,080 images correctly. Each image expanded
@@ -632,7 +651,7 @@ crossings. 0 (offload everything) is the default and maximises capacity.
 
 | Model | Artifact | Size | Notes |
 |---|---|---:|---|
-| Qwen3.6-35B-A3B | [pinned v3 artifact](https://huggingface.co/neroued/Qwen3.6-35B-A3B-NInfer/tree/ee4495803bc4f8015b8a7e22d4cf9b67de8e27c6) | 21.23 GiB | **Recommended; fetched by `download-qwen36-35b-a3b.{bat,sh}`. Carries the DFlash bundle for `--spec dflash`** |
+| Qwen3.6-35B-A3B | [pinned v3 artifact](https://huggingface.co/neroued/Qwen3.6-35B-A3B-NInfer/tree/ee4495803bc4f8015b8a7e22d4cf9b67de8e27c6) | 21.23 GiB | **Recommended; fetched by `download-model qwen36-35b-a3b`. Carries the DFlash bundle for `--spec dflash`** |
 | Qwen3.6-27B | [pinned v3 artifact](https://huggingface.co/neroued/Qwen3.6-27B-NInfer/tree/3e3d9a3951c452c1ca80bd7a2860c7f3bfc5a829) | 16.29 GiB | Supported with more runtime headroom |
 | **Qwen3.8-27B** | [pinned v3 artifact](https://huggingface.co/neroued/Qwen3.8-27B-NInfer/tree/1cbd84e7221e51186bd7f093a149912d2489625b) | 19.03 GiB | **Validated at C1, C2, C4 and C8/MTP3 with ReplaySSM. Carries the DFlash2 bundle for `--spec dflash2`** |
 
@@ -660,7 +679,7 @@ RTX 3090 or RTX 3090 Ti and a recent NVIDIA driver.
 
 Download the
 [pinned Qwen3.8 v3 artifact](https://huggingface.co/neroued/Qwen3.8-27B-NInfer/tree/1cbd84e7221e51186bd7f093a149912d2489625b)
-as `models/qwen3_8_27b.ninfer`, or run `download-qwen38-27b.sh`/`.bat`, which verifies size and
+as `models/qwen3_8_27b.ninfer`, or run `download-model.sh qwen38-27b` (`.bat` on Windows), which verifies size and
 SHA-256 before putting the file in place. The 27B numbers in this repository were measured against
 the v2 revision `18dfc887`, whose weights this v3 file carries unchanged.
 
@@ -673,7 +692,7 @@ figures use. Prefer a pinned downloader unless you specifically want a newer ups
 
 For Qwen3.6-35B-A3B, download the
 [pinned v3 artifact](https://huggingface.co/neroued/Qwen3.6-35B-A3B-NInfer/tree/ee4495803bc4f8015b8a7e22d4cf9b67de8e27c6)
-for DFlash support, or run `download-qwen36-35b-a3b.bat`/`.sh` instead, which verifies size and
+for DFlash support, or run `download-model.sh qwen36-35b-a3b` (`.bat` on Windows) instead, which verifies size and
 SHA-256 before putting the file in place. A load error about the container version means either an
 older executable reading a v3 file, or this executable reading a v1/v2 file that needs
 `tools/upgrade_ninfer_v2_to_v3.py`.

@@ -252,7 +252,7 @@ it can change is acceptance, and -- as with any change in acceptance pattern -- 
 run, so greedy text can differ at the reduction-order level this file's speculative-decoding entry
 already describes.
 
-**Measured 2026-09-14**, `run-qwen36-35b-a3b-c1-maxctx`'s exact server profile (C1, rk8v4, MTP3 +
+**Measured 2026-09-14**, `run.bat qwen36-35b-a3b`'s exact server profile (C1, rk8v4, MTP3 +
 draft head, overlay vision, 32 host state slots), arms alternated at each rung, desktop holding a
 steady ~505 MiB:
 

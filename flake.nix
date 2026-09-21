@@ -154,7 +154,7 @@
         '';
 
       # Qwen3.8-27B (official v3 artifact, with the DFlash2 bundle), pinned to match
-      # scripts/download-qwen38-27b.{sh,bat}. The size and sha256 are what the revision's
+      # `scripts/download-model.{sh,bat} qwen38-27b`. The size and sha256 are what the revision's
       # artifact-manifest.json states. Published 27B measurements in this repository were taken
       # against the v2 pin 18dfc887, whose weight bytes the v3 container preserves; a v2 file can
       # be upgraded locally with tools/upgrade_ninfer_v2_to_v3.py instead of re-downloading.
@@ -168,7 +168,7 @@
         description = "Qwen3.8-27B NInfer model";
       };
 
-      # Qwen3.6-27B (groupwise artifact), pinned to match scripts/download-qwen36-27b.sh.
+      # Qwen3.6-27B (groupwise artifact), pinned to match `scripts/download-model.sh qwen36-27b`.
       download-qwen36-27b = mkDownload {
         name = "download-qwen36-27b";
         filename = "qwen3_6_27b.ninfer";
@@ -180,7 +180,7 @@
       };
 
       # Qwen3.6-35B-A3B (official v3 artifact, with the DFlash bundle), pinned to match
-      # scripts/download-qwen36-35b-a3b.sh. The DFlash bundle costs nothing in VRAM unless
+      # `scripts/download-model.sh qwen36-35b-a3b`. The DFlash bundle costs nothing in VRAM unless
       # --spec dflash is selected, so the published RTX 3090 concurrency measurements -- taken
       # against the v2 pins c8b8c1c0/560f227e, whose weight bytes v3 preserves -- still apply.
       # See README.md and docs/rtx-3090-windows.md.
@@ -272,7 +272,7 @@
           echo "NInfer-3090 development shell (CUDA 12.9, sm_86)"
           echo "  nix build                                -> build ninfer + ninfer-serve"
           echo "  nix run .#serve -- <serve args>          -> run the HTTP server"
-          echo "  nix run .#download-qwen38-27b            -> Qwen3.8-27B artifact (17 GB)"
+          echo "  nix run .#download-qwen38-27b            -> Qwen3.8-27B artifact (19 GB)"
           echo "  nix run .#download-qwen36-27b            -> Qwen3.6-27B artifact"
           echo "  nix run .#download-qwen36-35b           -> Qwen3.6-35B-A3B pinned, with DFlash (21 GB)"
           echo "  nix run .#download-qwen36-35b-v2       -> Qwen3.6-35B-A3B upstream main, unpinned (21 GB)"

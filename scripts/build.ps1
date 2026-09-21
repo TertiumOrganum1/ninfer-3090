@@ -18,14 +18,14 @@
 #
 #   .\scripts\build.ps1                  configure + build into build-ninja
 #   .\scripts\build.ps1 -Test            ... then run the test suite
-#   .\scripts\build.ps1 -Package v080    ... then build the release archive
+#   .\scripts\build.ps1 -Package         ... then build the release archive for VERSION
 #   .\scripts\build.ps1 -Benchmarks      ... include bench\ (implied by -Package)
 #   .\scripts\build.ps1 -Clean           delete the build directory first
 #   .\scripts\build.ps1 -Target ninfer-serve
 [CmdletBinding()]
 param(
     [switch]$Test,
-    [string]$Package,
+    [switch]$Package,
     [switch]$Clean,
     [switch]$Benchmarks,
     [string]$Target,
@@ -38,12 +38,12 @@ $ErrorActionPreference = 'Stop'
 $RepoRoot = Split-Path -Parent $PSScriptRoot
 if (-not $BuildDir) { $BuildDir = Join-Path $RepoRoot 'build-ninja' }
 
-# Every packaging script ships bench\ninfer_bench.exe alongside the CLI and the server, but
+# The packager ships bench\ninfer_bench.exe alongside the CLI and the server, but
 # benchmarks are an opt-in subdirectory (NINFER_BUILD_BENCHMARKS defaults to OFF). Configuring
 # without them and then packaging fails late, after the whole tree has been built, with
 # "Missing release product: ...\bench\ninfer_bench.exe" - so make -Package imply the option rather
 # than leaving the two settings to be kept consistent by hand.
-$BuildBenchmarks = $Benchmarks -or [bool]$Package
+$BuildBenchmarks = $Benchmarks -or $Package
 
 # --- locate the toolchain ---------------------------------------------------------------------
 
@@ -117,10 +117,9 @@ try {
     }
 
     if ($Package) {
-        $packager = Join-Path $PSScriptRoot "package-release-$Package.ps1"
-        if (-not (Test-Path -LiteralPath $packager)) { throw "No packaging script: $packager" }
-        # The packagers default to build-ninja\; point them at the tree we actually built, so
-        # -BuildDir and -Package agree. build.sh already does this for the Linux packagers.
+        $packager = Join-Path $PSScriptRoot 'package-release.ps1'
+        # The packager defaults to build-ninja\; point it at the tree we actually built, so
+        # -BuildDir and -Package agree. build.sh already does this for the Linux packager.
         $PreviousBuildRoot = $env:NINFER_BUILD_ROOT
         $env:NINFER_BUILD_ROOT = $BuildDir
         try {

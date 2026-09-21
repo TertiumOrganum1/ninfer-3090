@@ -1,16 +1,16 @@
 # RTX 3090 release bundles
 
-For v0.4.0, run the Windows-only packaging script from the repository root after the verified
-native build exists:
+Run the Windows packaging script from the repository root after the verified native build exists.
+It reads the release from `VERSION` and needs the matching `RELEASE_NOTES_<version>.md`:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File scripts\package-release-v040.ps1
+powershell -ExecutionPolicy Bypass -File scripts\package-release.ps1
 ```
 
 It creates a versioned directory and archive under `dist/`:
 
 - `ninfer-rtx3090-windows-x64-*`: native Windows CLI, server, benchmark, and vcpkg DLLs;
-- `SHA256SUMS-v0.4.0.txt`: archive hash for release verification.
+- `SHA256SUMS-v<version>-windows.txt`: archive hash for release verification.
 
 Generated binaries and archives are ignored by Git because GitHub source repositories should not
 contain build products. Upload the `.zip` and versioned checksum file as GitHub Release assets.

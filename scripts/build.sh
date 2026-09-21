@@ -8,7 +8,7 @@
 #
 #   ./scripts/build.sh                 configure + build into build-linux
 #   ./scripts/build.sh --test          ... then run the test suite
-#   ./scripts/build.sh --package v080  ... then build the release archive
+#   ./scripts/build.sh --package       ... then build the release archive for VERSION
 #   ./scripts/build.sh --benchmarks    ... include bench/ (implied by --package)
 #   ./scripts/build.sh --clean         delete the build directory first
 #   ./scripts/build.sh --target ninfer-serve
@@ -23,7 +23,7 @@ build_dir="${NINFER_BUILD_DIR:-$repo_root/build-linux}"
 arch="${NINFER_CUDA_ARCH:-86}"
 run_tests=0
 clean=0
-package=''
+package=0
 target=''
 benchmarks=0
 
@@ -32,7 +32,7 @@ while (( $# )); do
     --test) run_tests=1; shift ;;
     --clean) clean=1; shift ;;
     --benchmarks) benchmarks=1; shift ;;
-    --package) package="${2:-}"; shift 2 ;;
+    --package) package=1; shift ;;
     --target) target="${2:-}"; shift 2 ;;
     --build-dir) build_dir="${2:-}"; shift 2 ;;
     --arch) arch="${2:-}"; shift 2 ;;
@@ -44,12 +44,12 @@ while (( $# )); do
   esac
 done
 
-# Every packaging script ships bench/ninfer_bench alongside the CLI and the server, but benchmarks
+# The packager ships bench/ninfer_bench alongside the CLI and the server, but benchmarks
 # are an opt-in subdirectory (NINFER_BUILD_BENCHMARKS defaults to OFF). Configuring without them and
 # then packaging fails late, after the whole tree has been built, with "Missing release product:
 # .../bench/ninfer_bench" - so make --package imply the option rather than leaving the two settings
 # to be kept consistent by hand.
-if [[ -n "$package" ]]; then benchmarks=1; fi
+if (( package )); then benchmarks=1; fi
 
 case "$arch" in 86|89) ;; *) printf 'CUDA arch must be 86 or 89, got %s\n' "$arch" >&2; exit 2 ;; esac
 
@@ -104,10 +104,8 @@ if (( run_tests )); then
   ctest --test-dir "$build_dir" -j2 --output-on-failure
 fi
 
-if [[ -n "$package" ]]; then
-  packager="$repo_root/scripts/package-release-$package.sh"
-  [[ -x "$packager" ]] || { printf 'No packaging script: %s\n' "$packager" >&2; exit 1; }
-  NINFER_BUILD_ROOT="$build_dir" "$packager"
+if (( package )); then
+  NINFER_BUILD_ROOT="$build_dir" "$repo_root/scripts/package-release.sh"
 fi
 
 printf '\nbuilt into %s\n' "$build_dir"

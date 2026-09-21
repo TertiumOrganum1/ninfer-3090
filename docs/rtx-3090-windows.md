@@ -22,7 +22,7 @@ not included in the release archive.
 
 ## Download the compatible Qwen3.6-35B artifact
 
-`scripts/download-qwen36-35b-a3b.bat` fetches this pinned revision and is the recommended way to
+`scripts/download-model.bat qwen36-35b-a3b` fetches this pinned revision and is the recommended way to
 get it. Pin the revision explicitly because the Hugging Face repository's unpinned `main` file can
 move:
 
