@@ -16,11 +16,14 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 SERVER = Path(os.environ.get("NINFER_BENCH_SERVER", ROOT / "build-sm86-replayssm/apps/Release/ninfer-serve.exe"))
-# DFlash2 needs the artifact that carries the draft model, which is a different file and 18.33 GiB
-# of weights against 15.92. The default follows the backend so the two cannot drift apart.
-_DEFAULT_MODEL = "qwen3_8_27b_dflash2.ninfer" if os.environ.get(
-    "NINFER_BENCH_SPEC", "mtp") == "dflash2" else "qwen3_8_27b.ninfer"
-MODEL = Path(os.environ.get("NINFER_BENCH_MODEL", ROOT.parent / _DEFAULT_MODEL))
+# DFlash2 needs the artifact that carries the draft model: 18.33 GiB of weights against 15.92 for
+# the dense one. The published download (download-model qwen38-27b) is that bundle, saved as
+# qwen3_8_27b.ninfer, and it carries the MTP weights too, so it runs every spec. A separate
+# qwen3_8_27b_dflash2.ninfer beside a dense qwen3_8_27b.ninfer is preferred for DFlash2 when present.
+_DFLASH2_COPY = ROOT.parent / "qwen3_8_27b_dflash2.ninfer"
+_DEFAULT_MODEL = (_DFLASH2_COPY if os.environ.get("NINFER_BENCH_SPEC", "mtp") == "dflash2"
+                  and _DFLASH2_COPY.exists() else ROOT.parent / "qwen3_8_27b.ninfer")
+MODEL = Path(os.environ.get("NINFER_BENCH_MODEL", _DEFAULT_MODEL))
 MAX_CONTEXT = int(os.environ.get("NINFER_BENCH_MAX_CONTEXT", "65536"))
 OUTPUT_TOKENS = int(os.environ.get("NINFER_BENCH_OUTPUT_TOKENS", "1024"))
 PREFILL_PROMPT_CHARACTERS = int(os.environ.get("NINFER_BENCH_PREFILL_CHARS", "28000"))

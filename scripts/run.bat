@@ -43,8 +43,8 @@ rem same flags on DFlash2 load at 130K and fail at 150K. `none` is the mtp set w
 rem The qwen3_8_27b.ninfer that download-model.bat fetches is the DFlash2 bundle and carries the
 rem MTP weights too, so one file serves both.
 rem
-rem OVERRIDES, from the environment. All profiles: NINFER_MODEL (artifact path), NINFER_SERVER,
-rem NINFER_HOST, NINFER_PORT. `tuned` also: NINFER_CONTEXT, NINFER_CONCURRENCY, NINFER_KV_DTYPE,
+rem OVERRIDES, from the environment. All profiles: NINFER_MODEL (artifact path), NINFER_MODEL_DIR,
+rem NINFER_SERVER, NINFER_HOST, NINFER_PORT. `tuned` also: NINFER_CONTEXT, NINFER_CONCURRENCY, NINFER_KV_DTYPE,
 rem NINFER_SPEC, NINFER_DRAFT_TOKENS, NINFER_PREFILL_CHUNK, NINFER_VISION (on^|off),
 rem NINFER_VISION_RESIDENCY. Windows keeps one lane by default: a desktop holds roughly 1.5 GiB of
 rem the card. Each spec's defaults (context, chunk) are the ones that fit; if startup refuses, drop
@@ -100,6 +100,9 @@ exit /b 0
 rem The default model path matches what download-model.bat writes and how the release archive is
 rem laid out: this launcher sits beside models\.
 set "MODEL=%~dp0models\%ARTIFACT%"
+rem An explicit NINFER_MODEL_DIR is taken verbatim and never probed, as in run.sh, so a model
+rem downloaded there with download-model.bat is found here.
+if not "%NINFER_MODEL_DIR%"=="" set "MODEL=%NINFER_MODEL_DIR%\%ARTIFACT%"
 set "HOST=127.0.0.1"
 set "PORT=8080"
 set "KV_DTYPE=rk8v4"
@@ -233,7 +236,7 @@ if not "%NINFER_VISION_RESIDENCY%"=="" set "VISION_RESIDENCY=%NINFER_VISION_RESI
 set "VISION_ARGS="
 if /i "%VISION%"=="on" (
   set "VISION_ARGS=--vision --vision-residency %VISION_RESIDENCY%"
-  set "LABEL=%LABEL%  ^|  vision (overlay)"
+  set "LABEL=%LABEL%  ^|  vision (%VISION_RESIDENCY%)"
   goto :vision_done
 )
 if /i "%VISION%"=="off" (

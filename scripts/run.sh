@@ -192,7 +192,7 @@ if [[ "$profile" == 'tuned' ]]; then
   VISION="${NINFER_VISION:-on}"
   case "$VISION" in
     on)  vision_args=(--vision --vision-residency "${NINFER_VISION_RESIDENCY:-overlay}")
-         vision_label='vision (overlay)' ;;
+         vision_label="vision (${NINFER_VISION_RESIDENCY:-overlay})" ;;
     off) vision_args=(); vision_label='text only' ;;
     *) printf 'NINFER_VISION must be on or off, got %s\n' "$VISION" >&2; exit 2 ;;
   esac

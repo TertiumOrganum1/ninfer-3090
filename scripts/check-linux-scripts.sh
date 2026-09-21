@@ -155,6 +155,15 @@ recorded="$(record override NINFER_CONTEXT=65536 NINFER_PREFILL_CHUNK=1024 NINFE
 expect_flags '27B overrides' "$recorded" '--max-context 65536' '--prefill-chunk 1024' '--max-concurrency 2'
 refuse_flag '27B overrides' "$recorded" '--vision'
 
+# The banner reports what is being served: an explicit vision residency shows up in it, not the
+# default. (The stub server prints nothing, so stdout here is the launcher's own.)
+banner="$(clear_env NINFER_SERVER="$tmp/ninfer-serve" NINFER_TEST_ARGS="$tmp/unused.args" \
+  NINFER_MODEL_DIR="$tmp" NINFER_VISION_RESIDENCY=resident "$root/run.sh" qwen38-27b)"
+[[ "$banner" == *'vision (resident)'* && "$banner" != *'vision (overlay)'* ]] || {
+  printf 'run.sh banner ignored NINFER_VISION_RESIDENCY: %s\n' "$banner" >&2
+  exit 1
+}
+
 # The reference profiles are fixed and minimal: no cache tuning, no vision.
 recorded="$(record int8 -- qwen38-27b int8)"
 expect_flags '27B int8' "$recorded" '--max-context 65536' '--max-concurrency 1' '--kv-dtype int8' \

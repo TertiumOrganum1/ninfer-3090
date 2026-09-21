@@ -27,8 +27,8 @@ From the directory you unpacked, two commands (or double-click either file and p
 ```
 
 The downloader writes into `models\` beside these files, which is where the launcher looks.
-`NINFER_MODEL_DIR` moves where the **downloader** puts artifacts; to point the **launcher** at a file
-somewhere else, give it `NINFER_MODEL` (the launcher does not read `NINFER_MODEL_DIR`).
+`NINFER_MODEL_DIR` moves both: set it and the downloader puts artifacts there and the launcher looks
+there. To point the launcher at one file somewhere else, give it `NINFER_MODEL`.
 
 That is the recommended Windows profile: Qwen3.6-35B-A3B with `rk8v4` KV, MTP3 speculation plus the
 draft head, and vision in overlay residency. For the dense 27B instead:
@@ -61,8 +61,8 @@ API key blank.
 
 ## Overrides
 
-Nothing here needs editing. **Every** profile reads `NINFER_MODEL`, `NINFER_SERVER`, `NINFER_HOST`
-and `NINFER_PORT`. The default (`tuned`) profiles read more:
+Nothing here needs editing. **Every** profile reads `NINFER_MODEL`, `NINFER_MODEL_DIR`,
+`NINFER_SERVER`, `NINFER_HOST` and `NINFER_PORT`. The default (`tuned`) profiles read more:
 
 | profile | also reads |
 |---|---|
