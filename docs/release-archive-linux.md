@@ -12,8 +12,12 @@ changed.
 
 ## Requirements
 
-- x86-64 Linux with a recent NVIDIA driver (CUDA 12.8 runtime or newer)
-- GeForce RTX 3090 (or 3090 Ti)
+- x86-64 Linux with glibc 2.38 or newer (the binaries are built on Ubuntu 24.04)
+- GeForce RTX 3090 (or 3090 Ti) with a recent NVIDIA driver
+- The CUDA 12.8 runtime libraries, **including cuBLAS** (`libcudart.so.12`, `libcublas.so.12`,
+  `libcublasLt.so.12`). The cuBLAS prefill route links it, so the binaries need it even when you do
+  not turn that route on. From NVIDIA's CUDA repository: `sudo apt install cuda-libraries-12-8`
+- FFmpeg 6 shared libraries and libcurl (`sudo apt install ffmpeg libcurl4t64` on Ubuntu 24.04)
 - `curl` for the downloaders
 
 Model artifacts are **not** included — they are 17–21 GB each. The downloaders below fetch them.
@@ -72,7 +76,7 @@ Nothing here needs editing. `NINFER_SERVER`, `NINFER_MODEL_DIR`, `NINFER_MODEL`,
 
 | profile | also reads |
 |---|---|
-| `run.sh <model>` (`tuned`) | `NINFER_CONTEXT`, `NINFER_CONCURRENCY`, `NINFER_KV_CAPACITY`, `NINFER_KV_DTYPE`, `NINFER_SPEC` (27B: `dflash2`, `mtp`, `none`; 35B: `mtp`, `none`), `NINFER_VISION`, `NINFER_VISION_RESIDENCY`, `NINFER_DRAFT_TOKENS`, `NINFER_PREFILL_CHUNK` |
+| `run.sh <model>` (`tuned`) | `NINFER_CONTEXT`, `NINFER_CONCURRENCY`, `NINFER_KV_CAPACITY`, `NINFER_KV_DTYPE`, `NINFER_SPEC` (27B: `dflash2`, `mtp`, `none`; 35B: `mtp`, `none`), `NINFER_VISION`, `NINFER_VISION_RESIDENCY`, `NINFER_DRAFT_TOKENS`, `NINFER_PREFILL_CHUNK`, `NINFER_HOST_STATE_SLOTS`, `NINFER_FALLBACK` (`off` turns the automatic step-down off) |
 | `run.sh qwen38-27b int8`, `run.sh qwen38-27b c8` | nothing further; every serving flag is fixed |
 | `download-model.sh <model>` | `NINFER_MODEL_DIR`, `NINFER_SKIP_SHA256` |
 
@@ -81,7 +85,14 @@ Nothing here needs editing. `NINFER_SERVER`, `NINFER_MODEL_DIR`, `NINFER_MODEL`,
 
 ## If startup refuses
 
-The message names the numbers. Drop a context rung first —
+**The default profile handles this for you.** If `run.sh` is refused at startup for lack of GPU
+memory (a desktop, or another job, is holding VRAM), it steps down by itself -- an eighth of the
+context at a time, up to five times, with a 2048 prefill chunk and fewer host state slots -- says what
+it did, and starts. It only does this for the defaults: a `NINFER_CONTEXT`, `NINFER_PREFILL_CHUNK`,
+`NINFER_HOST_STATE_SLOTS` or `NINFER_KV_CAPACITY` you set is honoured as given, and
+`NINFER_FALLBACK=off` turns it off.
+
+For those cases the message names the numbers. Drop a context rung first —
 `NINFER_CONTEXT=196608`, then 131072, 114688, 98304, 81920 (the default DFlash2 profile starts at
 131072, so begin at 114688 there). Speculation is the next lever
 (`NINFER_SPEC=none`), worth about 992 MiB at the cost of decode speed. Drop vision last: in overlay

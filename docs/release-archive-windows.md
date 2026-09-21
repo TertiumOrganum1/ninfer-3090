@@ -15,6 +15,14 @@ changed.
 - GeForce RTX 3090 (or 3090 Ti) with a recent NVIDIA driver
 - Microsoft Visual C++ 2022 runtime
 
+Everything else is in the archive: the FFmpeg and libcurl DLLs, and NVIDIA's cuBLAS runtime
+(`cublas64_12.dll`, `cublasLt64_12.dll`). You do **not** need the CUDA Toolkit installed.
+
+**Licensing.** NInfer is Apache-2.0 (`LICENSE`). The two cuBLAS DLLs are NVIDIA's, not part of NInfer:
+they are redistributed under the terms of the NVIDIA CUDA Toolkit EULA (`NVIDIA-CUDA-EULA.txt`,
+Attachment A), for use only with the NInfer executables in this folder, and they are not covered by the
+Apache licence.
+
 Model artifacts are **not** included — they are 17–21 GB each. The downloaders below fetch them.
 
 ## Quick start
@@ -56,7 +64,8 @@ API key blank.
 | `ninfer_bench.exe` | throughput benchmark against the public Engine route |
 | `download-model.bat` | pinned, resumable artifact downloads with verification |
 | `run.bat` | serving profiles: `run.bat <model> [profile]`, or double-click it to pick a model |
-| `*.dll` | the FFmpeg and libcurl runtime dependencies |
+| `*.dll` | the FFmpeg and libcurl runtime dependencies, and NVIDIA's cuBLAS (`cublas64_12.dll`, `cublasLt64_12.dll`) |
+| `NVIDIA-CUDA-EULA.txt` | the licence under which the two cuBLAS DLLs are redistributed |
 | `SHA256SUMS.txt` | checksums for every file in this directory |
 
 ## Overrides
@@ -66,7 +75,7 @@ Nothing here needs editing. **Every** profile reads `NINFER_MODEL`, `NINFER_MODE
 
 | profile | also reads |
 |---|---|
-| `run.bat qwen38-27b` | `NINFER_CONTEXT`, `NINFER_CONCURRENCY`, `NINFER_KV_DTYPE`, `NINFER_SPEC` (`dflash2`, `mtp`, `none`), `NINFER_DRAFT_TOKENS`, `NINFER_PREFILL_CHUNK`, `NINFER_VISION`, `NINFER_VISION_RESIDENCY` |
+| `run.bat qwen38-27b` | `NINFER_CONTEXT`, `NINFER_CONCURRENCY`, `NINFER_KV_DTYPE`, `NINFER_SPEC` (`dflash2`, `mtp`, `none`), `NINFER_DRAFT_TOKENS`, `NINFER_PREFILL_CHUNK`, `NINFER_VISION`, `NINFER_VISION_RESIDENCY`, `NINFER_HOST_STATE_SLOTS`, `NINFER_FALLBACK` (`off` turns the automatic step-down off) |
 | `run.bat qwen36-35b-a3b` | the same, except `NINFER_SPEC` is `mtp` or `none` |
 | `run.bat qwen38-27b int8`, `run.bat qwen38-27b c8` | nothing further; every serving flag is fixed |
 | `download-model.bat <model>` | `NINFER_MODEL_DIR` |
@@ -76,8 +85,17 @@ Nothing here needs editing. **Every** profile reads `NINFER_MODEL`, `NINFER_MODE
 
 ## If startup refuses
 
-The message names the numbers. A 24 GB card running a desktop has roughly 1.5 GiB less to work
-with than a headless one, so the largest profiles do not fit alongside a desktop:
+**The default profile handles this for you.** If `run.bat` is refused at startup for lack of GPU
+memory, it steps down by itself -- an eighth of the context at a time, up to five times, with a 2048
+prefill chunk and fewer host state slots -- says what it did, and starts. On a desktop that was
+holding 2.8 GiB of the card, `run.bat qwen38-27b` stepped from 131,072 down to 81,920 tokens and
+served a request, at about 12 seconds per refused attempt. It only does this for the defaults: a
+`NINFER_CONTEXT`, `NINFER_PREFILL_CHUNK` or `NINFER_HOST_STATE_SLOTS` you set is honoured as given, and
+`NINFER_FALLBACK=off` turns it off.
+
+The rest of this section is for those cases. The message names the numbers. A 24 GB card running a
+desktop has roughly 1.5 GiB less to work with than a headless one, so the largest profiles do not fit
+alongside a desktop:
 
 ```
 requested Engine runtime reservation requires 2864526592 bytes,

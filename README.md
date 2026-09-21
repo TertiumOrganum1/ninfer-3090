@@ -27,14 +27,15 @@ see [`docs/config-calculator.html`](docs/config-calculator.html).
 
 The goal is the make the utmost rippin Qwen inference stack for the 3000 series. Gladly taking PR's, all help much appreciated. 
 
-**New since v0.9.1: tensor-core small-T kernels for MTP verify and cohort decode.** Qwen3.8-27B
-MTP3 decode is 1.5x faster at C1 (113 tok/s on thinking-off chat) and 1.7x at C8; see
-[the results](#decode-after-the-small-t-kernels).
+**New in v0.11.0: prompt processing is roughly twice as fast, and the recommended profile is the fast one.**
+Qwen3.8-27B prefill reaches 2,989 tok/s at 4K (`--prefill-cublas --prefill-chunk 4096`, +0.156%
+perplexity, opt-in) and 1,649 tok/s on the default route, single-stream decode reaches 187 tok/s with
+DFlash2 (+39% over MTP3), and one `run` launcher picks the flags for you. See the
+[v0.11.0 release notes](RELEASE_NOTES_0.11.0.md) and the
+[measured configurations](docs/performance.md#recommended-configurations-rtx-3090-qwen38-27b).
 
-Release notes for this branch: [v0.9.1](RELEASE_NOTES_0.9.1.md) — DFlash2 wants four draft tokens
-rather than seven (+22.6%), two more route tables re-measured for `sm_86` (up to 52.8%), and three
-races fixed in paths that produced wrong output rather than an error. Previous:
-[v0.9.0](RELEASE_NOTES_0.9.0.md).
+Previous: [v0.10.0](RELEASE_NOTES_0.10.0.md) (tensor-core small-T kernels: MTP3 decode 1.5x at C1 and
+1.7x at C8), [v0.9.1](RELEASE_NOTES_0.9.1.md), [v0.9.0](RELEASE_NOTES_0.9.0.md).
 
 > **Model files are now v3.** This release follows upstream NInfer onto the v3 `.ninfer` container.
 > A v2 file from an earlier release is refused at load; upgrade it in place of a re-download with

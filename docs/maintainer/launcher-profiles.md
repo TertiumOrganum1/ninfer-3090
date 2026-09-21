@@ -34,9 +34,23 @@ too, so one file serves all three.
 Overrides, from the environment, so a launcher never needs editing: `NINFER_MODEL` (artifact path),
 `NINFER_MODEL_DIR`, `NINFER_SERVER`, `NINFER_HOST`, `NINFER_PORT` for every profile; `tuned` also
 reads `NINFER_CONTEXT`, `NINFER_CONCURRENCY`, `NINFER_KV_CAPACITY` (Linux), `NINFER_KV_DTYPE`,
-`NINFER_SPEC`, `NINFER_DRAFT_TOKENS`, `NINFER_PREFILL_CHUNK`, `NINFER_VISION` and
-`NINFER_VISION_RESIDENCY`. Loopback is the default host: `0.0.0.0` publishes an unauthenticated
+`NINFER_SPEC`, `NINFER_DRAFT_TOKENS`, `NINFER_PREFILL_CHUNK`, `NINFER_VISION`,
+`NINFER_VISION_RESIDENCY`, `NINFER_HOST_STATE_SLOTS` and `NINFER_FALLBACK`. Loopback is the default host: `0.0.0.0` publishes an unauthenticated
 endpoint to every network the machine is on, so it is opt-in per run.
+
+**When the card is busy.** A desktop or another job holding VRAM can leave too little for the default
+context, and on Windows pinned host memory (`--host-state-slots`) is charged against the card too, so
+there are two ways to be refused: the engine's runtime reservation, or pinning host state. The `tuned`
+profile therefore steps down when startup is refused for either reason (the launcher looks for the
+engine's own `runtime reservation requires` and `cudaMallocHost failed` messages): an eighth of the
+context at a time, at most five times, with the prefill chunk capped at 2048 and the host state slots
+halved every second step. `--kv-capacity auto` was tried first and does not help, because the engine
+still has to reserve room for one full `--max-context` sequence. Measured on this fork's 3090 with a
+Windows desktop holding 2.8 GiB: `run.bat qwen38-27b` was refused at 131,072, 114,688 and 98,304 and
+started at 81,920 (chunk 2048, 8 host state slots), and the same launcher on Linux under WSL sees the
+same card. Values the caller sets (`NINFER_CONTEXT`, `NINFER_PREFILL_CHUNK`, `NINFER_HOST_STATE_SLOTS`,
+`NINFER_KV_CAPACITY`) are never second-guessed, `NINFER_FALLBACK=off` disables the step-down, and the
+`int8` and `c8` profiles never step down.
 
 What follows is the measurement history behind the `tuned` defaults, moved here from the launchers'
 own headers so the launchers stay readable. Figures marked "MTP profile" predate the cuBLAS prefill

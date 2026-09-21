@@ -60,6 +60,28 @@ foreach ($product in $Products) {
 Get-ChildItem -LiteralPath (Join-Path $BuildRoot 'apps') -Filter '*.dll' | ForEach-Object {
     Copy-Item -LiteralPath $_.FullName -Destination $ProductRoot
 }
+# The executables import cublas64_12.dll (the cuBLAS prefill route), which imports cublasLt64_12.dll.
+# Neither is in the vcpkg apps\ directory: they come from the CUDA Toolkit, which a typical Windows
+# machine does not have, so without them every executable here fails to start with "cublas64_12.dll
+# was not found" -- before --prefill-cublas is even asked for. NVIDIA lists both as redistributable in
+# the CUDA Toolkit EULA. Take them from the toolkit that built the binaries.
+$CudaBin = if ($env:CUDA_PATH) { Join-Path $env:CUDA_PATH 'bin' } else { $null }
+foreach ($name in 'cublas64_12.dll', 'cublasLt64_12.dll') {
+    $found = if ($CudaBin) { Join-Path $CudaBin $name } else { $null }
+    if (-not $found -or -not (Test-Path -LiteralPath $found)) {
+        throw "Missing ${name}: set CUDA_PATH to the CUDA 12.x Toolkit that built the release (looked in $CudaBin)"
+    }
+    Copy-Item -LiteralPath $found -Destination $ProductRoot
+}
+# NVIDIA's grant to redistribute those two DLLs (Attachment A of the EULA: cublas.dll and cublasLt.dll,
+# including files whose names carry a version such as cublas64_12.dll) is conditional: the
+# distribution must be consistent with the EULA and protect NVIDIA's rights. Its text therefore ships
+# beside them, and the archive README says which files it covers.
+$Eula = if ($env:CUDA_PATH) { Join-Path $env:CUDA_PATH 'EULA.txt' } else { $null }
+if (-not $Eula -or -not (Test-Path -LiteralPath $Eula)) {
+    throw "Missing the CUDA Toolkit EULA (looked for $Eula): it must ship with the cuBLAS DLLs"
+}
+Copy-Item -LiteralPath $Eula -Destination (Join-Path $ProductRoot 'NVIDIA-CUDA-EULA.txt')
 Copy-Item -LiteralPath (Join-Path $RepoRoot 'VERSION') -Destination $ProductRoot
 Copy-Item -LiteralPath (Join-Path $RepoRoot 'LICENSE') -Destination $ProductRoot
 # The archive README must describe the archive. docs\rtx-3090-windows.md is written for a checkout
@@ -73,6 +95,19 @@ foreach ($script in @('run.bat', 'download-model.bat')) {
     $source = Join-Path $RepoRoot "scripts\$script"
     if (-not (Test-Path -LiteralPath $source)) { throw "Missing release script: $source" }
     Copy-Item -LiteralPath $source -Destination $ProductRoot
+}
+
+# A missing DLL only shows up on a machine that lacks it, and this one has the CUDA Toolkit and the
+# vcpkg tree on its PATH -- which is how the executables nearly shipped needing cublas64_12.dll, so
+# that none of them started on a PC without the Toolkit. Start each one from the folder about to be
+# archived with nothing but Windows on PATH: a DLL the archive does not carry stops it (0xC0000135)
+# and stops the release here.
+$CleanPath = "$env:SystemRoot\System32;$env:SystemRoot"
+foreach ($exe in ($Products | ForEach-Object { $_.Destination })) {
+    $null = cmd /c "set PATH=$CleanPath&& `"$(Join-Path $ProductRoot $exe)`" --help 2>&1"
+    if ($LASTEXITCODE -ne 0) {
+        throw "$exe did not start with only Windows on PATH (exit $LASTEXITCODE): a DLL it needs is missing from the archive or cannot be loaded"
+    }
 }
 
 $innerHashes = Get-ChildItem -LiteralPath $ProductRoot -File | Sort-Object Name | ForEach-Object {
