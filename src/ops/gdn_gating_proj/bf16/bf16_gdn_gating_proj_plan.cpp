@@ -90,10 +90,16 @@ constexpr std::int32_t ctas_per_sm_35(Bf16GdnGatingScheduleId schedule) noexcept
     return 3;
 }
 
-// Fewest SMs of any device this build supports. The RTX 3090 is the smallest sm_86 part the fork
-// targets, so the compile-time catalog guard is checked against it: a route that fits on 82 SMs
-// fits on every supported device. Overshooting the real budget is not merely slow -- the driver
-// rejects the launch with cudaErrorCooperativeLaunchTooLarge -- so this must stay a lower bound.
+// SM count the route tables are written against: the RTX 3090, the smallest sm_86 part the fork
+// targets. The compile-time catalog guard is checked against it, so a table entry that fits here
+// fits on every card of that class. Overshooting the real budget is not merely slow -- the driver
+// rejects the launch with cudaErrorCooperativeLaunchTooLarge -- so this must stay a lower bound for
+// the guard's purposes.
+//
+// It is no longer a lower bound on the hardware, though: the RTX 5060 Ti has 36 SMs, well under any
+// card the tables were tuned for, and there the tabled split-k does not fit. That is handled at
+// runtime by fitted_schedule below, which steps down the ladder against the real SM count; the
+// tables stay as they are, and this constant keeps guarding them.
 inline constexpr std::int32_t kMinSupportedSmCount = 82;
 
 // Cached SM count of the active device. cudaDeviceGetAttribute is cheap but this sits on the
@@ -294,6 +300,38 @@ bool candidate_is_legal(Bf16GdnGatingScheduleId schedule,
     return false;
 }
 
+// Next weaker rung of the split-k ladder. The route tables above are occupancy tables written for a
+// device with at least kMinSupportedSmCount SMs; a narrower part has a proportionally smaller
+// resident-CTA budget, and a cooperative grid that does not fit is refused by the driver rather than
+// merely run slowly. On such a device the planner steps down this ladder until the grid fits, which
+// is also the right thing for throughput: there are fewer SMs to fill in the first place.
+Bf16GdnGatingScheduleId weaker_schedule(Bf16GdnGatingScheduleId schedule) noexcept {
+    switch (schedule) {
+    case Bf16GdnGatingScheduleId::MmaCooperativeSplit32:
+        return Bf16GdnGatingScheduleId::MmaCooperativeSplit16;
+    case Bf16GdnGatingScheduleId::MmaCooperativeSplit16:
+        return Bf16GdnGatingScheduleId::MmaCooperativeSplit8;
+    case Bf16GdnGatingScheduleId::MmaCooperativeSplit8:
+        return Bf16GdnGatingScheduleId::MmaCooperativeSplit4;
+    case Bf16GdnGatingScheduleId::MmaCooperativeSplit4:
+        return Bf16GdnGatingScheduleId::MmaCooperativeSplit2;
+    default:
+        return Bf16GdnGatingScheduleId::MmaUnsplit;
+    }
+}
+
+// MmaUnsplit is not launched cooperatively and carries no residency constraint, so the walk always
+// terminates. On a device the route tables were written for the first candidate is already legal and
+// this returns it unchanged.
+Bf16GdnGatingScheduleId fitted_schedule(Bf16GdnGatingScheduleId schedule,
+                                        const Bf16GdnGatingProblem& problem) noexcept {
+    Bf16GdnGatingScheduleId fitted = schedule;
+    while (fitted != Bf16GdnGatingScheduleId::MmaUnsplit && !candidate_is_legal(fitted, problem)) {
+        fitted = weaker_schedule(fitted);
+    }
+    return fitted;
+}
+
 std::size_t checked_partial_bytes(std::int32_t heads, std::int32_t split_k, std::int32_t cols) {
     const std::size_t logical_rows = static_cast<std::size_t>(2 * heads);
     const std::size_t split        = static_cast<std::size_t>(split_k);
@@ -408,9 +446,14 @@ std::size_t route_capacity(const std::array<RouteSpec, N>& routes, const Bf16Gdn
     for (const RouteSpec& route : routes) {
         if (route.cols.last < min_cols || route.cols.first > max_cols) { continue; }
         const std::int32_t endpoint = std::min(route.cols.last, max_cols);
-        maximum                     = std::max(
+        // The route's own split-k, not the one the planner will actually pick: the workspace grows
+        // with both split-k and columns, and the planner only ever steps split-k down, so the
+        // undegraded figure at the endpoint bounds every plan the interval can produce. On a device
+        // the tables were written for it is exactly the plan, and this is the same number as before.
+        const std::int32_t split_k = schedule_split_k(route.schedule);
+        maximum                    = std::max(
             maximum,
-            bf16_gdn_gating_resolve_plan({base.heads, base.input_rows, endpoint}).workspace_bytes);
+            split_k > 1 ? checked_partial_bytes(base.heads, split_k, endpoint) : std::size_t{0});
     }
     return maximum;
 }
@@ -484,13 +527,15 @@ Bf16GdnGatingPlan bf16_gdn_gating_resolve_plan(const Bf16GdnGatingProblem& probl
     if (is_27(problem)) {
         for (const RouteSpec& route : k27Routes) {
             if (route.cols.contains(problem.cols)) {
-                return bf16_gdn_gating_resolve_candidate(route.schedule, problem);
+                return bf16_gdn_gating_resolve_candidate(fitted_schedule(route.schedule, problem),
+                                                         problem);
             }
         }
     } else {
         for (const RouteSpec& route : k35Routes) {
             if (route.cols.contains(problem.cols)) {
-                return bf16_gdn_gating_resolve_candidate(route.schedule, problem);
+                return bf16_gdn_gating_resolve_candidate(fitted_schedule(route.schedule, problem),
+                                                         problem);
             }
         }
     }
@@ -515,7 +560,10 @@ Bf16GdnNormGatingPlan bf16_gdn_norm_gating_resolve_plan(const Bf16GdnGatingProbl
     std::int32_t norm_splits             = 0;
     if (is_27(problem) && problem.cols <= 42)
         return {Bf16GdnNormGatingScheduleId::FusedSimt27, control, 0};
-    if (is_35(problem) && problem.cols <= 16) {
+    // The fused split32 route is a direct candidate rather than a table lookup, so it needs the same
+    // residency check: where the grid does not fit, the composed route is the fallback.
+    if (is_35(problem) && problem.cols <= 16 &&
+        candidate_is_legal(Bf16GdnGatingScheduleId::MmaCooperativeSplit32, problem)) {
         control  = bf16_gdn_gating_resolve_candidate(Bf16GdnGatingScheduleId::MmaCooperativeSplit32,
                                                      problem);
         schedule = Bf16GdnNormGatingScheduleId::MmaCooperativeSplit32;
