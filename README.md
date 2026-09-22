@@ -558,6 +558,43 @@ MTP is intentionally off for this profile. At 32K, speculative recurrent state w
 3090 memory budget; KV compression alone does not recover enough memory. Text-only 35B profiles can
 still use MTP3 as documented above.
 
+## Ternary Bonsai 2 27B (franken line)
+
+This branch also runs PrismML's
+[Ternary Bonsai 2 27B](https://huggingface.co/prism-ml/Ternary-Bonsai-2-27B-gguf), a ternary
+Qwen3.8-27B whose projections are `scale * {-1, 0, +1}` per 128 columns and Hadamard-rotated. Its
+text tower is stored as `t2_g128_fp16`: 2.125 bits per weight, imported from PrismML's PQ2_0
+GGUF without rounding. Each rotated projection's Use carries the sign vector of its input width,
+and the model rotates the matching activation (the residual stream, KV cache, GDN state, Vision,
+MTP and DFlash2 stay in the primal basis). Everything else is the Qwen3.8-27B engine: paged KV,
+`rk8v4`, compatible-prefix reuse, CUDA Graphs, MTP and DFlash2 speculation, Vision.
+
+The artifact is [WaveCut/Ternary-Bonsai-2-27B-NInfer-v3](https://huggingface.co/WaveCut/Ternary-Bonsai-2-27B-NInfer-v3)
+(10.75 GiB); [weight conversion](docs/weight-conversion.md#ternary-bonsai-2-27b) shows how it is
+built from the GGUF. The fastest single-stream profile is DFlash2 with seven drafts:
+
+```bash
+ninfer-serve models/Ternary-Bonsai-2-27B-ninfer-v3.ninfer --model-id bonsai2-27b \
+  --max-context 198400 --kv-capacity 198400 --kv-dtype rk8v4 --gdn-state-fp16 \
+  --spec dflash2 --draft-tokens 7 \
+  --vision --vision-residency overlay --vision-max-merged 12288
+```
+
+Measured on one RTX 3090 held at a 310 W power limit, one request at a time, 198,400-token window,
+`rk8v4` KV, Vision loaded:
+
+| profile | decode, short chat | decode, GSM8K answers | tokens per step, GSM8K | VRAM in use |
+|---|---:|---:|---:|---:|
+| no speculation | 68.9 tok/s | | 1 | 13.6 GiB |
+| MTP, three drafts, `--lm-head-draft` | 145.8 tok/s | 151.9 tok/s | 3.0 | 14.7 GiB |
+| DFlash2, seven drafts | 181.9 tok/s | 198.3 tok/s | 4.3 | 16.3 GiB |
+
+Prefill runs at 800 to 935 tok/s from 1K to 32K tokens and at 765 tok/s at 64K. A fixed 1,179-item
+slice (GSM8K, MMLU-Pro, HumanEval, MGSM and Global-MMLU in Russian; greedy, no sampling penalties)
+scores 84.3%, and GSM8K scores 96.5 against 94.5 for llama.cpp on the same GGUF. Quick-corpus
+perplexity is 5.631 against 4.346 for the Qwen3.8-27B artifact, both on `rk8v4`: the price of
+2.125-bit projections.
+
 ## Two GPUs: expert offload (`--devices 0,1`)
 
 With two cards, each layer's expert/MLP block is materialized on the second GPU. Rank 0 keeps
@@ -655,6 +692,7 @@ crossings. 0 (offload everything) is the default and maximises capacity.
 | Qwen3.6-35B-A3B | [pinned v3 artifact](https://huggingface.co/neroued/Qwen3.6-35B-A3B-NInfer/tree/ee4495803bc4f8015b8a7e22d4cf9b67de8e27c6) | 21.23 GiB | **Recommended; fetched by `download-model qwen36-35b-a3b`. Carries the DFlash bundle for `--spec dflash`** |
 | Qwen3.6-27B | [pinned v3 artifact](https://huggingface.co/neroued/Qwen3.6-27B-NInfer/tree/3e3d9a3951c452c1ca80bd7a2860c7f3bfc5a829) | 16.29 GiB | Supported with more runtime headroom |
 | **Qwen3.8-27B** | [pinned v3 artifact](https://huggingface.co/neroued/Qwen3.8-27B-NInfer/tree/1cbd84e7221e51186bd7f093a149912d2489625b) | 19.03 GiB | **Validated at C1, C2, C4 and C8/MTP3 with ReplaySSM. Carries the DFlash2 bundle for `--spec dflash2`** |
+| Ternary Bonsai 2 27B | [pinned v3 artifact](https://huggingface.co/WaveCut/Ternary-Bonsai-2-27B-NInfer-v3/tree/d08b068bb3c26f2fe9b1014a6ced1a965a2fb8ed) | 10.75 GiB | Franken line only: ternary `t2_g128_fp16` text tower with Hadamard-rotated Uses. Carries MTP, Vision and the DFlash2 bundle. See [Ternary Bonsai 2 27B](#ternary-bonsai-2-27b-franken-line) |
 
 This release reads only the v3 `.ninfer` container. v1 and v2 files from earlier releases are
 refused at load. Upgrade an existing official v2 file in place of re-downloading it:
