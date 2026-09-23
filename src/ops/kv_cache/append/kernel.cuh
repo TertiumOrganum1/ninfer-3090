@@ -164,7 +164,9 @@ __launch_bounds__(256) __global__
                                            physical_page, position & kPagedKVPageMask, lane);
 }
 
-template <typename Geometry, typename Metadata, bool PackedValues = false>
+// PackedKeys selects the rk4v4-e8 key coding (always paired with PackedValues): E8-snapped signed
+// int4 codes two per byte in a half-width K plane under the same G64 scale plane.
+template <typename Geometry, typename Metadata, bool PackedValues = false, bool PackedKeys = false>
 __launch_bounds__(256) __global__
     void kv_cache_append_full_i8_kernel(const __nv_bfloat16* __restrict__ k,
                                         const __nv_bfloat16* __restrict__ v,
@@ -210,7 +212,8 @@ __launch_bounds__(256) __global__
         const float v0               = __bfloat162float(v[src0]);
         const float v1               = __bfloat162float(v[src1]);
         const float k_abs            = warp_max(fmaxf(fabsf(k0), fabsf(k1)), FullMask);
-        const auto k_quant           = kv_cache_int8_quant_params(k_abs);
+        const auto k_quant           = PackedKeys ? kv_cache_int4_quant_params(k_abs)
+                                                  : kv_cache_int8_quant_params(k_abs);
         // See the tiled page kernel: v0 and v1 lanes are the packed coding's two 32-value groups.
         const float v_abs_lo = warp_max(fabsf(v0), FullMask);
         const float v_abs_hi = warp_max(fabsf(v1), FullMask);
@@ -218,10 +221,18 @@ __launch_bounds__(256) __global__
                                             : kv_cache_int8_quant_params(fmaxf(v_abs_lo, v_abs_hi));
         const auto v_quant_hi =
             PackedValues ? kv_cache_int4_quant_params(v_abs_hi) : v_quant;
-        const std::int64_t code_base = kv_cache_int8_quant_code_index<Geometry>(
+        [[maybe_unused]] const std::int64_t code_base = kv_cache_int8_quant_code_index<Geometry>(
             page, kv_head, group * kKVCacheInt8Group, page_off);
-        cache_k[code_base + lane]      = kv_cache_int8_quant_code(k0, k_quant.inverse_scale);
-        cache_k[code_base + lane + 32] = kv_cache_int8_quant_code(k1, k_quant.inverse_scale);
+        if constexpr (PackedKeys) {
+            kv_cache_int4_e8_store_key_group(
+                reinterpret_cast<std::uint8_t*>(cache_k),
+                kv_cache_int4_value_code_index<Geometry>(page, kv_head,
+                                                         group * (kKVCacheInt8Group / 2), page_off),
+                k0, k1, k_quant.inverse_scale, lane);
+        } else {
+            cache_k[code_base + lane]      = kv_cache_int8_quant_code(k0, k_quant.inverse_scale);
+            cache_k[code_base + lane + 32] = kv_cache_int8_quant_code(k1, k_quant.inverse_scale);
+        }
         if constexpr (PackedValues) {
             // See the tiled page kernel: a packed byte spans lanes l and l^1.
             const std::int8_t c0 = kv_cache_int4_quant_code(v0, v_quant.inverse_scale);
@@ -260,7 +271,7 @@ __launch_bounds__(256) __global__
 // PackedValues selects the rk8v4 value coding: two signed 4-bit codes per byte in a half-width V
 // plane. The key path is identical in both instantiations, so a cache written by either is
 // consumable by the same rotated-INT8 key reader.
-template <typename Geometry, typename Metadata, bool PackedValues = false>
+template <typename Geometry, typename Metadata, bool PackedValues = false, bool PackedKeys = false>
 __launch_bounds__(256) __global__
     void kv_cache_append_full_i8_page_kernel(const __nv_bfloat16* __restrict__ k,
                                              const __nv_bfloat16* __restrict__ v,
@@ -313,7 +324,8 @@ __launch_bounds__(256) __global__
         const float v0               = __bfloat162float(v[src0]);
         const float v1               = __bfloat162float(v[src1]);
         const float k_abs            = warp_max(fmaxf(fabsf(k0), fabsf(k1)), FullMask);
-        const auto k_quant           = kv_cache_int8_quant_params(k_abs);
+        const auto k_quant           = PackedKeys ? kv_cache_int4_quant_params(k_abs)
+                                                  : kv_cache_int8_quant_params(k_abs);
         // The v0 lanes span dimensions [64g, 64g+32) and the v1 lanes [64g+32, 64g+64), so the
         // packed coding's two 32-value groups fall out of the existing lane assignment with one
         // warp reduction each. The INT8 coding reduces across both halves for its single G64.
@@ -323,10 +335,18 @@ __launch_bounds__(256) __global__
                                             : kv_cache_int8_quant_params(fmaxf(v_abs_lo, v_abs_hi));
         const auto v_quant_hi =
             PackedValues ? kv_cache_int4_quant_params(v_abs_hi) : v_quant;
-        const std::int64_t code_base = kv_cache_int8_quant_code_index<Geometry>(
+        [[maybe_unused]] const std::int64_t code_base = kv_cache_int8_quant_code_index<Geometry>(
             physical_page, kv_head, group * kKVCacheInt8Group, page_off);
-        cache_k[code_base + lane]      = kv_cache_int8_quant_code(k0, k_quant.inverse_scale);
-        cache_k[code_base + lane + 32] = kv_cache_int8_quant_code(k1, k_quant.inverse_scale);
+        if constexpr (PackedKeys) {
+            kv_cache_int4_e8_store_key_group(
+                reinterpret_cast<std::uint8_t*>(cache_k),
+                kv_cache_int4_value_code_index<Geometry>(physical_page, kv_head,
+                                                         group * (kKVCacheInt8Group / 2), page_off),
+                k0, k1, k_quant.inverse_scale, lane);
+        } else {
+            cache_k[code_base + lane]      = kv_cache_int8_quant_code(k0, k_quant.inverse_scale);
+            cache_k[code_base + lane + 32] = kv_cache_int8_quant_code(k1, k_quant.inverse_scale);
+        }
         if constexpr (PackedValues) {
             // A packed byte holds the adjacent pair (2p, 2p+1), but this lane owns d0 = 64g+lane
             // and d1 = d0+32, so each byte spans lanes l and l^1. Exchange the partner's codes and

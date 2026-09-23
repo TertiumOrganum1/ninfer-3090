@@ -138,7 +138,10 @@ static_assert(kCausalPromptI8SmemBytes == 93184);
 // PackedValues selects the rk8v4 half-width value plane. Packed bytes are staged into the leading
 // half of the same V slot the INT8 coding uses, so the shared-memory footprint and therefore the
 // occupancy of both instantiations are identical; only the global traffic halves.
-template <typename Geometry, typename Metadata, bool PackedValues = false>
+// PackedKeys selects the rk4v4-e8 key plane (packed signed int4, 128 bytes per token). Each
+// 16-dimension chunk is loaded as eight bytes and expanded to int8 in the INT8 key layout, so the
+// QK MMA path and the shared-memory footprint are unchanged.
+template <typename Geometry, typename Metadata, bool PackedValues = false, bool PackedKeys = false>
 __global__ __maxnreg__(NINFER_PROMPT_I8_MAXNREG) void causal_attention_prompt_i8_kernel(
     const __nv_bfloat16* __restrict__ q, const std::int8_t* __restrict__ cache_k,
     const std::int8_t* __restrict__ cache_v, const __half* __restrict__ cache_k_scale,
@@ -268,16 +271,23 @@ __global__ __maxnreg__(NINFER_PROMPT_I8_MAXNREG) void causal_attention_prompt_i8
             std::int8_t* kd = &k_i8[(key_l * DB16 + causal_prompt_swz(key_l, dc * 8)) * 2];
             std::int8_t* vd = &v_i8[key_l * D + d];
             if (key <= max_query_abs) {
-                const std::int64_t off =
+                [[maybe_unused]] const std::int64_t off =
                     kv_cache_int8_quant_code_index<Geometry>(physical_page, kv_head, d, key_l);
-                cp_async<16, Cache::cg>(kd, &cache_k[off]);
+                // Sixteen dimensions occupy eight packed bytes; both packed planes share it.
+                [[maybe_unused]] const std::int64_t poff =
+                    kv_cache_int4_value_code_index<Geometry>(physical_page, kv_head, d >> 1, key_l);
+                if constexpr (PackedKeys) {
+                    // Expanded synchronously: the smem slot needs int8 codes, not the packed bytes.
+                    const uint2 raw =
+                        load_vec<uint2>(reinterpret_cast<const std::uint8_t*>(cache_k) + poff);
+                    store_vec(kd, kv_cache_int4_unpack_i8x16(raw));
+                } else {
+                    cp_async<16, Cache::cg>(kd, &cache_k[off]);
+                }
                 if constexpr (PackedValues) {
-                    // Sixteen dimensions occupy eight packed bytes.
-                    const std::int64_t voff = kv_cache_int4_value_code_index<Geometry>(
-                        physical_page, kv_head, d >> 1, key_l);
                     // cp.async.cg is 16-byte only; the 8-byte form uses the default policy.
                     ninfer::ops::cp_async<8>(&v_i8[key_l * D + (d >> 1)],
-                                             reinterpret_cast<const std::uint8_t*>(cache_v) + voff);
+                                             reinterpret_cast<const std::uint8_t*>(cache_v) + poff);
                 } else {
                     cp_async<16, Cache::cg>(vd, &cache_v[off]);
                 }

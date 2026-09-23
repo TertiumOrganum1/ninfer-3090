@@ -111,6 +111,11 @@ int main() {
                       "--kv-dtype rk8v4 did not select rotated K8/V4 storage");
     failures += check(defaults.kv_cache == ninfer::KvCacheStorage::BFloat16,
                       "rk8v4 unexpectedly changed the default KV storage");
+    const ServeOptions e8 = parse({"ninfer-serve", "model.ninfer", "--kv-dtype", "rk4v4-e8"});
+    failures += check(e8.kv_cache == ninfer::KvCacheStorage::RotatedInt4KeyInt4ValueE8,
+                      "--kv-dtype rk4v4-e8 did not select rotated K4/V4 E8 storage");
+    failures += check(kv_help.find("rk4v4-e8") != std::string::npos,
+                      "serve help omits --kv-dtype rk4v4-e8");
 
     const ServeOptions model_alias =
         parse({"ninfer-serve", "model.ninfer", "--model-id", "deployment-alias"});

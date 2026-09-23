@@ -33,10 +33,16 @@ void causal_attention_prompt_attention_launch_for(const Tensor& q, const Tensor&
         return cudaFuncSetAttribute(causal_attention_prompt_i8_kernel<Geometry, Metadata, true>,
                                  cudaFuncAttributeMaxDynamicSharedMemorySize, kCausalPromptI8SmemBytes);
     });
+    configure_cuda_device_once([&] {
+        return cudaFuncSetAttribute(
+            causal_attention_prompt_i8_kernel<Geometry, Metadata, true, true>,
+            cudaFuncAttributeMaxDynamicSharedMemorySize, kCausalPromptI8SmemBytes);
+    });
 
     const auto tokens = static_cast<std::int32_t>(q.ne[2]);
     if (cache.storage == KvCacheStorage::Int8Group64 ||
-        cache.storage == KvCacheStorage::RotatedInt8KeyInt4ValueGroup64) {
+        cache.storage == KvCacheStorage::RotatedInt8KeyInt4ValueGroup64 ||
+        cache.storage == KvCacheStorage::RotatedInt4KeyInt4ValueE8) {
         const dim3 attention_grid(static_cast<unsigned>(div_up(tokens, kCausalPromptI8Br)),
                                   static_cast<unsigned>(Geometry::QHeads), 1u);
         const Tensor& cache_k_scale = cache.k_scale_pages;
@@ -48,8 +54,19 @@ void causal_attention_prompt_attention_launch_for(const Tensor& q, const Tensor&
         // KvValueCodeT<RotatedInt8KeyInt4ValueGroup64>, which is U8 because the profile describes
         // the plane's storage rather than this kernel's signature, would not be a cleanup. Leave
         // it; the dtype check below is the guard that matters here.
-        // A U8 value plane is the rk8v4 packed signed int4 coding.
-        if (cache_v.dtype == DType::U8) {
+        // rk4v4-e8 packs keys as well; its U8 key plane is told apart by storage, not dtype.
+        if (cache.storage == KvCacheStorage::RotatedInt4KeyInt4ValueE8) {
+            causal_attention_prompt_i8_kernel<Geometry, Metadata, true, true>
+                <<<attention_grid, kCausalPromptI8Threads, kCausalPromptI8SmemBytes, stream>>>(
+                    static_cast<const __nv_bfloat16*>(q.data),
+                    static_cast<const std::int8_t*>(cache_k.data),
+                    static_cast<const std::int8_t*>(cache_v.data),
+                    static_cast<const __half*>(cache_k_scale.data),
+                    static_cast<const __half*>(cache_v_scale.data), metadata,
+                    static_cast<const std::int32_t*>(positions.data), scale,
+                    static_cast<__nv_bfloat16*>(out.data), tokens);
+        } else if (cache_v.dtype == DType::U8) {
+            // A U8 value plane is the rk8v4 packed signed int4 coding.
             causal_attention_prompt_i8_kernel<Geometry, Metadata, true>
                 <<<attention_grid, kCausalPromptI8Threads, kCausalPromptI8SmemBytes, stream>>>(
                     static_cast<const __nv_bfloat16*>(q.data),
