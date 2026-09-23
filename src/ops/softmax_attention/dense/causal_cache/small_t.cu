@@ -70,7 +70,8 @@ std::int32_t causal_small_t_split_count(std::int32_t window, std::int32_t tokens
     // nearly empty second tile. T=5 uses one 32-key tile per split; the short T>=6 profile keeps
     // all newly appended rows in one tail split while retaining a useful B=8 grid.
     const bool i8_family = storage == KvCacheStorage::Int8Group64 ||
-                           storage == KvCacheStorage::RotatedInt8KeyInt4ValueGroup64;
+                           storage == KvCacheStorage::RotatedInt8KeyInt4ValueGroup64 ||
+                           storage == KvCacheStorage::RotatedInt4KeyInt4ValueE8;
     if (i8_family && tokens == 5 && window > 128 && window <= 512) {
         return div_up(window, 32 / Geometry::SmallTSplitScale);
     }
@@ -193,25 +194,28 @@ void launch_tc_partial_i8(const Tensor& q, CacheInput input, const Tensor& pos, 
     Tensor& cache_v       = cache.v_pages;
     Tensor& cache_k_scale = cache.k_scale_pages;
     Tensor& cache_v_scale = cache.v_scale_pages;
-    // A U8 value plane is the rk8v4 packed signed int4 coding.
+    // A U8 value plane is the rk8v4 packed signed int4 coding; rk4v4-e8 packs keys as well, and
+    // its U8 key plane is told apart by storage, not dtype.
     const bool packed_values = cache_v.dtype == DType::U8;
+    const bool packed_keys   = cache.storage == KvCacheStorage::RotatedInt4KeyInt4ValueE8;
     auto launch = [&]<int WarpsPerCta, int MinBlocksPerSm, int KeyBlock, bool DynamicArena>() {
         const dim3 grid(Geometry::KVHeads, splits, invocation.batch_size);
         constexpr std::size_t kDynamicBytes =
             DynamicArena ? static_cast<std::size_t>(4 * KeyBlock * kCausalHeadDim) : 0u;
-        auto issue = [&]<bool PackedValues>() {
+        auto issue = [&]<bool PackedValues, bool PackedKeys>() {
             if constexpr (DynamicArena) {
                 configure_cuda_device_once([&] {
                     return cudaFuncSetAttribute(
                         causal_attention_small_t_i8_tiled_kernel<
                             Geometry, TokenTile, WarpsPerCta, MinBlocksPerSm, KeyBlock, DynamicArena,
-                            MultiBatch, Masked, CacheInput, PackedValues>,
+                            MultiBatch, Masked, CacheInput, PackedValues, PackedKeys>,
                         cudaFuncAttributeMaxDynamicSharedMemorySize, static_cast<int>(kDynamicBytes));
                 });
             }
             causal_attention_small_t_i8_tiled_kernel<Geometry, TokenTile, WarpsPerCta,
                                                      MinBlocksPerSm, KeyBlock, DynamicArena,
-                                                     MultiBatch, Masked, CacheInput, PackedValues>
+                                                     MultiBatch, Masked, CacheInput, PackedValues,
+                                                     PackedKeys>
             <<<grid, WarpsPerCta * 32, kDynamicBytes, stream>>>(
                 static_cast<const __nv_bfloat16*>(q.data), input,
                 static_cast<const std::int32_t*>(pos.data), static_cast<std::int8_t*>(cache_k.data),
@@ -228,10 +232,12 @@ void launch_tc_partial_i8(const Tensor& q, CacheInput input, const Tensor& pos, 
                 logical_capacity, wave_splits, scale, static_cast<float*>(partial_acc.data),
                 static_cast<float*>(partial_m.data), static_cast<float*>(partial_l.data));
         };
-        if (packed_values) {
-            issue.template operator()<true>();
+        if (packed_keys) {
+            issue.template operator()<true, true>();
+        } else if (packed_values) {
+            issue.template operator()<true, false>();
         } else {
-            issue.template operator()<false>();
+            issue.template operator()<false, false>();
         }
     };
     if constexpr (TokenTile >= 6) {
@@ -294,7 +300,8 @@ std::int32_t causal_attention_split_capacity(std::int32_t q_heads, std::int32_t 
     }
     (void)paged_kv_storage_layout(cache_storage, kCausalHeadDim);
     const bool i8_family = cache_storage == KvCacheStorage::Int8Group64 ||
-                           cache_storage == KvCacheStorage::RotatedInt8KeyInt4ValueGroup64;
+                           cache_storage == KvCacheStorage::RotatedInt8KeyInt4ValueGroup64 ||
+                           cache_storage == KvCacheStorage::RotatedInt4KeyInt4ValueE8;
     if (q_heads == CausalD256H24Kv4::QHeads) {
         const int capacity =
             causal_small_t_launch_capacity<CausalD256H24Kv4>(envelope, tokens, cache_storage);
@@ -344,7 +351,8 @@ void causal_attention_small_t_launch_for(const Tensor& q, CacheInput input, cons
     const auto splits                = causal_attention_split_capacity(
         Geometry::QHeads, invocation.width, cache.storage, envelope, invocation.batch_size);
     const bool i8_family = cache.storage == KvCacheStorage::Int8Group64 ||
-                           cache.storage == KvCacheStorage::RotatedInt8KeyInt4ValueGroup64;
+                           cache.storage == KvCacheStorage::RotatedInt8KeyInt4ValueGroup64 ||
+                           cache.storage == KvCacheStorage::RotatedInt4KeyInt4ValueE8;
     const std::int32_t wave_splits =
         i8_family && invocation.batch_size == 1
             ? causal_small_t_wave_splits<Geometry>(invocation.width, implementation_window)
@@ -355,8 +363,7 @@ void causal_attention_small_t_launch_for(const Tensor& q, CacheInput input, cons
 #define NINFER_CAUSAL_SMALL_T_DISPATCH(TOKENS, WARPS)                                              \
     do {                                                                                           \
         const auto launch_profile = [&]<bool MultiBatch, bool Masked>() {                          \
-            if (cache.storage == KvCacheStorage::Int8Group64 ||                                    \
-                cache.storage == KvCacheStorage::RotatedInt8KeyInt4ValueGroup64) {                  \
+            if (i8_family) {                                                                       \
                 launch_tc_partial_i8<Geometry, (TOKENS), MultiBatch, Masked>(                      \
                     q, input, pos, scale, cache, invocation, logical_capacity,                     \
                     implementation_window, splits, wave_splits, partial_acc, partial_m, partial_l, \
@@ -449,9 +456,8 @@ void causal_attention_small_t_launch_for(const Tensor& q, CacheInput input, cons
         else
             launch_profile.template operator()<Int8, true, false>();
     };
-    // rk8v4 is an int8-family cache on this fork and takes the same path.
-    if (cache.storage == KvCacheStorage::Int8Group64 ||
-        cache.storage == KvCacheStorage::RotatedInt8KeyInt4ValueGroup64)
+    // rk8v4 and rk4v4-e8 are int8-family caches on this fork and take the same path.
+    if (i8_family)
         launch_for_storage.template operator()<true>();
     else
         launch_for_storage.template operator()<false>();

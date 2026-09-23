@@ -200,4 +200,112 @@ __device__ __forceinline__ int4 kv_cache_int8_dequant_f16x8_from(const std::int8
                      static_cast<int>(packed[2]), static_cast<int>(packed[3]));
 }
 
+// --- packed signed int4 E8 key codec (rk4v4-e8) ------------------------------------------------
+// The rk4v4-e8 key plane stores the rotated key as two signed 4-bit codes per byte under the INT8
+// family's G64 FP16 scale, FP16-RNE(absmax/7). Before rounding, each block of eight consecutive
+// scaled dimensions is snapped to the nearest point of the E8 lattice (D8 or its half-integer
+// coset D8+1/2); the stored code is then that point rounded to an integer and clamped to
+// [-8, 7]. No coset bit is kept, so a coset point loses its half on the way into the code. The
+// read side is therefore exactly the plain packed int4 decode.
+//
+// Every helper below takes one coordinate per lane with the block held by an aligned lane octet
+// (lanes 8j..8j+7), and must be called by the whole warp.
+inline constexpr int kKVCacheInt4KeyMin = -8;
+
+// Nearest D8 point to the octet's vector y: round every coordinate, and when the rounded sum is
+// odd move the coordinate with the largest rounding error (lowest lane on a tie) to its other
+// neighbour, upwards when it rounded exactly.
+__device__ __forceinline__ float kv_cache_e8_nearest_d8(float y, int lane) {
+    constexpr unsigned FullMask = 0xffffffffu;
+    float r = rintf(y);
+    int odd = static_cast<int>(r) & 1;
+#pragma unroll
+    for (int step = 1; step < 8; step <<= 1) { odd ^= __shfl_xor_sync(FullMask, odd, step); }
+    // The parity differs between octets, so the reduction runs unconditionally: a full-mask
+    // shuffle under a branch only some octets take would be undefined.
+    float worst    = fabsf(y - r);
+    int worst_lane = lane;
+#pragma unroll
+    for (int step = 1; step < 8; step <<= 1) {
+        const float other    = __shfl_xor_sync(FullMask, worst, step);
+        const int other_lane = __shfl_xor_sync(FullMask, worst_lane, step);
+        if (other > worst || (other == worst && other_lane < worst_lane)) {
+            worst      = other;
+            worst_lane = other_lane;
+        }
+    }
+    if (odd != 0 && worst_lane == lane) { r += y >= r ? 1.0f : -1.0f; }
+    return r;
+}
+
+// Octet sum in butterfly order. Every lane ends with the same bits because each step adds the
+// same two operands, only commuted; the product is rounded explicitly so the compiler cannot
+// contract it into a lane-asymmetric FMA.
+__device__ __forceinline__ float kv_cache_e8_octet_sq_distance(float x, float p) {
+    constexpr unsigned FullMask = 0xffffffffu;
+    const float d = x - p;
+    float sum     = __fmul_rn(d, d);
+#pragma unroll
+    for (int step = 1; step < 8; step <<= 1) {
+        sum = __fadd_rn(sum, __shfl_xor_sync(FullMask, sum, step));
+    }
+    return sum;
+}
+
+// Nearest E8 point: the closer of the D8 and D8+1/2 candidates, D8 on a tie.
+__device__ __forceinline__ float kv_cache_e8_nearest(float x, int lane) {
+    const float integer_point = kv_cache_e8_nearest_d8(x, lane);
+    const float coset_point   = kv_cache_e8_nearest_d8(x - 0.5f, lane) + 0.5f;
+    const float integer_dist  = kv_cache_e8_octet_sq_distance(x, integer_point);
+    const float coset_dist    = kv_cache_e8_octet_sq_distance(x, coset_point);
+    return coset_dist < integer_dist ? coset_point : integer_point;
+}
+
+__device__ __forceinline__ std::int8_t kv_cache_int4_e8_key_code(float x, float inv_scale,
+                                                                 int lane) {
+    const float scaled = inv_scale == 0.0f ? 0.0f : __fmul_rn(x, inv_scale);
+    const float point  = kv_cache_e8_nearest(scaled, lane);
+    int q              = __float2int_rn(point);
+    q                  = max(kKVCacheInt4KeyMin, min(kKVCacheInt4Max, q));
+    return static_cast<std::int8_t>(q);
+}
+
+// Store one G64 group of rk4v4-e8 key codes. A packed byte holds the adjacent pair (2p, 2p+1),
+// but this lane owns d0 = 64g+lane and d1 = d0+32, so each byte spans lanes l and l^1: exchange
+// the partner's codes and let the even lane of each pair issue the single-byte store. The E8
+// blocks are eight consecutive dimensions, which the aligned lane octets of d0 and d1 each hold.
+// packed_base addresses byte 32g of the token's key row. Must be called by the full warp.
+__device__ __forceinline__ void kv_cache_int4_e8_store_key_group(std::uint8_t* plane,
+                                                                 std::int64_t packed_base, float k0,
+                                                                 float k1, float inverse_scale,
+                                                                 int lane) {
+    constexpr unsigned FullMask = 0xffffffffu;
+    const std::int8_t c0        = kv_cache_int4_e8_key_code(k0, inverse_scale, lane);
+    const std::int8_t c1        = kv_cache_int4_e8_key_code(k1, inverse_scale, lane);
+    const int partner0          = __shfl_xor_sync(FullMask, static_cast<int>(c0), 1);
+    const int partner1          = __shfl_xor_sync(FullMask, static_cast<int>(c1), 1);
+    if ((lane & 1) == 0) {
+        plane[packed_base + (lane >> 1)] = kv_cache_int4_pack(c0, static_cast<std::int8_t>(partner0));
+        plane[packed_base + (lane >> 1) + 16] =
+            kv_cache_int4_pack(c1, static_cast<std::int8_t>(partner1));
+    }
+}
+
+// Expand the eight packed bytes holding dimensions [d, d+16) into sixteen signed int8 codes in
+// dimension order, so an int4 key row can be staged into the same shared layout, and consumed by
+// the same s8 MMA, as an INT8 key row.
+__device__ __forceinline__ int4 kv_cache_int4_unpack_i8x16(uint2 packed) {
+    const auto expand = [](unsigned word, unsigned& first, unsigned& second) {
+        const unsigned low  = __vsub4((word & 0x0f0f0f0fu) ^ 0x08080808u, 0x08080808u);
+        const unsigned high = __vsub4(((word >> 4) & 0x0f0f0f0fu) ^ 0x08080808u, 0x08080808u);
+        first               = __byte_perm(low, high, 0x5140);
+        second              = __byte_perm(low, high, 0x7362);
+    };
+    unsigned out[4];
+    expand(packed.x, out[0], out[1]);
+    expand(packed.y, out[2], out[3]);
+    return make_int4(static_cast<int>(out[0]), static_cast<int>(out[1]), static_cast<int>(out[2]),
+                     static_cast<int>(out[3]));
+}
+
 } // namespace ninfer::ops

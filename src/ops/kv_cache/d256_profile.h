@@ -93,6 +93,13 @@ inline constexpr D256KVCacheProfile d256_kv_cache_profile(ninfer::KvCacheStorage
         return {DType::FP8_E4M3FN, DType::U8, kD256KVCacheHeadDim, kD256KVCacheHeadDim / 2,
                 256,               DType::FP16, 1,                  DType::U8,
                 kD256KVCacheHeadDim / 16};
+    case ninfer::KvCacheStorage::RotatedInt4KeyInt4ValueE8:
+        // Both planes are packed signed int4. The key keeps the INT8 family's G64 FP16 scale; the
+        // value plane is rk8v4's G32 one. A U8 key plane is shared with Nvfp4Group16, so kernels
+        // must dispatch on the storage, never on the key dtype alone.
+        return {DType::U8, DType::U8,   kD256KVCacheHeadDim / 2, kD256KVCacheHeadDim / 2,
+                64,        DType::FP16, 4,                       DType::FP16,
+                8};
     }
     throw std::invalid_argument("unknown KV-cache storage profile");
 }
